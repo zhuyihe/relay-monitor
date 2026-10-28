@@ -645,8 +645,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 每日利润页的多天范围（近 7 天、本月、开始算以来、自选范围）：每条绑定逐天相加，不把几天并成一个窗口去读。
   //   - 已固定的整天（过去的日子、账本里有这一行）：取账本那一行的收入、上游成本；
-  //   - 没固定的天、自选范围头尾的半天：只现读那一天（窗口就是那一天和范围的交集），用那一天自己记下的 Key（reconciliation_rule_day_keys）；
-  //   - 永远不固定的日子（sticky 原因，状态行记着，Key 在别的上游那几天也是）：这一天是「—」，不读、不算进合计。
+  //   - 现读只给还没到固定时候的尾巴（今天、昨天）和自选范围头尾的半天，窗口就是那一天和范围的交集，用那一天自己记下的 Key（reconciliation_rule_day_keys）；
+  //     一条绑定一次页面最多现读这几天，不随范围变长；
+  //   - 其余没固定的天一律不现读：那一天是「—」，不进合计，页面写「有 N 天还没固定，没算进来」；现读失败的天同样是「—」，不悄悄算少；
+  //   - 永远不固定的日子（sticky 原因，状态行记着，Key 在别的上游那几天也是）：这一天是「—」，不读、不算进合计；
+  //     RESETTLE_SHRUNK、RESETTLE_TOO_OLD 的天账本里有固定的数，多天合计照取账本（和单天一致）；
+  //   - Sub2API 的上游只能按整天读：自选范围的半天头、半天尾不读，那半天不算。
   // 每条绑定的结果以最后一天的现读结果为底（状态、倍率、分组），数换成逐天相加的和；窗口换成这条绑定整个范围的窗口，同一页各行的窗口一致。
   const moneyOfResult = (result) => {
     const income = Number(result.downstream?.knownAmountUsd ?? result.downstream?.amountUsd);
@@ -671,10 +675,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const sticky = new Map();
     for (const state of await repository.listSettlementStates(ruleIds, { billDates: per.flatMap((item) => item.labels) }).catch(() => [])) {
       if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
-        if (!sticky.has(state.ruleId)) sticky.set(state.ruleId, new Set());
-        sticky.get(state.ruleId).add(state.billDate);
+        if (!sticky.has(state.ruleId)) sticky.set(state.ruleId, new Map());
+        sticky.get(state.ruleId).set(state.billDate, state.manualReason);
       }
     }
+    const notCounted = []; // { ruleId, day, reason }：没算进来的天（没固定、现读失败、Sub2API 半天）；sticky 的日子页面本来就带原因，不在这里
     // 现读请求：按（起点, 终点）合并，同一天的几条绑定一次读。「今天」（范围终点在今天里）用 today 预设，和单天一样走实时窗口
     const requests = new Map();
     const need = (rule, key, requestInput) => {
@@ -684,21 +689,28 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const requestFor = ({ tz, w }, day) => {
       const dayStart = dayStartInTz(day, tz), dayEnd = shiftedDayStartInTz(dayStart, 1, tz), start = Math.max(w.startMs, dayStart), end = Math.min(w.endMs, dayEnd);
       const todayLive = day === dayKeyInTz(now, tz) && w.endMs >= now;
-      return { key: todayLive ? `today:${dayStart}` : `${start}:${end}`, input: todayLive ? { preset: "today" } : { preset: "custom", startMs: start, endMs: end, noCap: true }, full: start === dayStart && end === dayEnd };
+      return { key: todayLive ? `today:${dayStart}` : `${start}:${end}`, input: todayLive ? { preset: "today" } : { preset: "custom", startMs: start, endMs: end, noCap: true }, full: todayLive || (start === dayStart && end === dayEnd) };
     };
     const plan = new Map();
     for (const item of per) {
       const { rule, labels, tz } = item, today = dayKeyInTz(now, tz), started = reconciliationAccountingStart(rule);
       const startDay = Number.isFinite(started) ? dayKeyInTz(started, tz) : labels[0];
       const entry = { ledger: { income: 0, cost: 0, days: 0 }, live: [] };
+      const yesterday = shiftDayLabel(today, -1);
       for (const day of labels) {
-        if (day < startDay || sticky.get(rule.id)?.has(day)) continue;
-        const fact = facts.get(rule.id)?.get(day), request = requestFor(item, day);
+        if (day < startDay) continue;
+        const stickyReason = sticky.get(rule.id)?.get(day), fact = facts.get(rule.id)?.get(day), request = requestFor(item, day);
+        if (stickyReason === "KEY_IN_OTHER_UPSTREAM") continue; // 当天只要有一刻 Key 在别的上游，这天就是「—」，有账本行也不算
         if (request.full && day < today && fact) {
           entry.ledger.income += fact.revenueUsd ?? 0;
           entry.ledger.cost += fact.costBasis === "fixed" ? 0 : fact.costUsd ?? 0; // 固定成本的上游那天上游成本记 0（毛利不扣 cost_usd）
           entry.ledger.days += 1;
-        } else { need(rule, request.key, request.input); entry.live.push({ day, key: request.key }); }
+        } else if (stickyReason) continue;
+        else if (!request.full) {
+          if (rule.provider === "sub2api") notCounted.push({ ruleId: rule.id, day, reason: "SUB2_WHOLE_DAY" });
+          else { need(rule, request.key, request.input); entry.live.push({ day, key: request.key }); }
+        } else if (day === today || day === yesterday) { need(rule, request.key, request.input); entry.live.push({ day, key: request.key }); }
+        else notCounted.push({ ruleId: rule.id, day, reason: "NOT_SETTLED" });
       }
       plan.set(rule.id, entry);
     }
@@ -732,7 +744,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days;
       for (const live of entry.live) {
         const piece = live.key === primary.key ? response.results.find((row) => row.rule.id === rule.id) : resultAt(live.key, rule.id, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`);
-        if (!piece || !countsInSummary(piece)) continue;
+        if (!piece || !countsInSummary(piece)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
         const money = moneyOfResult(piece);
         income += money.income; cost += money.cost; counted += 1;
       }
@@ -742,7 +754,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             calculation: addKeys(skeleton.calculation, ["profitUsd"], income - cost) };
       rows.push(merged);
     }
-    return { response, results: rows, stickyDays: sticky };
+    return { response, results: rows, stickyDays: sticky, notCounted };
   }
 
   function serializeWrite(write) {
@@ -959,8 +971,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (ref && ref.upstreamStationId !== rule.upstreamStationId) {
           keyIssues.set(rule.id, issueFor(rule, "KEY_IN_OTHER_UPSTREAM", { channelId: channelIds[0], upstreamStationId: ref.upstreamStationId }));
           // 当天只要有一刻 Key 在别的上游，这一天就是「—」、不算进合计，Key 回来以后也不补成少算的数：记成永远不固定的日子（sticky）
-          await repository.recordSettlementState(rule.id, dayKeyInTz(observedAt, rule.timezone), { op: "manual", reason: "KEY_IN_OTHER_UPSTREAM", sourceVersion: null, attempts: 0,
-            manualSince: now, firstFailedAt: now, lastAttemptAt: now, nextAttemptAt: null, detail: { code: "KEY_IN_OTHER_UPSTREAM" } }, now).catch(() => {});
+          const stateDay = dayKeyInTz(observedAt, rule.timezone), movedMemo = (rt._movedDayMemo ||= new Set());
+          if (!movedMemo.has(`${rule.id}|${stateDay}`)) { // 这一天的状态行已经记过就不再写
+            const already = (await repository.listSettlementStates([rule.id], { billDates: [stateDay] }).catch(() => []))[0];
+            if (already?.manualReason === "KEY_IN_OTHER_UPSTREAM") movedMemo.add(`${rule.id}|${stateDay}`);
+            else await repository.recordSettlementState(rule.id, stateDay, { op: "manual", reason: "KEY_IN_OTHER_UPSTREAM", sourceVersion: null, attempts: 0,
+              manualSince: now, firstFailedAt: now, lastAttemptAt: now, nextAttemptAt: null, detail: { code: "KEY_IN_OTHER_UPSTREAM" } }, now).then(() => movedMemo.add(`${rule.id}|${stateDay}`), () => {});
+          }
           continue;
         }
         // 同一条绑定的渠道各用各的 Key、几把 Key 的渠道：这一版也不算，不记 Key、不进需处理，页面上只提示一句；
@@ -982,12 +999,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const backfilled = (rt._dayKeyBackfilled ||= new Set());
         if (!backfilled.has(rule.id)) {
           const started = reconciliationAccountingStart(rule), startDay = Number.isFinite(started) ? dayKeyInTz(started, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
-          const have = startDay <= yesterday ? (await repository.listDayKeys([rule.id], startDay, today).catch(() => null))?.[rule.id] : {};
-          if (have && !Object.keys(have).length && startDay <= yesterday) {
+          const have = startDay <= yesterday ? await repository.listDayKeys([rule.id], startDay, yesterday).then((all) => all[rule.id] || {}, () => null) : {};
+          if (have) {
+            // 只补还没有记录的天；最多补最近 800 天（超出的丢最老的）。前提：过去的天用的都是绑定现在配的这把 Key（装读取服务之前没手动换过 Key 才对）
             const rows = [];
-            for (let day = startDay, guard = 0; day <= yesterday && guard < 800; day = shiftDayLabel(day, 1), guard += 1) rows.push({ billDate: day, upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
-            await repository.recordDayKeys(rule.id, rows).then(() => backfilled.add(rule.id), () => { pending = true; });
-          } else if (have) backfilled.add(rule.id);
+            for (let day = yesterday, guard = 0; day >= startDay && guard < 800; day = shiftDayLabel(day, -1), guard += 1) {
+              if (!have[day]) rows.push({ billDate: day, upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
+            }
+            if (rows.length) await repository.recordDayKeys(rule.id, rows).then(() => backfilled.add(rule.id), () => { pending = true; });
+            else backfilled.add(rule.id);
+          }
         }
         const changed = Number(ref.tokenId) !== Number(rule.tokenId);
         if (changed) {
@@ -3652,6 +3673,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
       const labels = dayLabelsOf(window, tz, now);
       const results = daily ? daily.results : response.results;
+      // 多天范围里没算进来的天（没固定、现读失败、Sub2API 半天）：页面写一句，不悄悄算少
+      const notCountedDays = daily ? { count: new Set(daily.notCounted.filter((item) => item.reason !== "SUB2_WHOLE_DAY").map((item) => item.day)).size, sub2Whole: daily.notCounted.some((item) => item.reason === "SUB2_WHOLE_DAY") } : { count: 0, sub2Whole: false };
       const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
       // 看一天时「没算进的模型」的名字从那天的明细里拿（只有那几行、一行一次）
       const missing = new Map();
@@ -3696,7 +3719,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unaccountedUpstreamCostUsd,
         unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
-        unsupportedChannels: await unsupportedChannels(),
+        unsupportedChannels: await unsupportedChannels(), notCountedDays,
         rateUnset, fixedOffProfitStations: response.fixedOffProfitStations || [] };
     },
     // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有

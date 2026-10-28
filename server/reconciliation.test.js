@@ -9875,16 +9875,16 @@ const dayKeyIds = async (f, from = "2026-10-10", to = "2026-10-14") => Object.fr
 test("每天的 Key：每轮记下渠道今天用的 Key；换成同一个上游的另一把 Key 时绑定的 Key 换成新的，换的那天两把都记，没换的天只有一把", async (t) => {
   const { f, agent, keyTen, round } = await readerOutageFixture(t);
   await round("2026-10-11T01:00:00Z"); await round("2026-10-11T01:10:00Z"); // 第一轮锚定绑定，第二轮才记 Key
-  assert.deepEqual(await dayKeyIds(f), { "2026-10-11": [9] });
+  assert.deepEqual(await dayKeyIds(f), { "2026-10-10": [9], "2026-10-11": [9] }, "第一次认出时补了开始算那天到昨天（10-10），用绑定当时配的那把");
   await round("2026-10-11T02:00:00Z");
-  assert.deepEqual(await dayKeyIds(f), { "2026-10-11": [9] }, "同一把同一天不重复记");
+  assert.deepEqual(await dayKeyIds(f), { "2026-10-10": [9], "2026-10-11": [9] }, "同一把同一天不重复记");
   agent.key = keyTen;
   await round("2026-10-11T05:00:00Z");
   const rule = await f.repository.getRule("rr_live");
   assert.deepEqual([rule.tokenId, rule.keyIssue ?? null], [10, null], "绑定的 Key 换成了新的，没有需处理");
-  assert.deepEqual(await dayKeyIds(f), { "2026-10-11": [9, 10] }, "换的那天两把都记");
+  assert.deepEqual(await dayKeyIds(f), { "2026-10-10": [9], "2026-10-11": [9, 10] }, "换的那天两把都记");
   await round("2026-10-12T05:00:00Z");
-  assert.deepEqual(await dayKeyIds(f), { "2026-10-11": [9, 10], "2026-10-12": [10] }, "第二天只有新的一把");
+  assert.deepEqual(await dayKeyIds(f), { "2026-10-10": [9], "2026-10-11": [9, 10], "2026-10-12": [10] }, "第二天只有新的一把");
 });
 
 test("每天的 Key：换 Key 那天的上游成本是两把 Key 各取一次整天的相加；没换的天只取一把", async (t) => {
@@ -9907,7 +9907,7 @@ test("每天的 Key：读取服务断过一段又恢复，渠道在断的时候�
   await round("2026-10-12T01:00:00Z"); await round("2026-10-12T05:00:00Z");
   agent.down = false;
   await round("2026-10-13T02:00:00Z"); // 恢复：第一次认出新 Key
-  assert.deepEqual(await dayKeyIds(f), { "2026-10-11": [9, 10], "2026-10-12": [9, 10], "2026-10-13": [9, 10] }, "断掉的几天两把都算");
+  assert.deepEqual(await dayKeyIds(f), { "2026-10-10": [9], "2026-10-11": [9, 10], "2026-10-12": [9, 10], "2026-10-13": [9, 10] }, "断掉的几天两把都算");
   assert.equal((await f.repository.getRule("rr_live")).tokenId, 10);
 });
 
@@ -9942,7 +9942,7 @@ test("渠道的 Key 对不上上游：Key 不在已加的上游里、上游令�
   await round("2026-10-11T17:00:00Z"); // 10-11 结束，有一半时间 Key 是认不出的
   assert.equal(booked("2026-10-11"), 0, "对不上的那天不固定");
   assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "绑定的 Key 不动");
-  assert.deepEqual(await dayKeyIds(f), { "2026-10-11": [9] }, "认不出的 Key 不记");
+  assert.deepEqual(await dayKeyIds(f), { "2026-10-10": [9], "2026-10-11": [9] }, "认不出的 Key 不记（10-10 是第一次认出时补的）");
   agent.key = keyNine;
   await round("2026-10-12T01:00:00Z");
   rule = await f.repository.getRule("rr_live");
@@ -9975,4 +9975,20 @@ test("没配读取服务（线上现状，靠手动绑定在算）：这天的 K
   const rule = await f.repository.getRule("rr_live");
   assert.equal(rule.keyIssue ?? null, null, "没有 Key 的事项");
   assert.deepEqual((await f.repository.listDayKeys(["rr_live"], "2026-10-01", "2026-10-31"))["rr_live"] ?? {}, {}, "没读取服务就不记每天的 Key");
+});
+
+test("读取服务第一次认出绑定：从开始算那天到昨天每天补一行 Key（用绑定当时配的那把），已有的不动，以后不重复补", async (t) => {
+  const { f, round } = await readerOutageFixture(t);
+  const rule0 = await f.repository.getRule("rr_live");
+  await round("2026-10-11T01:00:00Z"); await round("2026-10-11T01:10:00Z");
+  const rule = await f.repository.getRule("rr_live");
+  const days = (await f.repository.listDayKeys(["rr_live"], "2000-01-01", "2100-01-01"))["rr_live"] || {};
+  const list = Object.keys(days).sort();
+  assert.ok(list.length >= 1, "补了记录：" + JSON.stringify(days));
+  for (const day of list) assert.deepEqual(days[day].map((key) => key.tokenId), [rule0.tokenId], day);
+  assert.ok(list.at(-1) >= "2026-10-11", "含今天");
+  const before = JSON.stringify(days);
+  await round("2026-10-11T01:20:00Z");
+  assert.equal(JSON.stringify((await f.repository.listDayKeys(["rr_live"], "2000-01-01", "2100-01-01"))["rr_live"]), before, "不重复补");
+  assert.ok(list.includes("2026-10-10") && list.length >= 3, "开始算那天到昨天都补了：" + list.join(","));
 });
