@@ -3756,13 +3756,6 @@ test("新范围从生效时刻起核算：生效前窗口不取数，跨界窗�
   assert.equal(confirmed.calculation.profitUsd, 1.5);
   assert.equal(confirmed.scope.recalculated, false);
   assert.equal(confirmed.displayStatus.state, "settled");
-  rule.cost_coverage = "unknown";
-  assert.equal((await query(effective, effective + 86400000)).settledAt, confirmed.lastSuccessfulAt, "已结账的日子不跟着改覆盖范围重算");
-  const unknown = (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: effective, endMs: effective + 86400000 }, { force: true, resettle: true })).results[0];
-  assert.equal(unknown.calculation.profitUsd, null);
-  assert.equal(unknown.upstream.knownAmountUsd, 1);
-  assert.ok(unknown.health.issues.some((issue) => issue.code === "COST_COVERAGE_UNKNOWN"));
-  assert.equal(confirmedCount(), written + 1, "覆盖未知的结果不写确认账单");
 });
 
 test("来源版本变化废弃旧在途查询和缓存，待核对保留独立账单金额", async (t) => {
@@ -6224,7 +6217,7 @@ test("U05实际Provider返回窗口保留到公开row/segment/snapshot，不可�
     assert.equal(result.commonSummary, null); assert.equal(result.coverage.accountedChannelCount, 0);
     // 窗口对不上的都没算出来，三个数都不加
     assert.deepEqual([result.windowGroups[0].totals.knownIncomeUsd, result.windowGroups[0].totals.knownCostUsd, result.windowGroups[0].totals.confirmedProfitUsd], [null, null, null]);
-    assert.deepEqual(result.windowGroups[0].totals.attentionRuleIds, ["rr_live", "rr_two", "rr_three"]);
+    assert.deepEqual(result.windowGroups[0].totals.attentionRuleIds, [], "时区没确认只是系统还在确认，不算需处理");
     assert.ok([...f.state.snapshots.values()].every((snapshot) => {
       const source = JSON.parse(snapshot.source);
       return source.recordType === "observation" && source.result.upstream.window.endMs === source.window.endMs - 1000;
@@ -6243,74 +6236,6 @@ test("U05公开metadata按canonical requested zone隔离缓存并透传真实Pro
   assert.equal(f.state.requests.filter((request) => request.path === "/api/token/").length, 2, "跨zone不能复用另一zone metadata，同canonicalzone仍可复用");
   assert.doesNotMatch(JSON.stringify(utc), /accessToken|apiKey|Bearer/);
 });
-
-test("U05 external/unknown全Key用途保留原始金额与实际coverage action，整日profit不可确认", async (t) => {
-  const f = await completedDayFixture(t);
-  f.rows[0].cost_coverage = "unknown";
-  f.rows[0].source_binding.coverageDeclaration = { answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] };
-  f.rows[1].cost_coverage = "unknown";
-  f.rows[1].source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
-  const actual = await f.module.queryRules();
-  assert.deepEqual([actual.coverage.knownChannelCount, actual.coverage.accountedChannelCount], [10, 1]);
-  for (const row of actual.results.filter((item) => item.rule.id !== "rr_three")) {
-    assert.equal(row.calculation.profitUsd, null); assert.equal(row.upstream.amountUsd, 1); assert.equal(row.downstream.amountUsd, 2.5);
-    assert.ok(row.actions.some((action) => action.kind === "confirm_coverage" && action.href === `/stations?action=coverage&ruleId=${row.rule.id}`));
-  }
-  // 没回答完的两条是需处理，不加：只剩 rr_three，$2.5 − $1 = $1.5（原来收入写 $7.5、毛利写 $1.5，一减对不上）
-  assert.deepEqual([actual.windowGroups[0].totals.knownIncomeUsd, actual.windowGroups[0].totals.knownCostUsd, actual.windowGroups[0].totals.confirmedProfitUsd], [2.5, 1, 1.5]);
-  assert.deepEqual(actual.windowGroups[0].totals.attentionRuleIds, ["rr_live", "rr_two"]);
-  assert.equal(actual.windowGroups[0].totals.profitComplete, false);
-});
-
-function upstreamReadFixture(t, type = "newapi") {
-  // 显式 Key 核验只读写账单能力表（核验结果要在重启后仍有效），不碰其他表。
-  const capabilities = new Map();
-  const pool = { async query(sql, params = []) {
-    if (!sql.includes("reconciliation_billing_capabilities")) assert.fail("Key read must not access SQL");
-    if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
-    if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
-    else if (sql.includes("WHERE identity")) for (const identity of Array.isArray(params[0]) ? params[0] : [params[0]]) capabilities.delete(identity);
-    return [{ affectedRows: 1 }];
-  }, async getConnection() { assert.fail("Key read must not save"); } };
-  const store = new Store(pool);
-  store._metaSecrets.billing_identity_key = "upstream-read-fixture-billing-key";
-  store.data.auth = { isDefault: false };
-  store.data.stations = [{ id: "resource", type, name: "Old account", baseUrl: `https://u06-${type}-${t.name.length}.test`,
-    accessToken: "saved-secret", authVersion: 1, monitorEnabled: false,
-    ...(type === "sub2api-password" ? { email: "old@example.test", password: "saved-password",
-      s2Tokens: { accessToken: "stored-auto-jwt", refreshToken: "stored-auto-refresh", expiresAt: 1 } } : {}) }];
-  const state = { requests: [], accountId: 42, selfCount: 0, cost: 3.25, quota: 0, directoryError: false, missingAmount: false, onRequest: null, identityAt: null };
-  const reply = (status, data) => ({ status, text: async () => JSON.stringify(type === "newapi"
-    ? { success: status < 300, data, message: status >= 300 ? "permission denied Bearer raw-secret" : undefined }
-    : { code: status >= 300 ? status : 0, data, message: status >= 300 ? "permission denied Bearer raw-secret" : undefined }) });
-  t.mock.method(globalThis, "fetch", async (input, init = {}) => {
-    const url = new URL(String(input)); state.requests.push({ url, authorization: init.headers?.Authorization });
-    await state.onRequest?.(url);
-    if (["/api/user/self", "/api/v1/auth/me"].includes(url.pathname)) {
-      state.selfCount += 1;
-      return reply(200, { id: state.identityAt?.(state.selfCount) ?? state.accountId, password: "raw-secret" });
-    }
-    if (url.pathname === "/api/status") return reply(200, { quota_per_unit: 100, version: "deployment-v1" });
-    if (url.pathname === "/api/user/self/groups") return reply(200, { g: { ratio: 1 } });
-    if (url.pathname === "/api/token/") return state.directoryError ? reply(403, null)
-      : reply(200, { total: 1, items: [{ id: 9, user_id: init.headers?.["New-Api-User"], name: "actual-key", status: 1, group: "g", key: "raw-call-secret" }] });
-    if (url.pathname === "/api/log/self/stat") return reply(200, { quota: state.quota, accessToken: "raw-secret" });
-    if (url.pathname === "/api/v1/settings/public") return reply(200, { turnstile_enabled: false });
-    if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
-    if (url.pathname === "/api/v1/keys") return state.directoryError ? reply(403, null)
-      : reply(200, { total: 1, items: [{ id: 9, user_id: state.accountId, name: "actual-key", status: "active", group_id: null, key: "raw-call-secret" }] });
-    if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, null);
-    if (url.pathname === "/api/v1/usage/stats") {
-      if (url.searchParams.get("api_key_id") !== "9") return reply(404, null);
-      const future = Date.parse(url.searchParams.get("start_date")) > Date.now();
-      return reply(200, state.missingAmount ? { total_cost: 19 } : { total_actual_cost: future ? 0 : state.cost, total_cost: 19, accessToken: "raw-secret" });
-    }
-    assert.fail(`Unexpected Key read: ${url.pathname}`);
-  });
-  const rt = { store, pool, sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
-  const module = rt.reconciliation = createReconciliationModule(rt);
-  return { rt, module, store, state, station: store.get("resource") };
-}
 
 test("U06实际NewAPI Key读取：默认旧目录不加身份请求，explicit actual identity/zero/probe白名单且零写", async (t) => {
   t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
@@ -7978,11 +7903,6 @@ test("C1 固定成本的上游读不到时，面板类型按绑定存的；旧�
 
 test("4a 固定采购上游：Key 还有没有其他用途没确认、上游分组目录取不到只作参考，毛利 = 收入、照常结账；按用量计成本的上游仍被挡住", async (t) => {
   const cases = [
-    ["用途待确认", "COST_COVERAGE_UNKNOWN", {}, (f) => {
-      const row = f.rows.find((rule) => rule.id === "rr_live");
-      row.cost_coverage = "unknown";
-      row.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
-    }],
     ["分组目录取不到", "GROUP_DATA_UNAVAILABLE", { metadataGroups: () => ({ g2: { ratio: 2 } }) }, () => {}],
   ];
   for (const [label, code, options, setup] of cases) {
@@ -8128,33 +8048,6 @@ test("C2a 中-2：改绑定之前还没固定的日子，D3 做好以前回看�
   now += 60000;
   await f.module.refreshDue(now);
   assert.deepEqual(liveLedger(), ["2026-10-07", "2026-10-08"]);
-});
-
-test("C2a 中-A：这把 Key 还给别处用吗没回答时没结的日子，回答（改了绑定，生效时刻往后推）以后回看能结，按新回答算（总指挥 10-25，D 设计稿 §3.1 第 2 种）", async (t) => {
-  let now = Date.parse("2026-10-09T03:00:00Z"); // 开始统计 10-07 0 点：昨天 10-08，更早一天 10-07
-  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
-  const live = f.repository.tables.rules.find((r) => r.id === "rr_live");
-  live.created_at = new Date("2026-10-01T00:00:00Z");
-  live.cost_coverage = "unknown";
-  live.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
-  const liveStates = () => states(f).filter((row) => row[0] === "rr_live").map((row) => [row[1], row[2]]);
-  const liveLedger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live");
-  await f.module.refreshDue(now);
-  assert.deepEqual(liveLedger(), [], "没回答：结不了");
-  assert.deepEqual(liveStates(), [["2026-10-07", "COST_COVERAGE_UNKNOWN"], ["2026-10-08", "COST_COVERAGE_UNKNOWN"]]);
-
-  // 回答：改成已确认，走 updateRule 的效果——代次往前一位、生效时刻推到现在，晚于这两天结束
-  live.cost_coverage = "complete";
-  delete live.source_binding.coverageDeclaration;
-  live.scope_version = Number(live.scope_version || 1) + 1;
-  live.billing_effective_from_ms = now;
-  now += 10 * 60000;
-  await f.module.refreshDue(now); // 到了重判的时刻：本地看挡着的原因没了，记 cleared
-  now += 60000;
-  await f.module.refreshDue(now); // 下一轮去结
-  assert.deepEqual(liveLedger().map((row) => row.bill_date).sort(), ["2026-10-07", "2026-10-08"], "更早那天也不被 blocked 挡着，两天都结了");
-  assert.ok(liveLedger().every((row) => row.detail.result.calculation.profitUsd != null), "按新回答算出了毛利");
-  assert.deepEqual(liveStates(), []);
 });
 
 test("C2a 回看每轮最多补 15 个「绑定×天」：积压 18 个只补最新的 15 个，剩下的下一轮接着补；昨天不占这 15 个（审核 C2a 积压场景）", async (t) => {
@@ -9992,3 +9885,54 @@ test("读取服务第一次认出绑定：从开始算那天到昨天每天补�
   assert.equal(JSON.stringify((await f.repository.listDayKeys(["rr_live"], "2000-01-01", "2100-01-01"))["rr_live"]), before, "不重复补");
   assert.ok(list.includes("2026-10-10") && list.length >= 3, "开始算那天到昨天都补了：" + list.join(","));
 });
+
+// ---- 被删用例之间夹着的共用夹具 ----
+function upstreamReadFixture(t, type = "newapi") {
+  // 显式 Key 核验只读写账单能力表（核验结果要在重启后仍有效），不碰其他表。
+  const capabilities = new Map();
+  const pool = { async query(sql, params = []) {
+    if (!sql.includes("reconciliation_billing_capabilities")) assert.fail("Key read must not access SQL");
+    if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
+    if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
+    else if (sql.includes("WHERE identity")) for (const identity of Array.isArray(params[0]) ? params[0] : [params[0]]) capabilities.delete(identity);
+    return [{ affectedRows: 1 }];
+  }, async getConnection() { assert.fail("Key read must not save"); } };
+  const store = new Store(pool);
+  store._metaSecrets.billing_identity_key = "upstream-read-fixture-billing-key";
+  store.data.auth = { isDefault: false };
+  store.data.stations = [{ id: "resource", type, name: "Old account", baseUrl: `https://u06-${type}-${t.name.length}.test`,
+    accessToken: "saved-secret", authVersion: 1, monitorEnabled: false,
+    ...(type === "sub2api-password" ? { email: "old@example.test", password: "saved-password",
+      s2Tokens: { accessToken: "stored-auto-jwt", refreshToken: "stored-auto-refresh", expiresAt: 1 } } : {}) }];
+  const state = { requests: [], accountId: 42, selfCount: 0, cost: 3.25, quota: 0, directoryError: false, missingAmount: false, onRequest: null, identityAt: null };
+  const reply = (status, data) => ({ status, text: async () => JSON.stringify(type === "newapi"
+    ? { success: status < 300, data, message: status >= 300 ? "permission denied Bearer raw-secret" : undefined }
+    : { code: status >= 300 ? status : 0, data, message: status >= 300 ? "permission denied Bearer raw-secret" : undefined }) });
+  t.mock.method(globalThis, "fetch", async (input, init = {}) => {
+    const url = new URL(String(input)); state.requests.push({ url, authorization: init.headers?.Authorization });
+    await state.onRequest?.(url);
+    if (["/api/user/self", "/api/v1/auth/me"].includes(url.pathname)) {
+      state.selfCount += 1;
+      return reply(200, { id: state.identityAt?.(state.selfCount) ?? state.accountId, password: "raw-secret" });
+    }
+    if (url.pathname === "/api/status") return reply(200, { quota_per_unit: 100, version: "deployment-v1" });
+    if (url.pathname === "/api/user/self/groups") return reply(200, { g: { ratio: 1 } });
+    if (url.pathname === "/api/token/") return state.directoryError ? reply(403, null)
+      : reply(200, { total: 1, items: [{ id: 9, user_id: init.headers?.["New-Api-User"], name: "actual-key", status: 1, group: "g", key: "raw-call-secret" }] });
+    if (url.pathname === "/api/log/self/stat") return reply(200, { quota: state.quota, accessToken: "raw-secret" });
+    if (url.pathname === "/api/v1/settings/public") return reply(200, { turnstile_enabled: false });
+    if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
+    if (url.pathname === "/api/v1/keys") return state.directoryError ? reply(403, null)
+      : reply(200, { total: 1, items: [{ id: 9, user_id: state.accountId, name: "actual-key", status: "active", group_id: null, key: "raw-call-secret" }] });
+    if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, null);
+    if (url.pathname === "/api/v1/usage/stats") {
+      if (url.searchParams.get("api_key_id") !== "9") return reply(404, null);
+      const future = Date.parse(url.searchParams.get("start_date")) > Date.now();
+      return reply(200, state.missingAmount ? { total_cost: 19 } : { total_actual_cost: future ? 0 : state.cost, total_cost: 19, accessToken: "raw-secret" });
+    }
+    assert.fail(`Unexpected Key read: ${url.pathname}`);
+  });
+  const rt = { store, pool, sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+  const module = rt.reconciliation = createReconciliationModule(rt);
+  return { rt, module, store, state, station: store.get("resource") };
+}

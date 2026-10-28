@@ -22,6 +22,8 @@ function codedError(code, message, extra = {}) {
 const groupKeyOf = (upstreamStationId, tokenId) => `${upstreamStationId}:${tokenId}`;
 
 // 自动开始失败（预览依据变了、账单能力没验证……）以后多久再试：10 分钟起，每次翻倍，最多 1 小时——不能每轮轮询都把这一组再预览一遍
+// 默认每把 Key 只给用户站上的渠道用：上游没设 accountUse 时按 only_mine 处理（自动开始照常，也不问「这把 Key 还给别处用吗」）；用户明确设过别的值的照旧
+const onlyMine = (upstream) => !upstream?.accountUse || upstream.accountUse === "only_mine";
 const AUTO_START_RETRY_MIN_MS = 10 * 60 * 1000, AUTO_START_RETRY_MAX_MS = 60 * 60 * 1000, AUTO_START_MAX_GROUPS = 3;
 
 export function createChannelProfitModule(rt, { identify = identifyChannelsCached, randomId = randomUUID, now = () => Date.now() } = {}) {
@@ -164,12 +166,12 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     for (const group of wanted.values()) {
       const upstream = rt.store.get(group.upstreamStationId);
       // 自动开始：用 fresh 识别的这一组再判断一遍——上游答了「只给我的渠道用」才开；这一组里只要有一个渠道是用户停过的，整组不自动开始（不是失败，也不退避）
-      if (source === "auto" && (upstream?.accountUse !== "only_mine" || state.channels.some((channel) => channel.groupKey === group.groupKey && channel.optedOut))) {
+      if (source === "auto" && (!onlyMine(upstream) || state.channels.some((channel) => channel.groupKey === group.groupKey && channel.optedOut))) {
         skipped.push({ groupKey: group.groupKey, channelIds: group.channelIds });
         continue;
       }
       let declaration = null;
-      if (upstream?.accountUse === "only_mine") declaration = normalizeCoverageDeclaration({ answer: "none" });
+      if (onlyMine(upstream)) declaration = normalizeCoverageDeclaration({ answer: "none" });
       else if (coverage?.[group.groupKey] != null) { try { declaration = normalizeCoverageDeclaration(coverage[group.groupKey]); } catch { declaration = null; } } // 格式不对只算这一组没答
       if (!declaration) {
         for (const channelId of group.channelIds.filter((id) => ids.includes(id))) blocked.push({ channelId, code: "COVERAGE_ANSWER_REQUIRED", groupKey: group.groupKey });
@@ -213,7 +215,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const candidates = [];
     for (const group of state.groups) {
       if (candidates.length >= AUTO_START_MAX_GROUPS) break;
-      if (rt.store.get(group.upstreamStationId)?.accountUse !== "only_mine") continue;
+      if (!onlyMine(rt.store.get(group.upstreamStationId))) continue;
       if (group.channelIds.some((id) => state.channels.find((channel) => channel.channelId === id)?.optedOut)) continue;
       if ((backoff.get(`${ownStationId}:${group.groupKey}`)?.nextAt ?? 0) > at) continue;
       candidates.push(group);

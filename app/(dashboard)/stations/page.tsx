@@ -18,13 +18,12 @@ import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { failureText, refreshAllText, refreshOneText } from "../../../lib/error-copy";
 import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES } from "../../../lib/channel-onboarding.js";
-import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, RefreshFailedBanner, Skeleton } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
-import { Seg, TabPanel, Tabs } from "../../components/seg";
+import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
@@ -44,14 +43,6 @@ import type { StationDrawerHandle } from "./station-drawer";
 const FILTERS = ["all", "attention", "ok", "archived"] as const;
 type Filter = (typeof FILTERS)[number];
 const SORTS = ["", "days", "-days"] as const;
-// 资源列表、渠道接入、上游账单分成三个标签，避免一页从头滚到尾
-const VIEWS = ["list", "onboarding", "bills"] as const;
-type View = (typeof VIEWS)[number];
-// 「上游账单」原名「账号关系」，旧链接 view=accounts 仍打开它
-const URL_VIEWS = [...VIEWS, "accounts"] as const;
-const ONBOARDING_ACTIONS = ["connect", "coverage", "source"];
-// 指向某条核算关联的事项：无论从哪里打开，都切到「上游账单」定位
-const ASSOCIATION_ACTIONS = ["scope", "conflict"];
 type Sort = (typeof SORTS)[number];
 const COLS = 6;
 
@@ -122,7 +113,7 @@ const COPY = Object.freeze({
   todayTokens: (tokens: string) => `今天 ${tokens} Token`,
   emptyDesc: "加上上游、填好登录信息后，这里显示每个上游的余额、日均花费和可用天数。",
   pausedTitle: "没有在看余额的上游",
-  pausedDesc: (n: number) => `另有 ${n} 个上游暂停了监控，可以在「${STATION_TABS.bills}」里恢复监控。`,
+  pausedDesc: (n: number) => `另有 ${n} 个上游暂停了监控，`,
   archivedOnlyTitle: "没有在用的上游",
   archivedOnlyDesc: (n: number) => `另有 ${n} 个已归档的上游，可以在「已归档」里恢复。`,
   noMatch: "没有符合条件的上游。",
@@ -143,41 +134,6 @@ const COPY = Object.freeze({
 // 与 buildOverviewActions 的 stationId 同一口径，保证“需处理”与总览的待办完全对得上
 const actionKey = (s: any) => String(s.id || stationDisplayName(s));
 
-// 渠道接入目录里的资源及其用到的字段（与服务端目录同口径：四种账号类型，含本站来源）
-const onboardingSig = (list: any[]) =>
-  list
-    .filter((s) => ONBOARDING_TYPES.some((item) => item.value === s.type))
-    .map((s) =>
-      [s.id, s.name, s.type, s.baseUrl, s.archivedAt ?? "", s.monitorEnabled !== false, !!s.isOwn, s.authVersion ?? "", s.verifiedIdentity?.provider ?? "", s.verifiedIdentity?.accountId ?? ""].join("|"),
-    )
-    .join("\n");
-
-// 渠道接入只在挂载时读目录，切换标签又保持挂载；这里决定什么时候换 key 重新挂载（rev + 1）。
-// sig：当前实例已同步到的资源签名（列表首次读到前为 null）；dirty：上游账单里改过身份、授权或核算；
-// shown：标签打开过（首次打开才挂载，读到的就是当前目录）；wait：列表还在刷新，落地后怎么处理——
-// absorb 实例刚按当前目录挂载，只记下签名；compare 切回时还不知道有没有变化，落地后再比。
-// 显示期间的变化不重挂（免得冲掉接入结果），也不算已同步，下次切回时重挂
-type OnboardingSync = { view: string; seq: number; sig: string | null; dirty: boolean; shown: boolean; wait: "absorb" | "compare" | null; rev: number };
-function syncOnboarding(o: OnboardingSync, view: string, seq: number, sig: string, loaded: boolean, loading: boolean): OnboardingSync {
-  let n = o;
-  // 实例此刻按当前目录（重新）挂载
-  const mounted = (x: OnboardingSync): OnboardingSync => ({ ...x, sig: loaded ? sig : x.sig, dirty: false, wait: loading ? "absorb" : null });
-  // 行内打开新的处理目标已按新 key 重挂
-  if (n.seq !== seq) n = mounted({ ...n, seq });
-  if (loaded && n.sig === null) n = { ...n, sig };
-  if (n.view !== view) {
-    if (view !== "onboarding") n = { ...n, view, wait: n.wait === "compare" ? null : n.wait };
-    else if (!n.shown) n = mounted({ ...n, view, shown: true });
-    // 切回时已知有变化就立刻重挂（改动已写进服务端，重挂后读到的是新目录）；还在刷新就等它落地再比
-    else if (n.dirty || (loaded && n.sig !== sig)) n = mounted({ ...n, view, rev: n.rev + 1 });
-    else n = { ...n, view, wait: n.wait ?? (loading ? "compare" : null) };
-  }
-  if (n.wait && loaded && !loading) {
-    const changed = n.wait === "compare" && n.sig !== sig;
-    n = changed ? { ...n, sig, wait: null, dirty: false, rev: n.rev + 1 } : { ...n, sig, wait: null };
-  }
-  return n;
-}
 
 function compareDays(a: number | null, b: number | null, dir: 1 | -1) {
   if (a === b) return 0;
@@ -227,24 +183,10 @@ export default function StationsPage() {
   // 搜索词写进地址栏（停止输入 300ms 后），刷新与分享链接时保持
   const [queryParam, setQueryParam] = useUrlState<string>("q", "");
   const [query, setQuery] = useState(queryParam);
-  const [rawView, setUrlView] = useUrlState<(typeof URL_VIEWS)[number]>("view", "list", URL_VIEWS);
-  const urlView: View = rawView === "accounts" ? "bills" : rawView;
   const [filter, setFilter] = useUrlState<Filter>("filter", "all", FILTERS);
   const [typeFilter, setTypeFilter] = useUrlState<string>("type", "");
   const [sort, setSort] = useUrlState<Sort>("sort", "", SORTS);
   const [params, setParams] = useUrlParams();
-  // 带着处理入口进来时，第一帧就落在它所在的标签，不先渲染资源列表再跳过去（中途切换会打断按钮加载动画的收尾）。
-  // 地址栏写入 view 之后以地址栏为准；用户自己切标签时立即放弃
-  const [entryView, setEntryView] = useState<View | null>(() => {
-    const destination = readWorkflowDestination(params.toString(), "stations");
-    return destination ? (ONBOARDING_ACTIONS.includes(destination.action) ? "onboarding" : "bills") : null;
-  });
-  if (entryView && urlView === entryView) setEntryView(null);
-  const view = entryView ?? urlView;
-  const setView = useCallback((v: View) => {
-    setEntryView(null);
-    setUrlView(v);
-  }, [setUrlView]);
   const editParam = params.get("edit"), focusParam = params.get("focus");
 
   // 写地址栏是异步的：记住自己写进去的值，回声到达时不回填输入框，否则会吞掉这期间新打的字
@@ -574,17 +516,8 @@ export default function StationsPage() {
   const trendCur = trendStation ? stations.find((x) => x.id === trendStation.id) || trendStation : null;
   const canAdd = !!types.length && !loadingMeta;
 
-  const [onboardingSync, setOnboardingSync] = useState<OnboardingSync>(() => ({ view, seq: 0, sig: null, dirty: false, shown: view === "onboarding", wait: null, rev: 0 }));
-  // 上游账单里的操作都会改到接入目录（身份、授权、监控用途、核算关联），切回渠道接入时重读
-  const reloadAfterAccountChange = useCallback(async () => {
-    setOnboardingSync((o) => ({ ...o, dirty: true }));
-    await reload();
-  }, [reload]);
-  // 渠道接入自己完成后的刷新：它已经读过最新目录，即使刷新落地前切走了，切回来也不重挂
-  const reloadAfterOnboarding = useCallback(async () => {
-    const list = await reload();
-    setOnboardingSync((o) => ({ ...o, sig: onboardingSig(list) }));
-  }, [reload]);
+  // 上游列表里的操作改到的东西（身份、授权、核算）都在服务端，重读列表即可
+  const reloadAfterAccountChange = useCallback(async () => { await reload(); }, [reload]);
 
   const accounts = useAccountCenter({
     stations,
@@ -608,23 +541,8 @@ export default function StationsPage() {
       return;
     }
     accounts.openWorkflow(href);
-    // 核验与授权会弹出抽屉；核算关联在「上游账单」里定位；接入类事项切到「渠道接入」，其余在页面顶部列出原资源
-    const action = new URL(href, window.location.origin).searchParams.get("action") || "";
-    if (["verify", "verify-billing", "authorization", ...ASSOCIATION_ACTIONS].includes(action)) return;
-    const target = ONBOARDING_ACTIONS.includes(action) ? ".jy-tabs" : ".jy-accounts-inspect";
-    setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
   };
-  // 从总览、账单核算或行内打开的接入类事项，在「渠道接入」标签里处理；核算关联事项总在「上游账单」里定位。
-  // 从别的页面带进来的账号事项（核验、授权、定位原资源）落到「上游账单」，抽屉下面就是这个账号。
-  // 行内打开的账号事项（destinationSeq > 0）留在当前列表
-  useEffect(() => {
-    if (!accounts.destination) return;
-    if (ONBOARDING_ACTIONS.includes(accounts.destination.action)) setUrlView("onboarding");
-    else if (accounts.destinationSeq === 0 || ASSOCIATION_ACTIONS.includes(accounts.destination.action)) setUrlView("bills");
-  }, [accounts.destination]); // eslint-disable-line react-hooks/exhaustive-deps
-  const resourceSig = useMemo(() => onboardingSig(stations), [stations]);
-  const nextSync = syncOnboarding(onboardingSync, view, accounts.destinationSeq, resourceSig, loaded, loadingList);
-  if (nextSync !== onboardingSync) setOnboardingSync(nextSync);
+
   // 这个上游的数据比服务端此刻旧「2 × 刷新间隔 + 30 秒」以上：返回「数据截至 14:20」，否则 null（ui-design-spec §5.2）。
   // 30 秒是单次读取超时的余量。两边都是服务端的时刻，不拿浏览器的时钟比；所有上游都旧了、只有一个上游时也照样标。
   // 接口没给此刻（旧版服务端）时退回到在用上游里最新的读取时刻。读不到余额的上游下面另有一行说原因，不再标
@@ -1091,20 +1009,8 @@ export default function StationsPage() {
       ) : null}
       {accounts.top}
 
-      <Tabs<View>
-        tabs={[
-          { key: "list", label: STATION_TABS.list },
-          { key: "onboarding", label: STATION_TABS.onboarding },
-          { key: "bills", label: STATION_TABS.bills },
-        ]}
-        active={view}
-        onChange={setView}
-        idPrefix="stations"
-        label={COPY.views}
-      />
-      {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与上游账单首次打开后保持挂载，切换标签不丢状态 */}
       <div>
-        <TabPanel idPrefix="stations" tabKey="list" active={view === "list"}>
+        <div>
           <MergeNotice counts={mergeCounts} onOpen={merge.open} />
           <div className="jy-toolbar">
             <Input
@@ -1146,18 +1052,7 @@ export default function StationsPage() {
             </p>
           ) : null}
           <Panel body={false} label={STATION_TABS.list}>{body}</Panel>
-        </TabPanel>
-
-        <TabPanel idPrefix="stations" tabKey="onboarding" active={view === "onboarding"} keepMounted>
-          <div className="jy-stations-onboarding">
-            {/* 行内打开新的处理目标、或离开期间目录有变动时重新挂载（见 syncOnboarding） */}
-            <ChannelOnboarding key={`${accounts.destinationSeq}-${onboardingSync.rev}`} compact={compact} onComplete={reloadAfterOnboarding} destination={accounts.destination} />
-          </div>
-        </TabPanel>
-
-        <TabPanel idPrefix="stations" tabKey="bills" active={view === "bills"} keepMounted>
-          {accounts.center}
-        </TabPanel>
+        </div>
       </div>
 
       <Modal

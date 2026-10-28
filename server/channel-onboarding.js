@@ -287,7 +287,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!identity) {
         unverifiedResources.push(resource);
         const members = savedLinks.filter((link) => link.stationId === station.id && link.ownStationId === source.ownSource?.stationId);
-        actions.push(workflowAction(station.type === "newapi-key" ? members.length ? "connect_channels" : "verify_capability" : "verify_identity",
+        // 没确认身份的上游：系统自己试读（server/upstream-auto-verify.js），不再让人去点「测试读取」；只有只用 Key 的上游、有渠道还没连上时才要人去连
+        if (station.type === "newapi-key" && members.length) actions.push(workflowAction("connect_channels",
           { stationId: station.id, ownStationId: source.ownSource?.stationId || null, channelIds: channelIds(members) }));
         continue;
       }
@@ -338,8 +339,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       for (const rule of allRules.filter((rule) => ids.has(rule.upstreamStationId))) {
         const station = rt.store.get(rule.upstreamStationId);
         if (!rule.canonicalKey || rule.canonicalKey !== canonicalBillingKey(station, account.identity, rule.tokenId)) {
-          account.actions.push(workflowAction("verify_capability", { accountKey: account.accountKey, stationId: station.id, ruleId: rule.id }));
-          continue;
+          continue; // 系统自己试读后会补上，不进需处理
         }
         if (!keyRules.has(rule.canonicalKey)) keyRules.set(rule.canonicalKey, []);
         keyRules.get(rule.canonicalKey).push(rule);
@@ -372,8 +372,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
           scopeVersion: ambiguous ? null : rule.scopeVersion || 1, billingEffectiveFromMs: ambiguous ? null : effective,
           firstQueryableAtMs: ambiguous ? null : firstQueryableAtMs });
-        if (current.length && (ambiguous || needsCoverageAnswer(rule))) account.actions.push(workflowAction("confirm_coverage",
-          { accountKey: account.accountKey, ruleId: rule.id, ownStationId: rule.ownStationId, channelIds: coverage.uncoveredOwnChannelIds }));
       }
       for (const resource of account.resources) {
         if (resource.monitorEnabled) account.actions.push(workflowAction("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
@@ -383,9 +381,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           account.actions.push(workflowAction("update_authorization", { accountKey: account.accountKey }));
         }
         const members = savedLinks.filter((link) => link.stationId === resource.id);
-        if (!resource.archivedAt && members.length && !allRules.some((rule) => active(rule) && ids.has(rule.upstreamStationId))) {
-          account.actions.push(workflowAction("verify_capability", { accountKey: account.accountKey, stationId: resource.id, channelIds: channelIds(members) }));
-        }
       }
       account.actions = [...new Map(account.actions.map((item) => [item.id, item])).values()];
       account.resources.sort((a, b) => a.id.localeCompare(b.id)); account.keys.sort((a, b) => a.canonicalKey.localeCompare(b.canonicalKey));
