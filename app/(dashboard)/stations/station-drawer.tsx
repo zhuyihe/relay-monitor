@@ -37,7 +37,7 @@ export type StationDrawerHandle = {
 // 参与“有未保存的修改”判断的字段；密钥框初始为空，输入即算修改
 const FORM_KEYS = [
   "name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email", "password",
-  "lowBalanceUsd", "cnyPerUsd", "costAliasesText", "includeInProfit", "noRenewal", "token",
+  "lowBalanceUsd", "cnyPerUsd", "includeInProfit", "noRenewal", "token",
   "keyAgentUrl", "keyAgentSecret",
 ];
 const TEST_READ = workflowActionMeta("verify_identity").label;
@@ -71,8 +71,12 @@ const COPY = Object.freeze({
   hintUnchanged: `只有改了登录信息才要重新${TEST_READ}`,
   hintCreate: `先${TEST_READ}，读到了才能新增`,
   // 加上游只填地址和令牌（上游监控简化第 3 条）：类型、名字系统自己认
-  token: "令牌",
-  tokenHint: "站点的访问令牌、登录令牌，或只用 Key 的上游的 Key（sk- 开头）；类型和名字系统自己认。",
+  address: "站点地址",
+  addressHint: "上游网站的地址，例如 https://api.example.com",
+  token: "访问令牌",
+  tokenHint: "在上游后台「个人设置」里生成；只有 Key 的也可以填 Key",
+  detectedLine: (type: string, name: string, balance: string | null) => [type, name, balance ? `余额 ${balance}` : ""].filter(Boolean).join(" · "),
+  readFirst: "读到了才能新增",
   needUserId: "这是 New API 站点，还要填你在这个站点上的用户 ID。",
   more: "更多设置",
   typeAuto: "自动识别",
@@ -178,6 +182,11 @@ export function StationDrawer({
   const [editing, setEditing] = useState<any>(null); // null = 新增
   const [ownMode, setOwnMode] = useState(false); // 设置自营站点（自营业务页打开）
   const [needUserId, setNeedUserId] = useState(false); // 认出是 New API 站点、还缺用户 ID
+  // 加上游：离开令牌栏就试读一次，读到了才能新增（detectedKey 是读的时候的地址 + 令牌 + 用户 ID，改了就作废）
+  const [detecting, setDetecting] = useState(false);
+  const [detected, setDetected] = useState<any>(null);
+  const [detectedKey, setDetectedKey] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [purchases, setPurchases] = useState<any[]>([]); // 固定成本付费记录行
   const [testing, setTesting] = useState(false);
@@ -216,6 +225,9 @@ export function StationDrawer({
     const own = !!station?.isOwn || !!options?.own;
     setOwnMode(own);
     setNeedUserId(false);
+    setDetected(null);
+    setDetectedKey(null);
+    setMoreOpen(!!station && !own);
     const values = {
       name: station?.name || "",
       // 新增上游时类型留空 = 自动识别；自营站点一定是 New API
@@ -229,7 +241,6 @@ export function StationDrawer({
       password: "",
       lowBalanceUsd: station?.lowBalanceUsd ?? "",
       cnyPerUsd: station?.cnyPerUsd ?? "",
-      costAliasesText: Array.isArray(station?.costAliases) ? station.costAliases.join("\n") : "",
       includeInProfit: station?.includeInProfit !== false,
       noRenewal: !!station?.noRenewal,
       keyAgentUrl: station?.keyAgentUrl || "",
@@ -299,7 +310,28 @@ export function StationDrawer({
   const needs = isAuto ? [] : needsFor(formType);
   const unchangedEdit = !!editing && formFingerprint === initialFingerprint;
   const testPassed = !!connectionTest?.ok && testedFingerprint === formFingerprint;
-  const canSave = isFixed || unchangedEdit || testPassed || (isAuto && !!String(typedBaseUrl || "").trim() && !!String(typedToken || "").trim());
+  const typedUserId = Form.useWatch("userId", form);
+  const autoKey = `${String(typedBaseUrl || "").trim()}\n${String(typedToken || "").trim()}\n${String(typedUserId || "").trim()}`;
+  const autoReady = !!detected?.ok && detectedKey === autoKey;
+  const canSave = isFixed || unchangedEdit || testPassed || (isAuto && autoReady);
+
+  // 离开令牌（或用户 ID）栏：认类型和名字、顺带读一次
+  const runDetect = async () => {
+    const baseUrl = String(typedBaseUrl || "").trim(), token = String(typedToken || "").trim();
+    if (!isAuto || !baseUrl || !token || detecting || (detected && detectedKey === autoKey)) return;
+    const key = autoKey;
+    setDetecting(true);
+    try {
+      const result = await api("/api/stations/detect", { body: { baseUrl, token, userId: String(typedUserId || "").trim() } });
+      if (result.needsUserId) { setNeedUserId(true); setDetected({ ok: false, needsUserId: true }); }
+      else setDetected(result.ok ? result : { ok: false, issue: { text: result.message, raw: result.diagnostic } });
+    } catch (e: any) {
+      setDetected({ ok: false, issue: resultIssue(e) });
+    } finally {
+      setDetectedKey(key);
+      setDetecting(false);
+    }
+  };
 
   const onTestConnection = async () => {
     const values = form.getFieldsValue();
@@ -332,24 +364,8 @@ export function StationDrawer({
 
   const onSave = async () => {
     const v = form.getFieldsValue();
-    // 只填了地址和令牌：先让系统认类型和名字、顺带读一次；认不出或读不到就停在这里说原因，不保存
-    let detected: any = null;
-    if (isAuto) {
-      setSaving(true);
-      try {
-        detected = await api("/api/stations/detect", { body: { baseUrl: String(v.baseUrl || "").trim(), token: String(v.token || "").trim(), userId: String(v.userId || "").trim() } });
-      } catch (e: any) {
-        setSaving(false);
-        return message.error(failureText(COPY.saveFailed, e));
-      }
-      setSaving(false);
-      if (detected.needsUserId) {
-        setNeedUserId(true);
-        return message.info(COPY.needUserId);
-      }
-      if (!detected.ok) return message.error(failureText(COPY.saveFailed, { code: detected.code, message: detected.diagnostic }));
-      setNeedUserId(false);
-    }
+    // 只填了地址和令牌：类型和名字用离开令牌栏时读到的
+    if (isAuto && !autoReady) return message.warning(COPY.readFirst);
     const type = isAuto ? String(detected.type) : String(v.type || "").trim();
     const connectionFields = needsFor(type);
     const payload: any = {
@@ -357,10 +373,6 @@ export function StationDrawer({
       type,
       lowBalanceUsd: String(v.lowBalanceUsd ?? "").trim(),
       cnyPerUsd: String(v.cnyPerUsd ?? "").trim(),
-      costAliases: String(v.costAliasesText || "")
-        .split(/[\n,]/)
-        .map((x) => x.trim())
-        .filter(Boolean),
       includeInProfit: ownMode ? editing?.includeInProfit !== false : !!v.includeInProfit,
       // 金额/天数保持字符串提交，全空行剔除（同旧版）
       fixedPurchases: purchases
@@ -540,9 +552,6 @@ export function StationDrawer({
           <Form.Item label={COPY.lowBalance} name="lowBalanceUsd" hidden={isFixed} extra={COPY.lowBalanceDesc}>
             <Input placeholder={COPY.lowBalancePlaceholder} inputMode="decimal" autoComplete="off" />
           </Form.Item>
-          <Form.Item label={COPY.aliases} name="costAliasesText" hidden={isFixed || isOwnStation} extra={COPY.aliasesDesc}>
-            <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder={"例如：10.0.0.8:8080\nhttp://relay.internal"} />
-          </Form.Item>
           <Form.Item name="noRenewal" valuePropName="checked" hidden={isFixed} extra={COPY.noRenewalDesc}>
             <SwitchRow label={COPY.noRenewal} />
           </Form.Item>
@@ -637,20 +646,36 @@ export function StationDrawer({
             </Form.Item>
           )}
           {!isFixed && (
-            <Form.Item label={CREDENTIAL_FIELDS.baseUrl.label} name="baseUrl" extra={CREDENTIAL_FIELDS.baseUrl.hint}>
-              <Input placeholder="https://api.example.com" autoComplete="off" inputMode="url" />
+            <Form.Item label={isAuto ? COPY.address : CREDENTIAL_FIELDS.baseUrl.label} name="baseUrl" extra={isAuto ? COPY.addressHint : CREDENTIAL_FIELDS.baseUrl.hint}>
+              <Input placeholder="https://api.example.com" autoComplete="off" inputMode="url" onBlur={() => void runDetect()} />
             </Form.Item>
           )}
           {isAuto && (
             <>
               <Form.Item label={COPY.token} name="token" extra={COPY.tokenHint}>
-                <Input.Password autoComplete="new-password" />
+                <Input.Password autoComplete="new-password" onBlur={() => void runDetect()} />
               </Form.Item>
               {needUserId && (
                 <Form.Item label={CREDENTIAL_FIELDS.userId.label} name="userId" extra={COPY.needUserId}>
-                  <Input placeholder="例如 1" autoComplete="off" />
+                  <Input placeholder="例如 1" autoComplete="off" onBlur={() => void runDetect()} />
                 </Form.Item>
               )}
+              <div aria-live="polite">
+                {detecting ? <p className="jy-caption">{COPY.detecting}</p> : null}
+                {!detecting && detected?.ok && detectedKey === autoKey ? (
+                  <div className="jy-test-result">
+                    <Sym kind="good" />
+                    <b>{COPY.detectedLine(types.find((t) => t.value === detected.type)?.label || detected.type, detected.name, testBalanceText(detected))}</b>
+                  </div>
+                ) : null}
+                {!detecting && detected && !detected.ok && !detected.needsUserId && detectedKey === autoKey ? (
+                  <div className="jy-test-result jy-test-result--bad">
+                    <Sym kind="crit" />
+                    <b>{testReadText({ ok: false, reason: detected.issue?.text })}</b>
+                    {detected.issue?.raw ? <div><ErrorDetail raw={detected.issue.raw} /></div> : null}
+                  </div>
+                ) : null}
+              </div>
             </>
           )}
         </fieldset>
@@ -729,6 +754,8 @@ export function StationDrawer({
           <Collapse
             className="jy-stations-more"
             ghost
+            activeKey={moreOpen ? ["more"] : []}
+            onChange={(keys) => setMoreOpen((Array.isArray(keys) ? keys : [keys]).includes("more"))}
             items={[{
               key: "more",
               forceRender: true,
@@ -741,10 +768,10 @@ export function StationDrawer({
                   <Form.Item label={CREDENTIAL_FIELDS.type.label} name="type" extra={typeHint}>
                     <Select options={[...(editing ? [] : [{ value: "", label: COPY.typeAuto }]), ...types.map((t) => ({ value: t.value, label: t.label }))]} />
                   </Form.Item>
+                  {costFields}
                   <Form.Item name="includeInProfit" valuePropName="checked" extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
                     <SwitchRow label={COPY.inProfit} />
                   </Form.Item>
-                  {costFields}
                 </>
               ),
             }]}
