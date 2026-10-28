@@ -23,7 +23,7 @@ export function assertKeyAgentSecretStrength(secret) {
   const weakness = secretWeakness(secret);
   if (weakness) throw Object.assign(new Error(weakness === "SECRET_TOO_SHORT" ? "令牌至少 32 个字符，用「怎么装」里的命令生成一串" : "令牌太弱，用「怎么装」里的命令生成一串"), { code: weakness });
 }
-// 读取服务地址：填了就必须是 https（令牌在请求头里走，不走明文）；不填是用默认地址，不算错
+// 读取服务地址：填了就必须是 https（令牌在请求头里走，不走明文）。不填就是没装读取服务（没有默认地址），这里不拦，对账照常按手动绑定算
 export function assertKeyAgentUrl(url) {
   const text = String(url ?? "").trim();
   if (text && !isKeyAgentUrl(text)) throw Object.assign(new Error(KEY_AGENT_URL_INVALID_TEXT), { code: "KEY_AGENT_URL_NOT_HTTPS" });

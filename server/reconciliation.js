@@ -643,40 +643,43 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { ...input, preset: "custom", startMs, endMs: now, noCap: true };
   }
 
-  // 开始算以来的页面：已经固定的日子直接取账本，只有没固定的日子（今天、刚过零点还没结的昨天）才向上游和自营站点现读。
-  // 每条绑定从它自己开始算那天起，连着的已固定日子是「前缀」：整体取账本里的收入、成本；现读的窗口从所有绑定里最早没固定的那天 0 点起。
-  // 返回 { input：现读用的窗口, fullInput：整个范围, prefixOf(ruleId)：这条绑定在现读窗口之前那些已固定日子的合计 }
-  async function sinceBase() {
-    const fullInput = await sinceInput({ preset: "since" });
+  // 每日利润页的多天范围（近 7 天、本月、开始算以来、自选范围）：已经固定的日子直接取账本，每条绑定只现读它自己没固定的那几天（向上游和自营站点读）。
+  // 每条绑定从范围里它自己开始算那天起，连着的已固定日子是「前缀」，整体取账本里的收入、成本；现读窗口从这条绑定第一个没固定的那天 0 点起
+  // （范围已经全固定时至少读最后一天，留一份现读的结果当底）。这样旧日子不再有「当时用哪把 Key」的问题，读得也少。
+  // 返回 { liveStartOf(ruleId)：现读从哪一刻起, prefixOf(ruleId)：现读窗口之前那些已固定日子的合计 }；一天的范围、没有可取账本的返回 null
+  async function ledgerSplit(fullInput) {
     const rules = (await repository.listRules()).filter((rule) => rule.enabled);
-    const tz = rules[0]?.timezone || businessTimeZone(), now = Date.now(), today = dayKeyInTz(now, tz), first = dayKeyInTz(fullInput.startMs, tz);
-    if (!rules.length || first >= today) return { input: fullInput, fullInput, prefixOf: () => null };
+    const now = Date.now(), per = [];
+    for (const rule of rules) {
+      const w = resolveReconciliationWindow({ ...fullInput, timezone: rule.timezone }, now), labels = dayLabelsOf(w, rule.timezone, now);
+      if (labels.length >= 2) per.push({ rule, labels });
+    }
+    if (!per.length) return null;
+    const first = per.map((item) => item.labels[0]).sort()[0], last = per.map((item) => item.labels.at(-1)).sort().at(-1);
     const facts = new Map();
-    for (const fact of await repository.listLedgerDayFacts(rules.map((rule) => rule.id), first, shiftDayLabel(today, -1))) {
+    for (const fact of await repository.listLedgerDayFacts(per.map((item) => item.rule.id), first, last)) {
       if (!facts.has(fact.ruleId)) facts.set(fact.ruleId, new Map());
       facts.get(fact.ruleId).set(fact.billDate, fact);
     }
-    const startDayOf = (rule) => { const start = reconciliationAccountingStart(rule); return Number.isFinite(start) ? dayKeyInTz(start, rule.timezone || tz) : today; };
-    let liveStartDay = today;
-    for (const rule of rules) {
-      let day = startDayOf(rule);
-      while (day < today && facts.get(rule.id)?.has(day)) day = shiftDayLabel(day, 1);
-      if (day < liveStartDay) liveStartDay = day;
-    }
-    const prefixOf = (ruleId) => {
-      const rule = rules.find((item) => item.id === ruleId);
-      if (!rule) return null;
-      let revenueUsd = 0, costUsd = 0, days = 0;
-      for (let day = startDayOf(rule); day < liveStartDay; day = shiftDayLabel(day, 1)) {
-        const fact = facts.get(rule.id)?.get(day);
-        if (!fact) continue;
-        revenueUsd += fact.revenueUsd ?? 0;
-        costUsd += fact.costBasis === "fixed" ? 0 : fact.costUsd ?? 0; // 固定成本的上游那天上游成本记 0（毛利不扣 cost_usd）
-        days += 1;
+    const liveStart = new Map(), prefix = new Map();
+    for (const { rule, labels } of per) {
+      const tz = rule.timezone, today = dayKeyInTz(now, tz), started = reconciliationAccountingStart(rule);
+      const startDay = Number.isFinite(started) ? dayKeyInTz(started, tz) : labels[0];
+      const firstDay = startDay > labels[0] ? startDay : labels[0];
+      let day = firstDay;
+      while (day <= labels.at(-1) && day < today && facts.get(rule.id)?.has(day)) day = shiftDayLabel(day, 1);
+      const liveDay = day < labels.at(-1) ? day : labels.at(-1);
+      if (liveDay <= firstDay) continue; // 没有已固定的前缀：整段现读，和以前一样
+      let revenueUsd = 0, costUsd = 0;
+      for (let d = firstDay; d < liveDay; d = shiftDayLabel(d, 1)) {
+        const fact = facts.get(rule.id)?.get(d);
+        revenueUsd += fact?.revenueUsd ?? 0;
+        costUsd += fact?.costBasis === "fixed" ? 0 : fact?.costUsd ?? 0; // 固定成本的上游那天上游成本记 0（毛利不扣 cost_usd）
       }
-      return days ? { revenueUsd, costUsd } : null;
-    };
-    return { input: { ...fullInput, startMs: dayStartInTz(liveStartDay, tz) }, fullInput, prefixOf };
+      liveStart.set(rule.id, dayStartInTz(liveDay, tz));
+      prefix.set(rule.id, { revenueUsd, costUsd });
+    }
+    return liveStart.size ? { liveStartOf: (ruleId) => liveStart.get(ruleId), prefixOf: (ruleId) => prefix.get(ruleId) ?? null } : null;
   }
   // 现读窗口之前的已固定日子并进每条绑定的结果（只加收入、上游成本、毛利三个数；算进利润的才加）
   function withLedgerPrefix(result, prefix) {
@@ -901,9 +904,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const unmatched = channelIds.find((id) => unmatchedChannelIds.has(id));
         if (unmatched != null) { keyIssues.set(rule.id, issueFor(rule, "CHANNEL_KEY_UNMATCHED", { channelId: unmatched })); pending = true; continue; }
         const ref = refs.find(Boolean);
-        // 这一版还不算的接法（Key 换到了另一个已经加了的上游、同一条绑定的渠道各用各的 Key、几把 Key 的渠道）：不记 Key、不进需处理，页面上只提示一句；
+        // Key 换到了另一个已经加了的上游：这一版不算这个渠道（一个渠道一个上游，第一次认出来就定了）。从这一刻起这条绑定不算（已经算出来的日子留着），
+        // 记成只提示的 KEY_IN_OTHER_UPSTREAM，不进需处理；不记 Key；Key 回到原来的上游，下一轮自己解开
+        if (ref && ref.upstreamStationId !== rule.upstreamStationId) {
+          keyIssues.set(rule.id, issueFor(rule, "KEY_IN_OTHER_UPSTREAM", { channelId: channelIds[0], upstreamStationId: ref.upstreamStationId }));
+          continue;
+        }
+        // 同一条绑定的渠道各用各的 Key、几把 Key 的渠道：这一版也不算，不记 Key、不进需处理，页面上只提示一句；
         // 这个站点的成功时刻先不推进，库里已有的事项照旧
-        if (new Set(refs.filter(Boolean).map((item) => `${item.upstreamStationId}:${item.tokenId}`)).size > 1 || (ref && ref.upstreamStationId !== rule.upstreamStationId)
+        if (new Set(refs.filter(Boolean).map((item) => `${item.upstreamStationId}:${item.tokenId}`)).size > 1
           || channelIds.some((id) => (snapshotByChannelId.get(id)?.slots?.length ?? 0) > 1)) {
           pending = true; if (openIssue(rule)) keyIssues.set(rule.id, { ...rule.keyIssue });
           continue;
@@ -987,9 +996,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const state = await profit.status(own.id).catch(() => null);
       if (!state?.ok) continue;
       for (const channel of state.channels) {
-        if (channel.state !== "blocked" || !UNSUPPORTED_REASONS.has(channel.reason)) continue;
-        out.push({ channelId: channel.channelId, name: channel.name, reason: channel.reason,
-          upstreamNames: (channel.upstreamStationIds || []).map((id) => rt.store.get(id)?.name).filter(Boolean) });
+        // 在算的渠道 Key 换到了另一个已经加了的上游里（movedToUpstreamId），和 Key 在两个上游里都有的（blocked），都是「这一版还不算」
+        const upstreamIds = channel.state === "running" ? (channel.movedToUpstreamId ? [channel.movedToUpstreamId] : null) : channel.state === "blocked" && UNSUPPORTED_REASONS.has(channel.reason) ? channel.upstreamStationIds || [] : null;
+        if (!upstreamIds) continue;
+        out.push({ channelId: channel.channelId, name: channel.name, reason: "KEY_IN_OTHER_UPSTREAM", upstreamNames: upstreamIds.map((id) => rt.store.get(id)?.name).filter(Boolean) });
       }
     }
     return out;
@@ -3568,13 +3578,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
     async profitPage(rawInput = {}) {
-      const since = rawInput.preset === "since" ? await sinceBase() : null;
-      const input = since ? since.input : rawInput;
-      const response = await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: true });
+      const input = await sinceInput(rawInput), since = rawInput.preset === "since";
+      const split = await ledgerSplit(input);
+      // 开始算以来：范围会越来越长，「没算进利润的上游成本」只读得到现读那一截，和页面别处对不上，这个范围下不读也不显示
+      const response = await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: !since, liveStartOf: split?.liveStartOf });
       const now = Date.parse(response.generatedAt), tz = response.tz;
-      const window = resolveReconciliationWindow({ ...(since ? since.fullInput : input), timezone: tz }, now);
+      const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
       const labels = dayLabelsOf(window, tz, now);
-      const results = since ? response.results.map((result) => withLedgerPrefix(result, since.prefixOf(result.rule.id))) : response.results;
+      const results = split ? response.results.map((result) => withLedgerPrefix(result, split.prefixOf(result.rule.id))) : response.results;
       const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
       // 看一天时「没算进的模型」的名字从那天的明细里拿（只有那几行、一行一次）
       const missing = new Map();
@@ -3611,7 +3622,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const ownIssue = ownIssues.at(-1);
       // 没算进利润的上游成本：直接用 unaccountedUpstream.totalUsd（summarizeUnaccountedUpstream 给的美元合计，算法只有一份；
       // 不能用 .total，那是按 displayCurrency 折算过的，可能是人民币，审核 #126 M4）
-      const unaccountedUpstreamCostUsd = response.unaccountedUpstream?.totalUsd ?? null;
+      const unaccountedUpstreamCostUsd = since ? null : response.unaccountedUpstream?.totalUsd ?? null;
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
       return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
@@ -3738,7 +3749,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => {
           // 今天、近 7 天、本月截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
           const live = isLiveReconciliationPreset(input.preset);
-          const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
+          let window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
+          // 每日利润页的多天范围：这条绑定已固定的日子取账本，只现读它自己没固定的那几天（profitPage 的 ledgerSplit）
+          const liveStart = options.liveStartOf?.(rule.id);
+          if (liveStart != null && liveStart > window.startMs && liveStart < window.endMs) window = { ...window, preset: "custom", startMs: liveStart };
           // 手动「重新读取」一个已经结束的整天：走结账（settle），和轮询回看同一条路；结不成只更新原因，不推后自动的退避（计划 C2a 2.5）
           const manualSettle = options.mode === "observe" && billDayOf(window) && isSettleableWindow(window, Date.now());
           if (manualSettle) {

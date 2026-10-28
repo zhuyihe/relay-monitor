@@ -54,9 +54,9 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     if (!identified.ok) return { ok: false, code: identified.code || "KEY_AGENT_UNAVAILABLE" };
     if (!identified.channels) return { ok: false, code: "KEY_AGENT_UNAVAILABLE" };
     const [rules, optouts] = await Promise.all([reconciliation().listRules(), reconciliation().listChannelOptouts(ownStationId)]);
-    const running = new Map();
+    const running = new Map(), runningUpstream = new Map();
     for (const rule of rules) if (rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId) {
-      for (const channel of rule.channels) running.set(Number(channel.channelId), rule.id);
+      for (const channel of rule.channels) { running.set(Number(channel.channelId), rule.id); runningUpstream.set(Number(channel.channelId), rule.upstreamStationId); }
     }
     const optedOut = new Set(optouts.map((row) => row.channelId));
     const identifiedById = new Map(identified.channels.map((entry) => [Number(entry.channelId), entry]));
@@ -64,7 +64,12 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const channels = catalogue.channels.filter((channel) => !channel.missing).map((channel) => {
       const channelId = Number(channel.id);
       const base = { channelId, name: channel.name, revision: channel.revision, optedOut: optedOut.has(channelId) };
-      if (running.has(channelId)) return { ...base, state: "running", ruleId: running.get(channelId) };
+      if (running.has(channelId)) {
+        // 在算的渠道，现在认出的 Key 在另一个已经加了的上游里：这一版不算它（对账那边已经记成 KEY_IN_OTHER_UPSTREAM），页面提示用
+        const slots = identifiedById.get(channelId)?.slots || [], match = slots.length === 1 && slots[0].state === "identified" && slots[0].matches?.length === 1 ? slots[0].matches[0] : null;
+        const ownUpstream = runningUpstream.get(channelId);
+        return { ...base, state: "running", ruleId: running.get(channelId), ...(match && ownUpstream && match.stationId !== ownUpstream ? { movedToUpstreamId: match.stationId } : {}) };
+      }
       const entry = identifiedById.get(channelId);
       if (!entry) return { ...base, state: "blocked", reason: "NOT_IDENTIFIED" };
       if (entry.keyless) return { ...base, state: "blocked", reason: "KEYLESS" }; // 这类渠道的 Key 系统认不了（Vertex 账号文件、AWS ak|sk……）
