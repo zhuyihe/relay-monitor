@@ -245,7 +245,7 @@ export default function StationsPage() {
     setEntryView(null);
     setUrlView(v);
   }, [setUrlView]);
-  const editParam = params.get("edit");
+  const editParam = params.get("edit"), focusParam = params.get("focus");
 
   // 写地址栏是异步的：记住自己写进去的值，回声到达时不回填输入框，否则会吞掉这期间新打的字
   const lastWrittenQuery = useRef(queryParam);
@@ -339,15 +339,16 @@ export default function StationsPage() {
     tz,
   });
 
-  const openEditor = (s: any | null, trigger?: HTMLElement | null) => drawerRef.current?.open(s, trigger);
+  const openEditor = (s: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" }) => drawerRef.current?.open(s, trigger, options);
 
   // /stations?edit=<id>：数据和类型都到齐后打开对应上游的抽屉，然后把参数从地址栏去掉；找不到就静默忽略。
   // edit=new 打开「新增上游」（运营总览的空状态用）
   useEffect(() => {
     if (!editParam || !loaded || loadingMeta) return;
     const target = editParam === "new" ? null : stations.find((x) => String(x.id) === editParam);
-    if (target || (editParam === "new" && types.length)) openEditor(target || null, null);
-    setParams({ edit: null });
+    const focus = focusParam === "keyAgentUrl" || focusParam === "keyAgentSecret" ? focusParam : undefined;
+    if (target || (editParam === "new" && types.length)) openEditor(target || null, null, { focus });
+    setParams({ edit: null, focus: null });
   }, [editParam, loaded, loadingMeta]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefreshAll = async () => {

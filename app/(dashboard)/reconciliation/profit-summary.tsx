@@ -1,6 +1,6 @@
 "use client";
 // 每日利润页顶上的四个数（设计稿 daily-profit-a.md §2）：毛利（下面一行小字写净利）、差额、对不上、没算进来。
-// 手机上合成一张卡片：毛利大字、收入 − 实付成本、毛利率、净利，底下一行写昨天（或已固定的日子）的差额。
+// 手机上合成一张卡片：毛利大字、收入 − 上游成本、毛利率、净利，底下一行写昨天（或已固定的日子）的差额。
 // 数都由 profit-format.ts 的 metrics 算好，这里只摆；金额不上色，对不上的那一格浅红底。
 import { Button } from "antd";
 import type { ProfitPageResponse } from "../../../lib/client";

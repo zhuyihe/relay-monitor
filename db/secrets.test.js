@@ -365,3 +365,14 @@ test("渠道 Key 读取服务的令牌（keyAgentSecret）也加密存，附加�
   // 附加数据绑这个上游、这个字段：挪到别的上游名下解不开（和令牌、Key 一样的规矩，不单独抽测，这里只核对不是漏加密）
   assert.doesNotMatch(pool.dump(), /agent-secret-value/);
 });
+
+test("assertKeyAgentUrl：不填不算错；填了必须是 https，其他一律拒绝（KEY_AGENT_URL_NOT_HTTPS）", async () => {
+  const { assertKeyAgentUrl } = await import("./secrets.js");
+  assert.equal(assertKeyAgentUrl(""), "");
+  assert.equal(assertKeyAgentUrl(undefined), "");
+  assert.equal(assertKeyAgentUrl("  https://api.example.com/relay-monitor-agent "), "https://api.example.com/relay-monitor-agent");
+  assert.equal(assertKeyAgentUrl("HTTPS://Api.Example.com/agent"), "HTTPS://Api.Example.com/agent", "协议部分不分大小写");
+  for (const bad of ["http://api.example.com/agent", "api.example.com/agent", "ftp://x.test", "https://", "https://a b"]) {
+    assert.throws(() => assertKeyAgentUrl(bad), (error) => error.code === "KEY_AGENT_URL_NOT_HTTPS", bad);
+  }
+});
