@@ -177,3 +177,73 @@ test("stop：一次最多 1000 个渠道；不在渠道目录也不在在算的�
   assert.deepEqual(f.calls.optoutAdded, [], "编号不对整次都不写");
   assert.deepEqual(await f.module.stop({ ownStationId: "own", channelIds: [2] }), { stopped: [], optedOut: [2] });
 });
+
+const mine = { ...upMine, accountUse: "only_mine" };
+
+test("autoStart：只给我的渠道用的上游，认出的新渠道自动开始（不碰「用户停的」记号）；别处也在用/没回答的上游、用户停过的渠道（整组）、认不出的不自动开始", async () => {
+  const f = fixture({ channels: [1, 2, 3, 4, 5, 6], stations: [own, mine, { ...upShared }, { id: "up3", type: "newapi" }],
+    optouts: [{ ownStationId: "own", channelId: 4, atMs: 5 }], identified: [
+      { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }, // 同一把 Key：一组
+      { channelId: 3, keyless: false, slots: [slot("up2", 22)] }, // 别处也在用
+      { channelId: 4, keyless: false, slots: [slot("up1", 44)] }, // 用户停过
+      { channelId: 5, keyless: false, slots: [slot("up3", 55)] }, // 上游没回答过
+      { channelId: 6, keyless: false, slots: [{ index: 0, state: "not_found" }] }, // 认不出
+    ] });
+  const result = await f.module.autoStart("own");
+  assert.deepEqual(result.started.map((item) => [item.groupKey, item.channelIds]), [["up1:11", [1, 2]]]);
+  assert.equal(f.calls.probe.length, 1, "只送自动开始的那一组");
+  assert.equal(f.calls.probe[0].groups[0].reconciliation.coverageDeclaration.answer, "none");
+  assert.deepEqual(f.calls.optoutRemoved, [], "自动开始不删「用户停的」记号");
+  assert.deepEqual((await fixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] }).module.start({ ownStationId: "own", channelIds: [1] })).started.length, 1);
+});
+
+test("autoStart：上游从别处也在用改成只给我的渠道用，已经在等的渠道下一轮就自动开始（每轮重新判断，不用另外触发）", async () => {
+  const station = { ...upMine, accountUse: "elsewhere" };
+  const f = fixture({ channels: [1], stations: [own, station], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  assert.deepEqual((await f.module.autoStart("own")).started, [], "别处也在用：不自动开始");
+  station.accountUse = "only_mine"; // 用户在上游编辑里改了答案
+  assert.equal((await f.module.autoStart("own")).started.length, 1);
+});
+
+test("autoStart：失败的组退避（10 分钟起、每次翻倍、最多 1 小时），退避期间不再预览；退避到了再试；成功以后清掉", async () => {
+  let clock = 1_000_000, failing = true;
+  const f = fixture({ channels: [1], stations: [own, mine], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }],
+    connectResult: (input) => (failing
+      ? { complete: false, groups: input.groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [group.groupId], code: "PREVIEW_BASIS_CHANGED", reconciliation: { status: "unavailable" } })) }
+      : { complete: true, groups: input.groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [group.groupId], reconciliation: { status: "configured", ruleId: "rule-x" } })) }) });
+  const rtLike = { store: { get: (id) => (id === "own" ? own : id === "up1" ? mine : null) }, channelOnboarding: f.rt.channelOnboarding, reconciliation: f.rt.reconciliation };
+  const module = createChannelProfitModule(rtLike, { identify: async () => ({ ok: true, stale: false, channels: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }], revealIssues: [] }), randomId: () => "r", now: () => clock });
+  await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1);
+  clock += 5 * 60 * 1000; await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1, "10 分钟内不再试");
+  clock += 6 * 60 * 1000; await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 2, "10 分钟到了再试");
+  clock += 15 * 60 * 1000; await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 2, "第二次失败以后退避翻倍到 20 分钟，15 分钟不够");
+  failing = false; clock += 10 * 60 * 1000;
+  assert.equal((await module.autoStart("own")).started.length, 1);
+  assert.equal(rtLike._autoStartBackoff.size, 0, "成功以后退避清掉");
+});
+
+test("autoStart：缓存识别里不在停过的组里、fresh 识别里却认出和停过的渠道是同一把 Key——start() 用 fresh 的组再判断一遍，整组不自动开始（不是失败，不退避）", async () => {
+  const unresolved = { channelId: 1, keyless: false, slots: [{ index: 0, state: "unresolved" }] };
+  const channel2 = { channelId: 2, keyless: false, slots: [slot("up1", 11)] };
+  const f = fixture({ channels: [1, 2], stations: [own, mine], optouts: [{ ownStationId: "own", channelId: 1, atMs: 5 }], identified: [] });
+  const module = createChannelProfitModule(f.rt, { identify: async (rt, ownStation, options) => ({ ok: true, stale: false, revealIssues: [],
+    channels: options?.fresh ? [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }, channel2] : [unresolved, channel2] }), randomId: () => "request-1" });
+  const result = await module.autoStart("own");
+  assert.deepEqual(result.started, []);
+  assert.equal(f.calls.probe.length, 0, "没送预览：停过的渠道 1 不会被带进去");
+  assert.equal(f.rt._autoStartBackoff.size, 0, "不是失败，不退避");
+});
+
+test("autoStart：一轮最多 3 组，合成一次预览和确认；剩下的下一轮再做", async () => {
+  const ids = [1, 2, 3, 4, 5];
+  const f = fixture({ channels: ids, stations: [own, mine], identified: ids.map((id) => ({ channelId: id, keyless: false, slots: [slot("up1", 10 + id)] })) });
+  const result = await f.module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1, "一次预览");
+  assert.equal(f.calls.connect.length, 1, "一次确认");
+  assert.deepEqual(f.calls.connect[0].groups.map((group) => group.channels.map((channel) => channel.channelId)), [[1], [2], [3]], "最多 3 组");
+  assert.equal(result.started.length, 3);
+});

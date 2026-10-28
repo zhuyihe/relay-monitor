@@ -21,6 +21,9 @@ function codedError(code, message, extra = {}) {
 
 const groupKeyOf = (upstreamStationId, tokenId) => `${upstreamStationId}:${tokenId}`;
 
+// 自动开始失败（预览依据变了、账单能力没验证……）以后多久再试：10 分钟起，每次翻倍，最多 1 小时——不能每轮轮询都把这一组再预览一遍
+const AUTO_START_RETRY_MIN_MS = 10 * 60 * 1000, AUTO_START_RETRY_MAX_MS = 60 * 60 * 1000, AUTO_START_MAX_GROUPS = 3;
+
 export function createChannelProfitModule(rt, { identify = identifyChannelsCached, randomId = randomUUID, now = () => Date.now() } = {}) {
   const onboarding = () => rt.channelOnboarding || rt.onboardingSource;
   const reconciliation = () => rt.reconciliation;
@@ -70,6 +73,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       const [slot] = slots;
       if (slot.state === "identified" && slot.matches?.length === 1) {
         const match = slot.matches[0], upstream = rt.store.get(match.stationId);
+        if (upstream?.archivedAt) return { ...base, state: "blocked", reason: "CHANNEL_KEY_UNMATCHED" }; // 删了的上游（识别缓存最多 4 分钟，还会认）和不在已加的上游里一样
         if (!upstream || !BILLING_TYPES.has(upstream.type)) return { ...base, state: "blocked", reason: "UPSTREAM_UNSUPPORTED" };
         return { ...base, state: "startable", upstreamStationId: match.stationId, tokenId: Number(match.tokenId), tokenName: match.tokenName ?? null,
           groupKey: groupKeyOf(match.stationId, match.tokenId) };
@@ -127,7 +131,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
   // coverage：每组 { [groupKey]: 回答 }——上游答了「只给我的渠道用」（accountUse = only_mine）的不用回答，别的每把 Key 要答一次
   // （附录 2，沿用现有的 coverageDeclaration）。返回 { started, alreadyRunning, blocked, failed }，没做成的写清楚为什么。
   function start(input) { return serialized(input?.ownStationId, () => startNow(input)); }
-  async function startNow({ ownStationId, channelIds, coverage = {} }) {
+  async function startNow({ ownStationId, channelIds, coverage = {}, source = "user" }) {
     const ids = [...new Set((Array.isArray(channelIds) ? channelIds : []).map(Number))];
     if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
     const state = await status(ownStationId, { fresh: true });
@@ -147,8 +151,14 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       else wanted.set(channel.groupKey, state.groups.find((group) => group.groupKey === channel.groupKey));
     }
     const ready = [];
+    const skipped = [];
     for (const group of wanted.values()) {
       const upstream = rt.store.get(group.upstreamStationId);
+      // 自动开始：用 fresh 识别的这一组再判断一遍——上游答了「只给我的渠道用」才开；这一组里只要有一个渠道是用户停过的，整组不自动开始（不是失败，也不退避）
+      if (source === "auto" && (upstream?.accountUse !== "only_mine" || state.channels.some((channel) => channel.groupKey === group.groupKey && channel.optedOut))) {
+        skipped.push({ groupKey: group.groupKey, channelIds: group.channelIds });
+        continue;
+      }
       let declaration = null;
       if (upstream?.accountUse === "only_mine") declaration = normalizeCoverageDeclaration({ answer: "none" });
       else if (coverage?.[group.groupKey] != null) { try { declaration = normalizeCoverageDeclaration(coverage[group.groupKey]); } catch { declaration = null; } } // 格式不对只算这一组没答
@@ -158,7 +168,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       }
       ready.push({ ...group, declaration });
     }
-    if (!ready.length) return { started, alreadyRunning, blocked, failed };
+    if (!ready.length) return { started, alreadyRunning, blocked, failed, skipped };
 
     const stationIds = [...new Set(ready.map((group) => group.upstreamStationId))];
     const input = { requestId: randomId(), ownStationId,
@@ -174,9 +184,47 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       else failed.push({ groupKey: group.groupKey, channelIds: group.channelIds, code: result?.code || result?.reconciliation?.code || "ONBOARDING_FAILED",
         reason: result?.reason || result?.reconciliation?.reason || null });
     }
-    // 用户点了「开始算利润」：删掉这些渠道的「用户停的」记号（只对真的开始了的）
-    if (started.length) await reconciliation().removeChannelOptouts(ownStationId, started.flatMap((item) => item.channelIds));
-    return { started, alreadyRunning, blocked, failed };
+    // 用户点了「开始算利润」：删掉这些渠道的「用户停的」记号（只对真的开始了的）；自动开始（source: "auto"）不碰这些记号
+    if (started.length && source !== "auto") await reconciliation().removeChannelOptouts(ownStationId, started.flatMap((item) => item.channelIds));
+    return { started, alreadyRunning, blocked, failed, skipped };
+  }
+
+  // 自动开始：上游答了「只给我的渠道用」（accountUse = only_mine），读取服务认出一个新渠道用了它的 Key，就自动建绑定
+  // （和用户点「开始算利润」同一条路：预览 + 确认，核算起点也一样是今天 0 点）。轮询每轮调一次。
+  // 不自动开始的：用户停过的渠道（reconciliation_channel_optout，只有用户点「开始算利润」才开始）、别处也在用/没回答的上游（要先回答每把 Key）、
+  // 认不出的渠道；同一把 Key 的几个渠道里只要有一个是用户停过的，这一组整组不自动开始。已经有绑定的渠道沿用原来那条，不会再建。失败的组按 groupKey 退避
+  async function autoStart(ownStationId) {
+    const state = await status(ownStationId);
+    if (!state.ok) return { started: [], skipped: "NOT_READY" };
+    const backoff = (rt._autoStartBackoff ||= new Map());
+    const at = now();
+    const liveKeys = new Set(state.groups.map((group) => `${ownStationId}:${group.groupKey}`));
+    for (const key of backoff.keys()) if (key.startsWith(`${ownStationId}:`) && !liveKeys.has(key)) backoff.delete(key); // 退避表不会只涨不缩
+    // 每轮每个自营站点最多 AUTO_START_MAX_GROUPS 组，合成一次 start()：不会一轮对自营站点和上游发几十次预览；剩下的下一轮接着来
+    const candidates = [];
+    for (const group of state.groups) {
+      if (candidates.length >= AUTO_START_MAX_GROUPS) break;
+      if (rt.store.get(group.upstreamStationId)?.accountUse !== "only_mine") continue;
+      if (group.channelIds.some((id) => state.channels.find((channel) => channel.channelId === id)?.optedOut)) continue;
+      if ((backoff.get(`${ownStationId}:${group.groupKey}`)?.nextAt ?? 0) > at) continue;
+      candidates.push(group);
+    }
+    if (!candidates.length) return { started: [] };
+    const fail = (key) => {
+      const previous = backoff.get(key)?.delayMs ?? AUTO_START_RETRY_MIN_MS / 2;
+      const delayMs = Math.min(AUTO_START_RETRY_MAX_MS, previous * 2);
+      backoff.set(key, { nextAt: at + delayMs, delayMs });
+    };
+    const result = await start({ ownStationId, channelIds: candidates.flatMap((group) => group.channelIds), source: "auto" })
+      .catch((error) => ({ started: [], failed: candidates.map((group) => ({ groupKey: group.groupKey, code: error?.code || "AUTO_START_FAILED" })), blocked: [] }));
+    const startedKeys = new Set(result.started.map((item) => item.groupKey));
+    for (const group of candidates) {
+      const key = `${ownStationId}:${group.groupKey}`;
+      if (startedKeys.has(group.groupKey)) backoff.delete(key);
+      else if ((result.skipped || []).some((item) => item.groupKey === group.groupKey)) continue; // fresh 识别里又不该自动开始了：不算失败
+      else fail(key);
+    }
+    return { started: result.started };
   }
 
   // 停止算利润：这几个渠道所在的绑定整条归档（同一把 Key 的渠道一起停，一个勾），同一个事务把它的渠道记成「用户停的」；
@@ -205,5 +253,5 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { stopped, optedOut };
   }
 
-  return { status, start, stop };
+  return { status, start, stop, autoStart };
 }

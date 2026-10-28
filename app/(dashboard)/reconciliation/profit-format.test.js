@@ -18,7 +18,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 const { COPY } = await import("./copy.ts");
 const {
   attentionNote, dayCellView, filterCounts, filterRows, footerNotes, gapCell, gapHeader, gapReasonText, heldNote, metrics, pageMoney, rangeCaption, rowMoney, rowSubtitle, rowTone,
-  showExpectedColumn, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, totalsRow, utcOffsetText, whereGapText, unitPriceText, adminUsageText, ratioLine,
+  marginText, showExpectedColumn, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, totalsRow, utcOffsetText, whereGapText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
 const { EMPTY, RATE_UNSET_USD } = await import("../../../lib/format.js");
@@ -175,7 +175,7 @@ test("「差在哪」那一句：看一天写用量、分组倍率、应付和�
 test("表头和合计行：全固定出应付成本一列，有今天时不出、表头写清是哪几天；合计只加算进来的，应付和差额只加算得出的那几行", () => {
   const fixed = page();
   assert.equal(showExpectedColumn(fixed), true);
-  assert.deepEqual(gapHeader(fixed, ctx), { title: "差额", sub: "实付 − 应付" });
+  assert.deepEqual(gapHeader(fixed, ctx), { title: "差额", sub: "上游成本 − 应付" });
   const totals = totalsRow(page({ rows: [row(), row({ rowKey: "b", channels: [{ channelId: 2, name: "x" }] }), row({ rowKey: "c", channels: [{ channelId: 3, name: "y" }] }), row({ rowKey: "d", channels: [{ channelId: 4, name: "z" }], gap: { ...row().gap, usd: null, state: "uncomputable", reason: "KEY_SHARED" } })] }), ctx);
   assert.deepEqual(totals, { label: "合计（算进来的 6 个渠道）", income: "$103.70", actual: "$64.51", gross: "$39.19", expected: "$57.60", expectedSub: "只有 3 行", gap: "+$0.71", gapSub: "同样这 3 行" });
   const week = weekPage();
@@ -207,7 +207,7 @@ test("合计行：已固定、又因为重算的事需处理、照算进来的�
 test("四个数：今天 / 已固定 / 近 7 天各一套标题；上游整体少扣写「比预期多赚」不写负数；净利只在毛利下面一行", () => {
   const today = metrics(todayPage(), ctx);
   assert.deepEqual(today.map((m) => [m.title, m.value]), [["今天到现在的毛利", "$39.19"], ["今天的差额", "明天出"], ["昨天比预期少赚", "$0.71"], ["没算进来", "全部算进来了"]]);
-  assert.deepEqual(today[0].lines, ["收入 $103.70 − 实付成本 $64.51", "毛利率 37.8%", "扣今天的固定成本 $2.33 后，净利 $36.86"]);
+  assert.deepEqual(today[0].lines, ["收入 $103.70 − 上游成本 $64.51", "毛利率 37.8%", "扣今天的固定成本 $2.33 后，净利 $36.86"]);
   assert.deepEqual(today[1].lines, ["应付成本和差额，等今天过了零点、固定以后才算"]);
   // 几个渠道对不上按行上最近一个已固定日子的状态数（夹具里只有一行）
   assert.deepEqual([today[2].lines, today[2].link], [["1 个渠道对不上"], { text: "看昨天", day: D("10-25") }]);
@@ -292,4 +292,12 @@ test("轮询判定：范围里含今天才轮询——「今天」、含今天�
   assert.equal(livePollMs({ preset: "today" }, NOW, TZ, true), LIVE_POLL_MS, "含今天的照旧 30 秒");
   for (const preset of ["7d", "month"]) assert.equal(livePollMs({ preset }, NOW, TZ), LIVE_POLL_LONG_MS, `${preset} 含今天：和旧页面一样 5 分钟一次`);
   assert.equal(LIVE_POLL_LONG_MS, 300000);
+});
+
+test("marginText：毛利 ÷ 收入；收入是 0 或毛利算不出写「—」", () => {
+  assert.equal(marginText(5.4, 14.6), "37.0%");
+  assert.equal(marginText(-1, 10), "−10.0%");
+  assert.equal(marginText(null, 10), EMPTY);
+  assert.equal(marginText(3, 0), EMPTY);
+  assert.equal(marginText(3, null), EMPTY);
 });

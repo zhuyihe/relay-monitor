@@ -186,7 +186,7 @@ test("同时点两次开始只建一条绑定；同时停止不报错、每个�
 });
 
 for (const upstreamType of ["newapi", "sub2api"]) {
-  test(`A 在算、当天 9 点换 Key，旧 Key 挪给新渠道 B，手动开始 B——每天所有行成本之和 = 各 Key 当天用量之和（${upstreamType}）`, async (t) => {
+  test(`A 在算、当天 9 点换 Key，旧 Key 挪给新渠道 B，手动开始 B——简单口径：每个渠道按当天用过的 Key 整天算，换 Key 那天旧 Key 在 A、B 两行各算一次（已知的重复，第二天起每天之和 = 各 Key 用量之和）（${upstreamType}）`, async (t) => {
     const SWITCH = SH("2026-10-11T09:00:00");
     const f = await setup(t, { upstreamType, keys: [9, 20, 13], channelKey: { 1: 9, 7: 13 }, windows: { 9: [-Infinity, Infinity], 20: [SWITCH, Infinity], 13: [Infinity, Infinity] } });
     await f.at("2026-10-10T10:00:00");
@@ -203,7 +203,8 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const report = [];
     for (const day of ["2026-10-10", "2026-10-11", "2026-10-12"]) {
       const start = SH(`${day}T00:00:00`), end = start + DAY * 1000;
-      const truth = [9, 20, 13].reduce((sum, id) => sum + f.used(id, start, end), 0);
+      // 换 Key 那天（10-11）Key 9 先属于 A、后属于 B，两行各按整天算一次
+      const truth = [9, 20, 13].reduce((sum, id) => sum + f.used(id, start, end), 0) + (day === "2026-10-11" ? f.used(9, start, end) : 0);
       const rows = f.costOn(day);
       report.push({ day, truth, got: rows.reduce((sum, row) => sum + Number(row.cost_usd || 0), 0), rows: rows.map((row) => `${rules.find((r) => r.id === row.rule_id)?.channels.map((c) => c.channelId)}:${row.cost_usd}`) });
     }

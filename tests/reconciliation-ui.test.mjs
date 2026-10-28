@@ -237,7 +237,7 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   await metricOf(page, PROFIT_COPY.metric.gapToday).getByText(PROFIT_COPY.metric.tomorrow, { exact: true }).waitFor();
   const latest = metricOf(page, PROFIT_COPY.metric.lessThanExpectedDay("昨天")); await latest.getByText("$0.21", { exact: true }).waitFor(); await latest.locator("p", { hasText: PROFIT_COPY.metric.mismatchedChannelsLink(1) }).waitFor();
   await metricOf(page, PROFIT_COPY.metric.uncounted).getByText(PROFIT_COPY.metric.allCounted, { exact: true }).waitFor();
-  // 表头：渠道、收入、实付成本、毛利、昨天的差额；没有应付成本
+  // 表头：渠道、收入、上游成本、毛利、昨天的差额；没有应付成本
   const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
   assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.yesterdayGap]);
   const rowA = rowOf(page, "Rule A"); await rowA.locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor(); await rowA.locator(".jy-profit-tag", { hasText: PROFIT_COPY.gap.tag }).waitFor(); assert.ok((await rowA.getAttribute("class")).includes("jy-profit-row--over"));
@@ -255,7 +255,7 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   assert.equal(await page.locator(".jy-attention, .jy-eq, .jy-equation").count(), 0); assert.equal(await page.getByText("按天看", { exact: true }).count(), 0);
 });
 
-test("切昨天：五个数一行（收入、应付成本、实付成本、差额、毛利），对不上的行红底 / 蓝底带标签，门槛以内灰字；比预期少赚拆成多扣、少扣、门槛以内；筛选和合计按渠道数", async (t) => {
+test("切昨天：五个数一行（收入、应付成本、上游成本、差额、毛利），对不上的行红底 / 蓝底带标签，门槛以内灰字；比预期少赚拆成多扣、少扣、门槛以内；筛选和合计按渠道数", async (t) => {
   const { page, profitReads } = await openDailyPage(t);
   await pickPreset(page, PROFIT_COPY.presets.yesterday);
   await page.locator(".jy-profit-caption").getByText("10月8日 周四 · " + PROFIT_COPY.fixed, { exact: true }).waitFor(); assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
@@ -335,7 +335,7 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
   fail = true; await failing.page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
   await failing.page.locator(".jy-banner").getByText(refreshFailedText(Date.parse(PROFIT_AS_OF), PROFIT_TZ), { exact: true }).waitFor(); await rowOf(failing.page, "Rule A").locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor();
   assert.deepEqual(failing.queries, [{ preset: "today", observe: true }]);
-  // 读不到自营站点的收入：和运营总览同一句，收入、毛利写「—」，实付成本照常
+  // 读不到自营站点的收入：和运营总览同一句，收入、毛利写「—」，上游成本照常
   const rows = todayRows().map((row) => ({ ...row, incomeUsd: null, grossProfitUsd: null }));
   const unread = await openDailyPage(t, { rows, pageOf: () => ({ ...profitPage(rows, { ownIncomeUnavailable: { code: "OWN_INCOME_UNCONFIRMED" } }), pageTotals: { incomeUsd: null, actualCostUsd: 3, grossProfitUsd: null, grossMarginRate: null }, netProfitUsd: null }) });
   await unread.page.locator(".jy-banner").getByText(`${INCOME_UNREAD.title}：${describeError({ code: "OWN_INCOME_UNCONFIRMED" }).text}。`, { exact: true }).waitFor();

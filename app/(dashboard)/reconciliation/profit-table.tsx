@@ -1,5 +1,5 @@
 "use client";
-// 每日利润的那一张对账表（设计稿 daily-profit-a.md §2–§4）：桌面一行一个渠道（收入、应付成本、实付成本、差额、毛利），
+// 每日利润的那一张对账表（设计稿 daily-profit-a.md §2–§4）：桌面一行一个渠道（收入、应付成本、上游成本、差额、毛利），
 // 手机一个渠道一张卡片；点开一行看「差在哪」和每天的小格，点一格打开那天的计算明细。
 // 字都从 copy.ts 和 profit-format.ts 来，这里只负责摆；金额不上色，对不上靠小标签和整行的底色。
 import { Fragment } from "react";
@@ -16,7 +16,7 @@ import { EMPTY, formatDayKey } from "../../../lib/format";
 import { COPY } from "./copy";
 import {
   attentionNote, dayCellView, filterCounts, filterRows, fmtMoney, gapCell, gapHeader, isSingleDay, isTodayView, rangeDays, rowMoney, rowName, rowSubtitle, rowTone, showExpectedColumn,
-  totalsRow, whereGapText, yesterdayOf,
+  marginText, totalsRow, whereGapText, yesterdayOf,
 } from "./profit-format";
 import type { Ctx, GapCell, ProfitFilter } from "./profit-format";
 
@@ -99,7 +99,7 @@ function Expanded({ row, page, ctx, onOpenDetail, compact }: { row: ProfitRow; p
 function DesktopTable(props: Props & { rows: ProfitRow[] }) {
   const { page, ctx, rows, expanded, onToggle, onOpenDetail, onRetry, onRefresh, retryingKeys, retryErrors } = props;
   const expectedCol = showExpectedColumn(page), header = gapHeader(page, ctx), totals = totalsRow(page, ctx);
-  const columns = 3 + (expectedCol ? 1 : 0) + 2;
+  const columns = 3 + (expectedCol ? 1 : 0) + 3;
   // 全固定时五个数一行：收入、应付、实付、差额、毛利；其余：收入、实付、毛利、差额
   const Num = ({ children, sub }: { children: ReactNode; sub?: string }) => <td className="jy-profit-num">{children}{sub ? <small>{sub}</small> : null}</td>;
   const gapCol = (row: ProfitRow) => <td className="jy-profit-num jy-profit-num--gap"><GapText cell={gapCell(row, page, ctx)} /></td>;
@@ -112,6 +112,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
         <th className="jy-profit-num">{COPY.table.col.actual}</th>
         {expectedCol ? <th className="jy-profit-num">{header.title}{header.sub ? <small>{header.sub}</small> : null}</th> : null}
         <th className="jy-profit-num">{COPY.table.col.gross}</th>
+        <th className="jy-profit-num">{COPY.table.col.margin}</th>
         {!expectedCol ? <th className="jy-profit-num">{header.title}{header.sub ? <small>{header.sub}</small> : null}</th> : null}
       </tr></thead>
       <tbody>
@@ -132,6 +133,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
               <Num>{actual}</Num>
               {expectedCol ? gapCol(row) : null}
               <Num>{row.counted ? fmtMoney(money.gross, ctx.currency) : EMPTY}</Num>
+              <Num>{row.counted ? marginText(money.gross, money.income) : EMPTY}</Num>
               {!expectedCol ? gapCol(row) : null}
             </tr>
             {row.attention ? <tr className={`jy-profit-row jy-profit-row__attention${tone}`}><td colSpan={columns}>
@@ -148,6 +150,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
         <Num>{totals.actual}</Num>
         {expectedCol ? <Num sub={totals.gapSub}>{totals.gap}</Num> : null}
         <Num>{totals.gross}</Num>
+        <Num>{marginText(page.pageTotals.grossProfitUsd, page.pageTotals.incomeUsd)}</Num>
         {!expectedCol ? <Num sub={totals.gapSub}>{totals.gap}</Num> : null}
       </tr></tfoot>
     </table>
@@ -183,6 +186,7 @@ function MobileCards(props: Props & { rows: ProfitRow[] }) {
             <dt>{COPY.table.col.actual}</dt><dd>{actual}</dd>
             <dt>{gapHeader(page, ctx).title}</dt><dd><GapText cell={cell} /></dd>
             <dt>{COPY.table.col.gross}</dt><dd><b>{row.counted ? fmtMoney(money.gross, ctx.currency) : EMPTY}</b></dd>
+            <dt>{COPY.table.col.margin}</dt><dd>{row.counted ? marginText(money.gross, money.income) : EMPTY}</dd>
           </dl>
           <Expanded row={row} page={page} ctx={ctx} onOpenDetail={onOpenDetail} compact />
         </div> : null}

@@ -5,7 +5,7 @@ import { NAV_LABELS } from "../../../lib/brand.js";
 
 export const COPY = Object.freeze({
   // 时间范围（§6）
-  presets: Object.freeze({ today: "今天", yesterday: "昨天", "7d": "近 7 天", month: "本月", custom: "自定义" }),
+  presets: Object.freeze({ today: "今天", yesterday: "昨天", "7d": "近 7 天", month: "本月", since: "开始算以来", custom: "自定义" }),
   rangeLabel: "时间范围",
   customRangeLabel: "自定义时间范围",
   query: "查询",
@@ -23,7 +23,7 @@ export const COPY = Object.freeze({
     gross: "毛利",
     grossRange: (range: string) => `${range}毛利`,
     grossTodayMobile: "今天到现在的毛利（还会变）",
-    equation: (income: string, cost: string) => `收入 ${income} − 实付成本 ${cost}`,
+    equation: (income: string, cost: string) => `收入 ${income} − 上游成本 ${cost}`,
     margin: (pct: string) => `毛利率 ${pct}`,
     netToday: (fixedCost: string, net: string) => `扣今天的固定成本 ${fixedCost} 后，净利 ${net}`,
     net: (fixedCost: string, net: string) => `扣固定成本 ${fixedCost} 后，净利 ${net}`,
@@ -72,7 +72,7 @@ export const COPY = Object.freeze({
   // 表（设计稿 §2、§3）
   table: Object.freeze({
     title: "渠道",
-    col: Object.freeze({ channel: "渠道", income: "收入", expected: "应付成本", actual: "实付成本", gap: "差额", gapSub: "实付 − 应付", gross: "毛利" }),
+    col: Object.freeze({ channel: "渠道", income: "收入", expected: "应付成本", actual: "上游成本", gap: "差额", gapSub: "上游成本 − 应付", gross: "毛利", margin: "毛利率" }),
     gapFixedDays: (n: number) => `已固定的 ${n} 天`,
     gapFixedDaysRange: (n: number, range: string) => `已固定的 ${n} 天（${range}）`,
     latestGap: (day: string) => `${day}的差额`,
@@ -223,14 +223,14 @@ export const COPY = Object.freeze({
     missing: "没算进的模型",
     missingOne: (model: string, input: string, output: string) => `${model}（输入 ${input}、输出 ${output} Token）`,
     missingHint: "这一天的应付成本、差额写「—」。",
-    actual: "实付成本",
+    actual: "上游成本",
     unavailableUnknown: "这天还没算出来",
     actualFrom: (key: string) => `来自上游这把 Key「${key}」这天的用量记录。`,
     gap: "差额",
-    gapFormula: "实付成本 − 应付成本",
+    gapFormula: "上游成本 − 应付成本",
     gapNote: (usd: string, pct: string) => `同时超过 ${usd} 和应付成本的 ${pct}，算对不上。正常也会差一点（两边记录的时刻不一样、请求重试），超过这条线才标出来。`,
     gross: "毛利",
-    grossFormula: "收入 − 实付成本。",
+    grossFormula: "收入 − 上游成本。",
     ratio: "倍率",
     ratioSame: (group: string) => `${group}，这天没变过`,
     ratioChanged: (time: string, from: string, to: string) => `倍率在 ${time} 从 ${from} 变成 ${to}，分两段算`,

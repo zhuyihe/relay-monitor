@@ -226,7 +226,7 @@ test("keyAgentReachability：连续读不到（连不上）才累加；命中 4 
   const rt = { store: { list: () => [ownStation] } };
   await identifyChannelsCached(rt, ownStation);
   assert.equal(fetchCalls, 1);
-  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 1, unreachableSinceMs: keyAgentReachability(rt, "own").unreachableSinceMs, lastSuccessAtMs: null });
+  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 1, unreachableSinceMs: keyAgentReachability(rt, "own").unreachableSinceMs, lastSuccessAtMs: null, lastCode: "KEY_AGENT_UNAVAILABLE" });
   const since = keyAgentReachability(rt, "own").unreachableSinceMs;
   assert.equal(typeof since, "number");
   await identifyChannelsCached(rt, ownStation); // 还在 4 分钟缓存期内，不会真的再问
@@ -576,4 +576,13 @@ test("identifyChannelsCached（#143 低-6）：不传 fresh 时 4 分钟内沿�
   assert.equal(asked, 1, "缓存里的，不再问");
   await identifyChannelsCached(rt, ownStation, { fresh: true });
   assert.equal(asked, 2, "fresh：真的再问一次读取服务");
+});
+
+test("keyAgentExceptionIssueOf：地址不是 https / 令牌被拒（401）第一次就是需处理，别的读不到连续 3 次才是", async () => {
+  const { keyAgentExceptionIssueOf } = await import("./key-agent-resegment.js");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 0, lastCode: null }), null);
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_UNAVAILABLE" }), "KEY_AGENT_UNAVAILABLE");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 3, lastCode: "KEY_AGENT_UNAVAILABLE" }), "KEY_READER_UNREACHABLE");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_UNAUTHORIZED" }), "KEY_READER_UNREACHABLE");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_URL_INVALID" }), "KEY_READER_UNREACHABLE");
 });

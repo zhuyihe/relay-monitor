@@ -135,6 +135,7 @@ const COPY = Object.freeze({
 function keyAgentIssueText(code: string | undefined) {
   if (code === "SECRET_TOO_SHORT") return "令牌至少 32 个字符，用「怎么装」里的命令生成一串";
   if (code === "SECRET_TOO_WEAK") return "令牌太弱，用「怎么装」里的命令生成一串";
+  if (code === "KEY_AGENT_URL_INVALID") return "读取服务地址要用加密连接的网址（参考输入框里的示例）";
   return describeError({ code }).text;
 }
 

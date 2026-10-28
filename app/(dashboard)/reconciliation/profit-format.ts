@@ -118,7 +118,7 @@ export function livePollMs(window: { preset: string; startMs?: number; endMs?: n
 }
 function livePollBase(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null): number | null {
   if (window.preset === "today") return LIVE_POLL_MS;
-  if (window.preset === "7d" || window.preset === "month") return LIVE_POLL_LONG_MS;
+  if (window.preset === "7d" || window.preset === "month" || window.preset === "since") return LIVE_POLL_LONG_MS;
   if (window.preset === "custom" && Number.isFinite(window.endMs)) return (window.endMs as number) > dayStartInTz(dayKeyInTz(now, tz || undefined), tz || undefined) ? LIVE_POLL_MS : null;
   return null;
 }
@@ -307,6 +307,11 @@ const HELD_RESETTLE_CODES = new Set(["RESETTLE_SHRUNK", "RESETTLE_TOO_OLD", "RES
 const heldChannels = (page: ProfitPageResponse) => channelCount(page.rows.filter((row) => row.counted && row.attention && HELD_RESETTLE_CODES.has(row.attention.code || "")));
 // 手机顶上卡片最后一行用：和合计括号里同一句，但不带「合计」（设计 10-26 定）；没有就是空字符串
 export const heldNote = (page: ProfitPageResponse) => { const held = heldChannels(page); return held ? COPY.table.heldNote(held) : ""; };
+// 毛利率 = 毛利 ÷ 收入；收入是 0 或毛利算不出就不写
+export function marginText(gross: number | null | undefined, income: number | null | undefined): string {
+  return gross != null && income != null && income > 0 ? formatPct(gross / income) : EMPTY;
+}
+
 export function totalsRow(page: ProfitPageResponse, ctx: Ctx) {
   const money = pageMoney(page, ctx.currency);
   const countedRows = page.rows.filter((row) => row.counted).length;
@@ -332,7 +337,7 @@ export function metrics(page: ProfitPageResponse, ctx: Ctx): Metric[] {
   const money = pageMoney(page, ctx.currency), fmt = (value: number | null) => fmtMoney(value, ctx.currency);
   const today = isTodayView(page), allFixed = isAllFixed(page), single = isSingleDay(page);
   const presetName = (COPY.presets as Record<string, string>)[page.range.preset || ""];
-  // 1. 毛利，下面收入 − 实付成本、毛利率、净利
+  // 1. 毛利，下面收入 − 上游成本、毛利率、净利
   const grossLines = [COPY.metric.equation(fmt(money.income), fmt(money.actual))];
   if (money.income != null && money.income > 0 && money.gross != null) grossLines.push(COPY.metric.margin(formatPct(money.gross / money.income)));
   const approx = (value: number | null) => (money.approx ? COPY.metric.approx(fmt(value)) : fmt(value));
