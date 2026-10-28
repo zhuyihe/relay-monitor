@@ -3,6 +3,20 @@
 // 导入带 .js 后缀，node 可以直接读。按钮名、「刷新失败」「没设置汇率」这些共用的话从 lib 取，这里不另写。
 import { NAV_LABELS } from "../../../lib/brand.js";
 
+// 手动选 Key（不装读取服务时）：每日利润每个渠道一个「选 Key」下拉框；字等设计定稿（design/ui-copy-spec.md）
+export const KEY_PICKER = Object.freeze({
+  label: "选 Key",
+  placeholder: "选 Key",
+  upstreamPlaceholder: "这个渠道用的上游",
+  loading: "读取中…",
+  noKeys: "这个上游没有能用的 Key",
+  keysFailed: "读不到这个上游的 Key 列表",
+  saved: "已保存",
+  panelTitle: "还没算利润的渠道",
+  panelDesc: "选上游和 Key，从今天 0 点开始算",
+  noUpstream: "先在上游列表里加这个渠道用的上游",
+});
+
 export const COPY = Object.freeze({
   // 时间范围（§6）
   presets: Object.freeze({ today: "今天", yesterday: "昨天", "7d": "近 7 天", month: "本月", since: "开始算以来", custom: "自定义" }),

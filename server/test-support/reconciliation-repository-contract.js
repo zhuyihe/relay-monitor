@@ -1766,6 +1766,16 @@ contract("recordDayKeys / listDayKeys: rows are stored once per rule, day and ke
   assert.deepEqual(await repository.listDayKeys(["rr_missing"], "2026-10-10", "2026-10-11"), {});
 });
 
+contract("replaceDayKeys: the given days' keys are replaced by the new rows; other days and other rules are untouched", async ({ repository, fixture }) => {
+  const one = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:r1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(231), name: "R1" }] });
+  const k = (tokenId, tokenName) => ({ upstreamStationId: one.upstreamStationId, tokenId, tokenName });
+  await repository.recordDayKeys(one.id, [{ billDate: "2026-10-10", ...k(7, "a") }, { billDate: "2026-10-11", ...k(7, "a") }, { billDate: "2026-10-11", ...k(8, "b") }, { billDate: "2026-10-12", ...k(7, "a") }]);
+  assert.equal(await repository.replaceDayKeys(one.id, ["2026-10-11", "2026-10-12"], [{ billDate: "2026-10-11", ...k(9, "c") }, { billDate: "2026-10-12", ...k(9, "c") }, { billDate: "2026-10-13", ...k(9, "c") }]), 2, "不在日期里的行不写");
+  const listed = (await repository.listDayKeys([one.id], "2026-10-09", "2026-10-14"))[one.id];
+  assert.deepEqual(Object.fromEntries(Object.entries(listed).map(([day, keys]) => [day, keys.map((key) => key.tokenId)])), { "2026-10-10": [7], "2026-10-11": [9], "2026-10-12": [9] });
+  assert.equal(await repository.replaceDayKeys(one.id, [], []), 0);
+});
+
 contract("markKeyIssue: an open issue reads back as keyIssue; null clears it", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(221), name: "M" }] });
   assert.equal((await repository.getRule(rule.id)).keyIssue ?? null, null);

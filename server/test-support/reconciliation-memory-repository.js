@@ -565,6 +565,22 @@ export class MemoryReconciliationRepository {
     });
   }
 
+  // 对应 MySQL 版 replaceDayKeys：这几天原来记的 Key 删掉，换成 rows 里的
+  async replaceDayKeys(ruleId, billDates, rows) {
+    const dates = new Set((billDates || []).filter(Boolean));
+    if (!dates.size) return 0;
+    return this.#transaction("replaceDayKeys", async (tx) => {
+      this.#delete(tx, "dayKeys", this.#rows("dayKeys", tx).filter(({ row }) => row.rule_id === ruleId && dates.has(row.bill_date)));
+      let added = 0;
+      for (const row of rows || []) {
+        if (!dates.has(row?.billDate) || row.upstreamStationId == null || !Number.isSafeInteger(Number(row.tokenId))) continue;
+        this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null });
+        added += 1;
+      }
+      return added;
+    });
+  }
+
   async listDayKeys(ruleIds, fromDate, toDate) {
     const ids = new Set((ruleIds || []).map(String));
     const rows = this.#plain("dayKeys").filter((row) => ids.has(row.rule_id) && row.bill_date >= fromDate && row.bill_date <= toDate)

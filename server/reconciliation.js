@@ -1003,17 +1003,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 这样每天都有 Key 记录，不会有「没记录的天按现在的 Key 读」
         const backfilled = (rt._dayKeyBackfilled ||= new Set());
         if (!backfilled.has(rule.id)) {
-          const started = reconciliationAccountingStart(rule), startDay = Number.isFinite(started) ? dayKeyInTz(started, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
-          const have = startDay <= yesterday ? await repository.listDayKeys([rule.id], startDay, yesterday).then((all) => all[rule.id] || {}, () => null) : {};
-          if (have) {
-            // 只补还没有记录的天；最多补最近 800 天（超出的丢最老的）。前提：过去的天用的都是绑定现在配的这把 Key（装读取服务之前没手动换过 Key 才对）
-            const rows = [];
-            for (let day = yesterday, guard = 0; day >= startDay && guard < 800; day = shiftDayLabel(day, -1), guard += 1) {
-              if (!have[day]) rows.push({ billDate: day, upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
-            }
-            if (rows.length) await repository.recordDayKeys(rule.id, rows).then(() => backfilled.add(rule.id), () => { pending = true; });
-            else backfilled.add(rule.id);
-          }
+          const filled = await fillMissingDayKeys(rule, today);
+          if (filled) backfilled.add(rule.id); else pending = true;
         }
         const changed = Number(ref.tokenId) !== Number(rule.tokenId);
         if (changed) {
@@ -1037,6 +1028,53 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
     }));
     return { keyIssues, keyAgentDown, rules: applied ? await repository.listRules().catch(() => rules) : rules };
+  }
+
+  // 每天都有 Key 记录：从开始算那天到昨天，还没记录的天补一行，用这条绑定现在配的那把 Key（装读取服务之前、手动选 Key 之前结账用的就是它）；
+  // 最多补最近 800 天（超出的丢最老的）。前提：过去的天用的都是绑定现在配的这把 Key。返回 false 是没写成
+  async function fillMissingDayKeys(rule, today) {
+    const started = reconciliationAccountingStart(rule), startDay = Number.isFinite(started) ? dayKeyInTz(started, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
+    if (startDay > yesterday) return true;
+    const have = await repository.listDayKeys([rule.id], startDay, yesterday).then((all) => all[rule.id] || {}, () => null);
+    if (!have) return false;
+    const rows = [];
+    for (let day = yesterday, guard = 0; day >= startDay && guard < 800; day = shiftDayLabel(day, -1), guard += 1) {
+      if (!have[day]) rows.push({ billDate: day, upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
+    }
+    if (!rows.length) return true;
+    return repository.recordDayKeys(rule.id, rows).then(() => true, () => false);
+  }
+
+  // 手动选 Key（每日利润页的下拉框）：同一个上游里换一把 Key。和读取服务认出换 Key 同一个算法（applyKeyChange）：换的那天旧、新两把都记，第二天起只用新的；
+  // 换之前先把过去没记录的天补成旧 Key（不然它们会按新 Key 读）。被「Key 没有用量」（CHANNEL_KEY_NO_USAGE）挡住的那几天改按新 Key 算，重新排队结账
+  async function changeRuleKeyManual(ruleId, tokenId) {
+    const rule = await repository.getRule(ruleId);
+    if (!rule || !rule.enabled || rule.archivedAt) throw ruleNotFound();
+    const configured = upstreamStation(rule.upstreamStationId);
+    if (!billingStation(configured)) throw codedError("UPSTREAM_NOT_FOUND", "找不到这个上游");
+    const upstream = { ...configured };
+    let metadata;
+    try { metadata = await metadataFor(upstream, { force: true, timezone: rule.timezone }); } catch { throw codedError("KEY_METADATA_UNAVAILABLE", "读不到这个上游的 Key 列表"); }
+    const token = metadata.tokens.find((item) => item.id === Number(tokenId));
+    if (!token || token.status !== 1 || !tokenNameIsUnique(metadata, token)) throw codedError("INVALID_REQUEST", "请选一把名字不重复的 Key");
+    const identity = { provider: metadata.platform, baseUrl: onboardingBaseUrl(upstream.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) };
+    const ref = { upstreamStationId: rule.upstreamStationId, tokenId: token.id, tokenName: token.name };
+    const now = Date.now(), today = dayKeyInTz(now, rule.timezone);
+    if (!await fillMissingDayKeys(rule, today)) throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试");
+    const result = await applyKeyChange(rule, ref, { observedAt: now, stationLastSuccessAtMs: now, resources: new Map([[rule.upstreamStationId, { identity, metadata }]]), today });
+    if (result.conflict) throw codedError("KEY_ALREADY_BOUND", "这把 Key 已经在别的渠道算利润了");
+    if (!result.done) throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试");
+    // 被挡住的几天：Key 集合换成新的一把，状态行标成「原因没了」，下一轮轮询按新 Key 结账固定
+    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
+    if (blocked.length) {
+      await repository.replaceDayKeys(rule.id, blocked.map((state) => state.billDate), blocked.map((state) => ({ billDate: state.billDate, ...ref })));
+      for (const state of blocked) {
+        const window = { preset: "custom", startMs: dayStartInTz(state.billDate, rule.timezone), endMs: dayStartInTz(shiftDayLabel(state.billDate, 1), rule.timezone), timezone: rule.timezone };
+        await repository.recordSettlementState(rule.id, state.billDate, settlementRecheck({ window, state, blocker: null, now }), now).catch(() => {});
+      }
+    }
+    clearRuleResults(rule.id);
+    return { rekeyedDays: blocked.map((state) => state.billDate).sort() };
   }
 
   // 渠道换成了同一个上游的另一把 Key：绑定的 Key 改成新的；这几天（上一次读成功那天到今天）Key 集合两把都记上。
@@ -2778,6 +2816,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 减压 PR：这一轮有分段的渠道收入是沿用的（没人看、放慢）——记在 result 上（不可枚举，不进序列化、不进快照、不进账本），
       // 调用方据此不把这份结果放进 resultCache；页面来看时才会照旧现读，不会拿到沿用的数（总指挥 10-26 定）
       if (staleFromIdleSkip.length) Object.defineProperty(result, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
+      // 兜底（手动选 Key 的站点，没装读取服务）：这天有收入，可选的 Key 这一天一点用量都没有——多半是在 New API 里换了 Key、控制台还没改。
+      // 这天先不固定，记成要人处理的 CHANNEL_KEY_NO_USAGE（按钮「选 Key」打开那一行的下拉框）；用户改了 Key，被挡住的几天按新 Key 重新算（changeRuleKeyManual）。
+      // 只在结账（要固定的整天）时判；今天、固定成本的上游、收入是 0 的天不判
+      if (settle && billDayOf(window) && !probe && costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own)) {
+        return unavailable(health("CHANNEL_KEY_NO_USAGE", issueText("CHANNEL_KEY_NO_USAGE"), { channelId: rule.channels?.[0]?.channelId ?? null }), { metadata, token }, false);
+      }
       const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
       if (!await hasCurrentScope(rule.id, scopeFingerprint, generation, !!rule.archivedAt)) return STALE_SCOPE;
       if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
@@ -3661,6 +3705,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
 
     createRule: saveRule,
+    changeRuleKeyManual,
     updateRule,
     appendChannels,
     previewKeyScope,

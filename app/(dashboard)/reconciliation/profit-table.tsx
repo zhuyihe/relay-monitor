@@ -28,6 +28,8 @@ type Props = {
   onRetry: (row: ProfitRow) => void; onRefresh: () => void;
   retryingKeys: Set<string>; retryErrors: Record<string, unknown>;
   empty: { href: string; label: string } | null;
+  // 每个渠道一行的「选 Key」下拉框（手动选 Key；key-picker.tsx），没有就不画
+  renderPicker?: (row: ProfitRow) => ReactNode;
 };
 
 const toneClass = (tone: ReturnType<typeof rowTone>) => (tone ? ` jy-profit-row--${tone}` : "");
@@ -97,7 +99,7 @@ function Expanded({ row, page, ctx, onOpenDetail, compact }: { row: ProfitRow; p
 }
 
 function DesktopTable(props: Props & { rows: ProfitRow[] }) {
-  const { page, ctx, rows, expanded, onToggle, onOpenDetail, onRetry, onRefresh, retryingKeys, retryErrors } = props;
+  const { page, ctx, rows, expanded, onToggle, onOpenDetail, onRetry, onRefresh, retryingKeys, retryErrors, renderPicker } = props;
   const expectedCol = showExpectedColumn(page), header = gapHeader(page, ctx), totals = totalsRow(page, ctx);
   const columns = 3 + (expectedCol ? 1 : 0) + 3;
   // 全固定时五个数一行：收入、应付、实付、差额、毛利；其余：收入、实付、毛利、差额
@@ -127,6 +129,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
                   <Icon name="expand" className={open ? "is-open" : undefined} /><strong>{name}</strong>
                 </button>
                 <small>{rowSubtitle(row, page, ctx)}</small>
+                {renderPicker ? <div className="jy-profit-row__picker">{renderPicker(row)}</div> : null}
               </td>
               <Num>{income}</Num>
               {expectedCol ? <Num>{fmtMoney(money.expected, ctx.currency)}</Num> : null}
@@ -158,7 +161,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
 }
 
 function MobileCards(props: Props & { rows: ProfitRow[] }) {
-  const { page, ctx, rows, expanded, onToggle, onOpenDetail, onRetry, onRefresh, retryingKeys, retryErrors } = props;
+  const { page, ctx, rows, expanded, onToggle, onOpenDetail, onRetry, onRefresh, retryingKeys, retryErrors, renderPicker } = props;
   const todayView = isTodayView(page), expectedCol = showExpectedColumn(page);
   // 今天的卡片差额那一行写「昨天多扣 $1.20」（最近固定的不是昨天时写那一天）
   const latestDay = page.latestSettledGap?.day;
@@ -178,6 +181,7 @@ function MobileCards(props: Props & { rows: ProfitRow[] }) {
             </span> : null}
           </> : null}
         </button>
+        {renderPicker ? <div className="jy-profit-card__picker">{renderPicker(row)}</div> : null}
         {row.attention ? <AttentionLine row={row} page={page} ctx={ctx} onRetry={onRetry} onRefresh={onRefresh} retrying={retryingKeys.has(row.rowKey)} retryError={retryErrors[row.rowKey]} compact /> : null}
         {open ? <div className="jy-profit-card__body">
           <dl className="jy-profit-card__facts">
