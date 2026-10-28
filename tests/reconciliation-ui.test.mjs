@@ -1634,7 +1634,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
         .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
     assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
     await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.waitForURL(/\/reconciliation(\?|$)/); await opened.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
+    await opened.page.goto(baseURL + "/reconciliation", { timeout: 30000 }); await opened.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
   }
 });
 
@@ -2338,30 +2338,25 @@ test("删除上游要输入这个上游的名字：不一致时按钮不能点�
 const BUSINESS_TZ = "Asia/Shanghai";
 const shanghaiDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 const shiftDay = (key, n) => { const d = new Date(key + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-// 成本估算的接口数据：按真实的今天往前排，一个按用量计费的上游每天都有记录
-function costAnalyticsFixture(days) {
-  const end = shanghaiDay(Date.now()), start = shiftDay(end, -(days - 1)), dates = Array.from({ length: days }, (_, i) => shiftDay(start, i));
-  return { days, start, end, tz: BUSINESS_TZ, generatedAt: new Date().toISOString(), selection: { includeArchived: false, stationCount: 1, archivedStationCount: 0 },
-    coverage: { earliestDate: start, latestDate: end, availableDays: days, requestedDays: days, monitoredStationCount: 1, isComplete: true, stationGaps: [] },
-    stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, totalCny: days * 10, fixedCny: 0, runway: { etaDays: 5, burnPerDay: 1, basis: "近 3 小时" } }],
-    daily: dates.map((date) => ({ stationId: "up-a", date, cny: 10 })), fixedDaily: [], heatmap: [], heatmapAvailable: true, heatmapAvailability: { available: days <= 30, reason: days <= 30 ? null : "range-not-supported", coverage: null } };
-}
-// 成本估算的可用天数用上游列表的余额和提醒线判断档位（balanceViewOf）：默认余额在提醒线以上、约 5 天，和接口的可用天数一致
-const costStationsFixture = (balance = { ok: true, remaining: 30 }, prediction = { etaDays: 5, burnPerDay: 1 }) => ({ stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, monitorEnabled: true, balance, prediction, spark: [] }], settings: { lowBalanceUsd: 5 } });
-async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture(), meta = (route) => fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } }), analytics = costAnalyticsFixture } = {}) {
-  const ownReads = [];
+test("成本估算：只有「上游成本构成」和「每天的上游成本」两块，数读每日利润同一份；只有近 7 天、近 30 天和自定义；页顶有「每日利润」链接", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 5, cost: 2 }), profitRow("rule-2", "Rule B", { income: 3, cost: 1 })];
   const page = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/stations") return fulfill(route, stations);
-    if (url.pathname === "/api/meta") return meta(route);
-    if (url.pathname === "/api/analytics") return fulfill(route, analytics(Number(url.searchParams.get("days")) || 30));
-    if (url.pathname === "/api/own/analytics") { ownReads.push(url.searchParams.get("range")); return own(route); }
-    throw new Error("unexpected cost fixture API: " + url.pathname);
-  }, undefined, false, null, path);
-  await page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor();
-  return { page, ownReads, equation: page.getByRole("region", { name: ANALYTICS_COPY.eqTitle, exact: true }) };
-}
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
+    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows), unaccountedUpstreamCostUsd: 0.5,
+      dailyCost: [{ day: "2026-10-07", actualCostUsd: 2 }, { day: PROFIT_TODAY, actualCostUsd: 1 }] });
+    throw new Error("unexpected cost fixture API: " + path);
+  }, undefined, false, null, "/analytics");
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.mix, exact: true }).waitFor();
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.daily, exact: true }).waitFor();
+  assert.equal(await page.getByRole("region").filter({ hasText: ANALYTICS_COPY.panel.heat }).count(), 0, "花费时段已删");
+  await page.getByText(ANALYTICS_COPY.unaccounted, { exact: false }).first().waitFor();
+  await page.getByText(ANALYTICS_COPY.todayLegend, { exact: false }).first().waitFor();
+  await page.getByRole("link", { name: "每日利润", exact: true }).first().waitFor();
+  assert.equal(await page.getByRole("button", { name: "近 90 天", exact: true }).count(), 0, "没有近 90 天");
+});
+
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
@@ -2782,6 +2777,7 @@ test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 
     if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: iso(now) });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
     // 21 号渠道在自营站点里改过名：绑定存下的是旧名，coverage.channels 是现在的名字；另一个自营站点也有 21 号渠道
+    if (path === "/api/reconciliation/profit") return fulfill(route, profitPage([]));
     if (path === "/api/own/analytics") return failJSON(route, 500, { error: "fixture own analytics unavailable" });
     if (path === "/api/history/overview") return fulfill(route, { series: [] });
     if (path === "/api/refresh") return fulfill(route, { ok: true });
@@ -3902,3 +3898,76 @@ test("手机 320：一个渠道一张卡片，点开能看计算明细，页面�
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px document root overflows horizontally");
 });
+
+// ---- 自营业务用例共用的夹具（原来夹在已删用例之间）----
+// 利润等式里收入那一格留空时写的字（profit-equation.tsx 的 EQ_TEXT.unsetRevenue；组件文件带 JSX，node 读不了）
+const EQ_UNSET_REVENUE = "没设置";
+// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回（server/own-helpers.js 的 unconfirmedIncomeProfit）：
+// 两项成本照常，收入、管理员自用、毛利、净利是 null，原因在 profit.incomeUnconfirmed；用户列表也读不到时多一个 usersUnavailable
+const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
+const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
+const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
+function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
+  const endMs = Date.now(), span = range === "today" ? 3600000 : 7 * 86400000, startMs = endMs - span;
+  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - span, endMs: startMs, spanDays: span / 86400000 },
+    station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
+    byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
+    // 用户列表读不到时谁是管理员标不出，都按普通用户给
+    byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
+    prevUserAvailable: true, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
+    flow: { byGroup: [], byChannel: [], byUserGroup: [], coveredUsd: 0, coveragePct: null, prevWindow: { startMs: startMs - span, endMs: startMs } },
+    trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
+    profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
+      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
+      // 已标记的转售 Key 照常列出、金额是 null；没读到的那把带报错
+      resoldKeys: [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "fixture stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
+        { username: "root", tokenName: "promo", usd: null, cny: null }],
+      costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
+        { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
+      incomeUnconfirmed: INCOME_UNCONFIRMED },
+    ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
+}
+// 运营总览「今天收入和上游成本」用的大金额：收入 ¥12,345.67、上游成本 ¥23,456.80（5 个按用量算的上游）、5 位用户（售价 7，按 1 美元额度 = 7 元算）
+function bigOwnAnalytics(range = "today") {
+  const base = unconfirmedOwnAnalytics(range);
+  const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
+  const { incomeUnconfirmed, ...profit } = base.profit;
+  // 其余两位（2.2 + 1.3）× 7 = ¥24.50，和前 3 名（¥42、¥35、¥21）都不一样：写成「拿第 3 名的数」查得出来
+  return { ...base, byUser: [6, 5, 3, 2.2, 1.3].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
+    profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
+}
+// 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
+// costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
+async function expectIncomeUnread(equation, costs = null) {
+  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" }), page = equation.page();
+  const notice = equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(INCOME_UNREAD.title, reason)}${INCOME_UNREAD.costOnly}` });
+  await notice.waitFor(); await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.equal(await page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).filter({ visible: true }).count(), 0);
+  const term = (label) => equation.locator(".jy-eq-term:not(.is-carry)").filter({ has: page.locator(".jy-eq-label").filter({ hasText: new RegExp(`^${label}$`) }) });
+  const value = async (label) => (await term(label).locator(".jy-eq-value").textContent()).trim();
+  assert.equal(await value("收入"), INCOME_UNREAD.empty);
+  for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
+  if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
+  assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
+  // 原文收在说明里的「查看详细原因」，点开才看得到
+  await notice.getByText("查看详细原因", { exact: true }).click(); await notice.getByText(INCOME_UNCONFIRMED.error, { exact: true }).waitFor();
+}
+async function openUnconfirmedMyPage(t, options) {
+  return openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
+    // 每日收入只画收入，取自营站点接口的逐日收入：自营业务不再读慢的 /api/analytics（ui-design-spec §5.3）
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+}
+// 收入确认了的近 7 天：逐日收入 7 天（最早一天 ¥1,000，往后每天多 ¥100，最后一天是今天），7 个模型（前 5 + 其他 2 个）；
+// sellPrice: false 时自营站点没设置售价（收入按 1 美元额度 = 1 元估算）
+function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
+  const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
+  const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
+  const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
+  // 没设置售价：服务端在 profit 里带上 sell_price_unset 那条说明（等式下面写一次）
+  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, adminUsageCny: 3, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
+  return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
+}
