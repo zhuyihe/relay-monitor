@@ -187,6 +187,8 @@ async function openDailyPage(t, options = {}) {
     // 计算明细里「改时间」读倍率变化记录（options.segments）
     if (/^\/api\/reconciliation\/rules\/[^/]+\/segments$/.test(url.pathname) && method === "GET") return fulfill(route, { segments: options.segments || [] });
     if (url.pathname === "/api/reconciliation/profit/detail") { const params = Object.fromEntries(url.searchParams); detailReads.push(params); return options.detail ? options.detail(route, params) : fulfill(route, profitDetail({ day: params.day })); }
+    // 手动选 Key：默认没有（目录没读到），用例里传 channelOptions 才出下拉框
+    if (url.pathname === "/api/reconciliation/channels/options") return fulfill(route, options.channelOptions || { ok: false, code: "CHANNEL_CATALOGUE_STALE" });
     if (options.extraAPI) return options.extraAPI(route, url.pathname);
     throw new Error("unexpected daily fixture API: " + url.pathname);
   }, options.viewport, options.clock, null, options.path);
@@ -2323,3 +2325,29 @@ const CONNECT = workflowActionMeta("connect_channels").label, EDIT_BINDING = wor
 const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeChanged: true };
 
 test("占位：夹具段结束", () => {});
+
+test("手动选 Key：每个渠道一行有「选 Key」下拉框，绑过的换 Key 只发 tokenId；还没算利润的渠道选上游和 Key 就开始算", async (t) => {
+  const posts = [];
+  const channelOptions = { ok: true, upstreams: [{ id: "upstream-1", name: "Up" }], channels: [
+    { channelId: 1, name: "Channel A", ruleId: "rule-1", upstreamStationId: "upstream-1", tokenId: 9, tokenName: "Key 9", suggestedUpstreamId: null },
+    { channelId: 5, name: "新渠道", ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, suggestedUpstreamId: "upstream-1" }] };
+  const { page } = await openDailyPage(t, { channelOptions, extraAPI(route, path) {
+    if (path === "/api/reconciliation/upstreams/upstream-1/keys") return fulfill(route, { platform: "newapi", tokens: [{ id: 9, name: "Key 9", status: 1 }, { id: 20, name: "Key 20", status: 1 }, { id: 21, name: "停用的", status: 2 }] });
+    if (path === "/api/reconciliation/channels/select-key") { posts.push(route.request().postDataJSON()); return fulfill(route, { changed: true, ruleId: "rule-1" }); }
+    return fulfill(route, {});
+  } });
+  const until = async (check) => { for (let i = 0; i < 60 && !(await check()); i++) await page.waitForTimeout(100); };
+  const rowA = rowOf(page, "Rule A");
+  await rowA.getByLabel("选 Key：Channel A").waitFor();
+  await rowA.getByLabel("选 Key：Channel A").click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").getByTitle("Key 20").click();
+  await within(until(() => posts.length === 1), "换 Key 请求");
+  assert.deepEqual(posts[0], { ownStationId: "own-1", channelId: 1, tokenId: 20 });
+  // 还没算利润的渠道：上游默认选上地址对得上的那个，选 Key 以后带上游一起发
+  const unbound = page.getByRole("region", { name: "还没算利润的渠道" });
+  await unbound.getByText("新渠道").waitFor();
+  await unbound.getByLabel("选 Key：新渠道").click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last().getByTitle("Key 20").click();
+  await within(until(() => posts.length === 2), "开始算请求");
+  assert.deepEqual(posts[1], { ownStationId: "own-1", channelId: 5, upstreamStationId: "upstream-1", tokenId: 20 });
+});

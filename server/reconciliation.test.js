@@ -4252,6 +4252,8 @@ test("S3 Sub2API 账单能力：用 Store 密钥兼容旧 HMAC 的包装身份�
   const now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
   const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-hmac-server.test", costs: {} });
+  // 这条用例看的是能力核验，不是选 Key 的兜底：配上读取服务，零用量的昨天就不会被「Key 没有用量」挡住
+  Object.assign(f.stations.find((station) => station.isOwn), { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: "K7m2-xP9q" + "R4t".repeat(10) });
   // 真的 Store：密钥从它的 getter 来，getter 改了名这里就会失败
   const conn = { beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release: () => {} };
   const store = await new Store({ query: async (sql) => [sql.startsWith("SELECT k, v FROM meta") ? [{ k: "auth", v: { username: "admin", salt: "s", hash: "h" } }] : []],

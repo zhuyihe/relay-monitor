@@ -12,6 +12,7 @@ import { keyAgentConfigOf } from "./key-agent.js";
 import { identifyChannelsCached } from "./key-agent-identify.js";
 import { normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { dayKeyInTz } from "../lib/business-time.js";
+import { matchCostStations } from "./own-helpers.js";
 
 const BILLING_TYPES = new Set(["newapi", "sub2api", "sub2api-password"]);
 
@@ -138,6 +139,77 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { ok: true, stale: identified.stale ?? false, channels, groups: [...groups.values()] };
   }
 
+  // 建绑定：每组 { groupKey, upstreamStationId, tokenId, channelIds, declaration }，走接入向导已有的「预览 + 确认」（核算起点是今天 0 点）。
+  // 开始算利润（读取服务认出的 Key）和手动选 Key 共用这一处
+  async function connectGroups(ownStationId, ready, revisionOf) {
+    const started = [], failed = [];
+    const stationIds = [...new Set(ready.map((group) => group.upstreamStationId))];
+    const input = { requestId: randomId(), ownStationId,
+      selections: stationIds.map((stationId) => ({ selectionId: `s-${stationId}`, stationId, monitor: false })),
+      groups: ready.map((group, index) => ({ groupId: `g-${index}`, selectionId: `s-${group.upstreamStationId}`,
+        channels: group.channelIds.map((channelId) => ({ channelId, channelRevision: revisionOf(channelId) })),
+        reconciliation: { tokenId: group.tokenId, coverageDeclaration: group.declaration } })) };
+    const probe = await onboarding().probeBatch(input);
+    const connected = await onboarding().connectBatch({ ...input, previewId: probe.previewId });
+    for (const [index, group] of ready.entries()) {
+      const result = connected.groups.find((item) => (item.requestedGroupIds || [item.groupId]).includes(`g-${index}`));
+      if (result?.reconciliation?.status === "configured") started.push({ groupKey: group.groupKey, ruleId: result.reconciliation.ruleId, channelIds: group.channelIds });
+      else failed.push({ groupKey: group.groupKey, channelIds: group.channelIds, code: result?.code || result?.reconciliation?.code || "ONBOARDING_FAILED",
+        reason: result?.reason || result?.reconciliation?.reason || null });
+    }
+    return { started, failed };
+  }
+
+  // ---- 手动选 Key（不装读取服务时）----
+  // 每日利润页每个渠道一个「选 Key」下拉框：没绑过的渠道先选它用的是哪个上游、再选 Key，选了就建绑定开始算（从今天 0 点）；
+  // 绑过的渠道换 Key = 改这条绑定的 Key（一个渠道一条规则，换上游要先停止再选）。Key 列表是 GET /api/reconciliation/upstreams/:id/keys（绑定页原来读 Key 的那套）。
+  // 渠道地址能对上已加的上游的，下拉框先选上那个（matchCostStations）；对不上的（代理、内网地址）用户自己选上游。
+  async function options(ownStationId) {
+    ownStationOf(ownStationId);
+    const catalogue = onboarding()?.getSourceCatalogue?.();
+    if (!catalogue?.ownSource || catalogue.stale) return { ok: false, code: "CHANNEL_CATALOGUE_STALE" };
+    const rules = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId);
+    const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && !station.archivedAt && BILLING_TYPES.has(station.type));
+    const ruleOf = new Map();
+    for (const rule of rules) for (const channel of rule.channels) ruleOf.set(Number(channel.channelId), rule);
+    const channels = catalogue.channels.filter((channel) => !channel.missing).map((channel) => {
+      const rule = ruleOf.get(Number(channel.id)) || null;
+      return { channelId: Number(channel.id), name: channel.name, ruleId: rule?.id ?? null, upstreamStationId: rule?.upstreamStationId ?? null,
+        tokenId: rule?.tokenId ?? null, tokenName: rule?.tokenName ?? null,
+        suggestedUpstreamId: rule ? null : matchCostStations(upstreams, channel.baseUrl)[0]?.id ?? null };
+    });
+    return { ok: true, channels, upstreams: upstreams.map((station) => ({ id: station.id, name: station.name })) };
+  }
+
+  function selectKey(input) { return serialized(input?.ownStationId, () => selectKeyNow(input)); }
+  async function selectKeyNow({ ownStationId, channelId, upstreamStationId = null, tokenId }) {
+    ownStationOf(ownStationId);
+    const id = Number(channelId), token = Number(tokenId);
+    if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(token) || token <= 0) throw codedError("INVALID_REQUEST", "请选一把 Key");
+    const catalogue = onboarding()?.getSourceCatalogue?.();
+    const channel = catalogue?.channels?.find((item) => Number(item.id) === id && !item.missing);
+    if (!catalogue?.ownSource || catalogue.stale || !channel) throw codedError("CHANNEL_SOURCE_CHANGED", "选的渠道在自营站点里找不到了，请刷新后重新选");
+    const rules = await reconciliation().listRules();
+    const rule = rules.find((item) => item.enabled && !item.archivedAt && item.ownStationId === ownStationId && item.channels.some((member) => Number(member.channelId) === id));
+    if (rule) {
+      if (upstreamStationId && upstreamStationId !== rule.upstreamStationId) throw codedError("CHANNEL_UPSTREAM_FIXED", "这个渠道已经在算了，换上游请先停止算利润再选");
+      if (Number(rule.tokenId) === token) return { changed: false, ruleId: rule.id };
+      const result = await reconciliation().changeRuleKeyManual(rule.id, token);
+      return { changed: true, ruleId: rule.id, ...result };
+    }
+    const upstream = rt.store.get(upstreamStationId);
+    if (!upstream || upstream.isOwn || upstream.archivedAt || !BILLING_TYPES.has(upstream.type)) throw codedError("UPSTREAM_NOT_FOUND", "请先选这个渠道用的是哪个上游");
+    // 选 Key 就是在说这把 Key 只给这个渠道用：不再问「这把 Key 还给别处用吗」
+    const declaration = normalizeCoverageDeclaration({ answer: "none" });
+    const connected = await connectGroups(ownStationId, [{ groupKey: groupKeyOf(upstream.id, token), upstreamStationId: upstream.id, tokenId: token, channelIds: [id], declaration }], () => channel.revision);
+    if (!connected.started.length) {
+      const failure = connected.failed[0] || {};
+      throw codedError(failure.code || "ONBOARDING_FAILED", failure.reason || "没能开始算，请稍后再试");
+    }
+    await reconciliation().removeChannelOptouts(ownStationId, [id]);
+    return { changed: true, ruleId: connected.started[0].ruleId };
+  }
+
   // 开始算利润。channelIds 是用户勾的渠道；同一把 Key 的其他渠道自动带上（一个勾，不会把整把 Key 的成本压到其中一个渠道上）。
   // coverage：每组 { [groupKey]: 回答 }——上游答了「只给我的渠道用」（accountUse = only_mine）的不用回答，别的每把 Key 要答一次
   // （附录 2，沿用现有的 coverageDeclaration）。返回 { started, alreadyRunning, blocked, failed }，没做成的写清楚为什么。
@@ -181,20 +253,9 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     }
     if (!ready.length) return { started, alreadyRunning, blocked, failed, skipped };
 
-    const stationIds = [...new Set(ready.map((group) => group.upstreamStationId))];
-    const input = { requestId: randomId(), ownStationId,
-      selections: stationIds.map((stationId) => ({ selectionId: `s-${stationId}`, stationId, monitor: false })),
-      groups: ready.map((group, index) => ({ groupId: `g-${index}`, selectionId: `s-${group.upstreamStationId}`,
-        channels: group.channelIds.map((channelId) => ({ channelId, channelRevision: byId.get(channelId).revision })),
-        reconciliation: { tokenId: group.tokenId, coverageDeclaration: group.declaration } })) };
-    const probe = await onboarding().probeBatch(input);
-    const connected = await onboarding().connectBatch({ ...input, previewId: probe.previewId });
-    for (const [index, group] of ready.entries()) {
-      const result = connected.groups.find((item) => (item.requestedGroupIds || [item.groupId]).includes(`g-${index}`));
-      if (result?.reconciliation?.status === "configured") started.push({ groupKey: group.groupKey, ruleId: result.reconciliation.ruleId, channelIds: group.channelIds });
-      else failed.push({ groupKey: group.groupKey, channelIds: group.channelIds, code: result?.code || result?.reconciliation?.code || "ONBOARDING_FAILED",
-        reason: result?.reason || result?.reconciliation?.reason || null });
-    }
+    const connected = await connectGroups(ownStationId, ready, (channelId) => byId.get(channelId).revision);
+    started.push(...connected.started);
+    failed.push(...connected.failed);
     // 用户点了「开始算利润」：删掉这些渠道的「用户停的」记号（只对真的开始了的）；自动开始（source: "auto"）不碰这些记号
     if (started.length && source !== "auto") await reconciliation().removeChannelOptouts(ownStationId, started.flatMap((item) => item.channelIds));
     return { started, alreadyRunning, blocked, failed, skipped };
@@ -264,5 +325,5 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { stopped, optedOut };
   }
 
-  return { status, start, stop, autoStart };
+  return { status, start, stop, autoStart, options, selectKey };
 }

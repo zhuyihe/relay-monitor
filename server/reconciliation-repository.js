@@ -816,6 +816,25 @@ export class ReconciliationRepository {
     return result.affectedRows;
   }
 
+  // 这几天原来记的 Key 删掉，换成 rows 里的（手动选 Key：被「Key 没有用量」挡住的日子改成新 Key）；同一个事务
+  async replaceDayKeys(ruleId, billDates, rows) {
+    const dates = [...new Set((billDates || []).filter(Boolean))];
+    if (!dates.length) return 0;
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query("DELETE FROM reconciliation_rule_day_keys WHERE rule_id = ? AND bill_date IN (?)", [ruleId, dates]);
+      const list = (rows || []).filter((row) => dates.includes(row?.billDate) && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
+      if (list.length) await conn.query("INSERT INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name) VALUES ?",
+        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null])]);
+      await conn.commit();
+      return list.length;
+    } catch (error) {
+      await conn.rollback().catch(() => {});
+      throw error;
+    } finally { conn.release(); }
+  }
+
   // 一批绑定从 fromDate 到 toDate（含）每天的 Key：{ [ruleId]: { [billDate]: [{ upstreamStationId, tokenId, tokenName }] } }；没记过的天不出现
   async listDayKeys(ruleIds, fromDate, toDate) {
     const ids = [...new Set((ruleIds || []).map(String))];

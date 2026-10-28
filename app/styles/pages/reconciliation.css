@@ -211,3 +211,14 @@
 @media (prefers-reduced-motion: reduce) {
   .jy-profit-switching, .jy-profit-row__toggle .jy-icon { transition: none; }
 }
+
+/* 手动选 Key：每个渠道一行的「选 Key」下拉框，和还没算利润的渠道那一块 */
+.jy-keypicker { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; max-width: 100%; }
+.jy-keypicker__upstream { min-width: 140px; }
+.jy-keypicker__key { min-width: 160px; }
+.jy-profit-card__picker { margin-top: 6px; }
+.jy-keypicker--stacked { flex-direction: column; align-items: flex-start; }
+.jy-profit-unbound { border: 1px solid var(--jy-line, #e5e5e5); border-radius: 8px; padding: 12px 16px; }
+.jy-profit-unbound h3 { margin: 0 0 2px; font-size: 14px; }
+.jy-profit-unbound ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.jy-profit-unbound li { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }

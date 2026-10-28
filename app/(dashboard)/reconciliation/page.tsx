@@ -19,13 +19,15 @@ import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
 import { loadWorkflowActions } from "../../components/use-workflow-actions";
 import { RECON_BUTTONS, SETUP_HREF } from "./recon-format";
-import { COPY } from "./copy";
+import { COPY, KEY_PICKER } from "./copy";
 import { useProfitPage } from "./use-profit-page";
 import type { ProfitPreset, ProfitWindow } from "./use-profit-page";
 import { useConfirmedHistory } from "./use-confirmed-history";
 import { ReconHistory } from "./recon-history";
 import { ProfitSummary } from "./profit-summary";
 import { ProfitTable } from "./profit-table";
+import { KeyPicker, useChannelOptions } from "./key-picker";
+import type { ChannelOption } from "./key-picker";
 import { ProfitDetail, detailTitle } from "./profit-detail";
 import { footerNotes, isMismatched, rangeCaption, rowName } from "./profit-format";
 import type { Ctx, ProfitFilter } from "./profit-format";
@@ -45,6 +47,7 @@ export default function ReconciliationPage() {
   const state = useProfitPage();
   const { config, data, loading, querying, error, preset, activeWindow, switching, retryingKeys, retryErrors, detail } = state;
   const history = useConfirmedHistory();
+  const channelOptions = useChannelOptions(config?.ownStation?.id);
   const [filter, setFilter] = useState<ProfitFilter>("all");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
@@ -168,6 +171,16 @@ export default function ReconciliationPage() {
     </div>}
   /> : null;
 
+  // 手动选 Key：每个渠道一行的下拉框，和还没算利润的渠道那一块（选了上游和 Key 就开始算）
+  const ownerId = config?.ownStation?.id as string | undefined;
+  const optionList: ChannelOption[] = channelOptions.options?.ok ? channelOptions.options.channels : [];
+  const unbound = optionList.filter((channel) => channel.ruleId == null);
+  const onPicked = async () => { await channelOptions.reload(); await state.load(activeWindow); void loadWorkflowActions(true, ["bills"]); };
+  const pickerOf = ownerId && channelOptions.options?.ok ? (row: ProfitRow) => {
+    const channel = optionList.find((item) => item.ruleId != null && row.ruleIds.includes(item.ruleId));
+    return channel ? <KeyPicker key={`${channel.channelId}:${channel.tokenId}`} ownStationId={ownerId} channel={channel} upstreams={channelOptions.options?.ok ? channelOptions.options.upstreams : []}
+      autoOpen={destination?.action === "choose-key" && !!destination.ruleId && row.ruleIds.includes(destination.ruleId)} onChanged={onPicked} /> : null;
+  } : undefined;
   const notes = footerNotes(page, ctx, { upstreams: UPSTREAMS_HREF, start: START_HREF, settings: SETTINGS_HREF }, ownLog);
   const emptyAction = config?.ownStation ? { href: START_HREF, label: COPY.table.startCounting } : { href: SETUP_HREF, label: COPY.table.setupOwnStation };
 
@@ -195,10 +208,19 @@ export default function ReconciliationPage() {
     {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitSummary page={page} ctx={ctx} compact={compact} onSelectDay={selectDay} /></div> : null}
 
     <ProfitTable
+      renderPicker={pickerOf}
       page={page} ctx={ctx} compact={compact} switching={switching} filter={filter} onFilter={setFilter} expanded={expanded} onToggle={toggleRow}
       onOpenDetail={(row, day) => { history.close(); void state.openDetail(row, day); }} onRetry={(row) => void retryRow(row)} onRefresh={() => void refresh()}
       retryingKeys={retryingKeys} retryErrors={retryErrors} empty={emptyAction}
     />
+
+    {unbound.length && ownerId ? <section className="jy-profit-unbound" aria-label={KEY_PICKER.panelTitle}>
+      <h3>{KEY_PICKER.panelTitle}</h3>
+      <p className="jy-caption">{KEY_PICKER.panelDesc}</p>
+      <ul>{unbound.map((channel) => <li key={channel.channelId}><span>{channel.name} <small className="jy-caption">{KEY_PICKER.notSelected}</small></span>
+        <KeyPicker key={channel.channelId} ownStationId={ownerId} channel={channel} upstreams={channelOptions.options?.ok ? channelOptions.options.upstreams : []} onChanged={onPicked} />
+      </li>)}</ul>
+    </section> : null}
 
     {notes.length && page.rows.length ? <p className="jy-caption jy-profit-notes">
       {notes.map((note) => <span key={note.key}>{note.text}{note.link ? <> <a className="jy-link" href={note.link.href}>{note.link.text}</a></> : null}</span>)}
