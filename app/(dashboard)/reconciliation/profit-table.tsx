@@ -45,16 +45,18 @@ function ActionButton({ action, row, onRetry, onRefresh, retrying }: { action: W
   return null;
 }
 
-// 名字后面的感叹号：悬停一句，点开是需处理的标题、说明和按钮。放在点开一行的按钮旁边，点它不展开那一行（连气泡里的点击也不往上冒）
+// 名字后面的感叹号：悬停一句，点开是需处理的标题、说明和按钮（提示类的，如今天提醒换 Key，写 text 和 detail、照常算进合计）。
+// 放在点开一行的按钮旁边，点它不展开那一行（连气泡里的点击也不往上冒）
 function RowBang({ row, popKey, open, onOpenChange, ...props }: { row: ProfitRow; popKey: string; open: string | null; onOpenChange: (key: string | null) => void } & Pick<Props, "onRetry" | "onRefresh" | "retryingKeys" | "retryErrors">) {
-  const attention = row.attention;
-  if (!attention) return null;
-  const title = attention.title || COPY.table.unreadable;
-  const note = [attention.detail, attention.moreCount > 0 ? COPY.attention.more(attention.moreCount) : ""].filter(Boolean).join("。");
+  const attention = row.attention, notice = row.notice;
+  if (!attention && !notice) return null;
+  const title = attention ? attention.title || COPY.table.unreadable : notice!.text;
+  const note = attention ? [attention.detail, attention.moreCount > 0 ? COPY.attention.more(attention.moreCount) : ""].filter(Boolean).join("。") : notice!.detail;
+  const action = attention ? attention.action : notice!.action;
   const retryError = props.retryErrors[row.rowKey];
   return <span className="jy-profit-bang" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
     <IssueBang tone="warn" tip={COPY.table.issueTip(rowName(row), title)} open={open === popKey} onOpenChange={(next) => onOpenChange(next ? popKey : null)}>
-      <IssuePop tone="warn" title={title} note={note} actions={<ActionButton action={attention.action} row={row} onRetry={props.onRetry} onRefresh={props.onRefresh} retrying={props.retryingKeys.has(row.rowKey)} />}>
+      <IssuePop tone="warn" title={title} note={note} actions={<ActionButton action={action} row={row} onRetry={props.onRetry} onRefresh={props.onRefresh} retrying={props.retryingKeys.has(row.rowKey)} />}>
         {retryError ? <Alert type="error" showIcon title={COPY.attention.retryFailed} description={<ErrorDetail raw={noteOf(retryError).raw} />} /> : null}
       </IssuePop>
     </IssueBang>

@@ -396,6 +396,19 @@ test("workflow retry destination opens the linked day, expands that row with its
   assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"], observe: true }]); assert.equal(profitReads.length, 2);
 });
 
+test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感叹号，这一行的数照常算进合计；点开写这句话、说明、按钮「去上游资源」", async (t) => {
+  const notice = { code: "CHANNEL_KEY_IDLE_TODAY", text: "今天有收入，但绑的 Key 一直没用量，可能换了 Key", detail: "今天这个渠道的成本可能少算了。", action: workflowAction("open_channels", { stationId: "upstream-1" }) };
+  const rows = [{ ...profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), notice }, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
+  const { page } = await openDailyPage(t, { rows });
+  const rowA = rowOf(page, "Rule A");
+  await rowA.getByText("$1.50", { exact: true }).waitFor(); assert.equal(await page.locator(".jy-profit-totals").getByText("$5.50", { exact: true }).count(), 1, "算进合计：毛利 1.5 + 4.0");
+  assert.equal(await bangOf(rowOf(page, "Rule B"), "Rule B").count(), 0);
+  await bangOf(rowA, "Rule A").click();
+  const pop = page.locator(".jy-issue-pop"); assert.equal(await pop.locator("b").innerText(), notice.text); await pop.getByText(notice.detail, { exact: true }).waitFor();
+  assert.equal(await pop.getByRole("link", { name: /^去上游资源/ }).getAttribute("href"), notice.action.href);
+  assert.equal(await page.locator(".jy-profit-caption").getByText(/需处理/).count(), 0, "不是需处理：页顶那句不接「需处理，没算进来」");
+});
+
 test("计算明细：上面收入、上游成本、毛利三节；下面「核对上游扣费」可收起，右边一句结论；对不上的那天默认展开，对得上的收起；没有「改时间」", async (t) => {
   const { page } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }),
     detail: (route, params) => fulfill(route, params.ruleIds === "rule-2" ? profitDetail({ gap: { usd: 0.01, rate: 0.01, state: "within" } }) : profitDetail()) });
