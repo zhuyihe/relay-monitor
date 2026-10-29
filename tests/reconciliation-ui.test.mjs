@@ -2038,6 +2038,24 @@ test("上游列表默认排法：手机卡片的顺序和电脑一样", async (t
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/order-375x812.png` });
 });
 
+test("上游资源：「去上游资源」的地址（/stations?action=channels&stationId=）打开那个上游的渠道抽屉，地址栏的参数去掉", async (t) => {
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },
+    { id: "up1", name: "主力上游", type: "newapi", baseUrl: "https://up1.test", monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" } }];
+  const channels = [{ channelId: 1, name: "高速 A", address: "up1.test", enabled: true, ruleId: "r1", upstreamStationId: "up1", tokenId: 9, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null }];
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: "主力上游" }], channels });
+    throw new Error("unexpected API: " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?action=channels&stationId=up1");
+  const drawer = page.getByRole("dialog", { name: /主力上游的渠道/ }); await drawer.waitFor();
+  await drawer.getByText("高速 A", { exact: true }).waitFor();
+  await page.waitForFunction(() => !location.search.includes("action="));
+});
+
 test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂在这个上游下面，确认后发 stop", async (t) => {
   const stops = [];
   const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },

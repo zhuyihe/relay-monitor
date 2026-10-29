@@ -247,7 +247,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     }).sort(([a], [b]) => a - b);
     const available = !!station && rule.ownStationId === station.id && catalogue?.ownStationId === station.id && !stale();
     const sameNamespace = !!rule.ownSource && rule.ownSource.namespaceKey === catalogue?.ownSource?.namespaceKey;
-    const confirmed = available && sameNamespace && (!hasBinding || entries.every(([, binding, revision, missing]) => binding && binding === revision && !missing));
+    // 绑定是用户按渠道 ID 和自己选的 Key 指定的：渠道的地址、类型在 New API 里改了不算「来源变了」，不再要求记下的 revision 和现在的一样；
+    // 只看自营站点可用、还是同一个自营账号、渠道还在。不写库，起算日、范围指纹、已固定的日子都不动
+    const confirmed = available && sameNamespace && (!hasBinding || entries.every(([, , , missing]) => !missing));
     const status = !available ? "unavailable" : confirmed ? "confirmed" : "review_required";
     return { version: hash([sourceVersion(), catalogue?.sourceVersion || null, rule.ownSource?.namespaceKey || null, entries]), status,
       issues: confirmed ? [] : [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: reconciliationIssue("SOURCE_BINDING_UNCONFIRMED").detail }] };
