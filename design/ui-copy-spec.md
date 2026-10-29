@@ -352,6 +352,7 @@ G 以后（新）：运营总览的利润等式和每日利润的汇总是同一
 | 标题 | 说明 | 按钮 | 系统码（开发用） |
 |---|---|---|---|
 | 上游拒绝读取这把 Key | Key 可能已被删除，或上游的登录信息过期了 | 更新登录信息 | KEY_INVALID_OR_DENIED |
+| 这条绑定对不上你站上的渠道了（新） | 自营站点换了账号，或这个渠道在你站上删了。到上游资源解绑，再重新绑定，利润才会接着算。 | 去上游资源 | SOURCE_BINDING_UNCONFIRMED；渠道的地址、类型改了系统自己跟上，不走这一条 |
 | 上游账号或自营站点有变化（旧） | 确认这条绑定还对应原来的账号和渠道，利润才会接着算 | 去确认 | SOURCE_BINDING_UNCONFIRMED |
 | 还没确认这把 Key 属于哪个上游账号（旧） | 测试读取一次就好 | 测试读取 | COST_OWNER_UNVERIFIED、LEGACY_IDENTITY_UNVERIFIED |
 | 还没确认能读到这个上游的完整账单（旧） | 测试读取一次就好 | 测试读取 | UPSTREAM_CAPABILITY_UNVERIFIED |
