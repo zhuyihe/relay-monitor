@@ -3,29 +3,6 @@
 // 导入带 .js 后缀，node 可以直接读。按钮名、「刷新失败」「没设置汇率」这些共用的话从 lib 取，这里不另写。
 import { NAV_LABELS } from "../../../lib/brand.js";
 
-// 手动选 Key（不装读取服务时）：每日利润每个渠道一个「选 Key」下拉框；字等设计定稿（design/ui-copy-spec.md）
-export const KEY_PICKER = Object.freeze({
-  column: "Key",
-  label: "选 Key",
-  placeholder: "选这个渠道用的 Key",
-  upstreamPlaceholder: "先选这个渠道用的是哪个上游",
-  addressUnmatched: "这个渠道填的地址和已加的上游都对不上，先选它用的是哪个上游，再选 Key。",
-  changeUpstream: "换上游",
-  group: "分组",
-  loading: "读取中…",
-  noMatch: "没有这个名字的 Key",
-  noKeys: "这个上游没有能用的 Key",
-  keysFailed: "读不到这个上游的 Key 列表",
-  noKeysAtAll: "已加的上游里读不到 Key，先去",
-  noUpstream: "已加的上游里读不到 Key，先去",
-  upstreamList: "上游列表",
-  started: (channel: string) => `已开始算「${channel}」，从今天 0 点起`,
-  changed: (name: string, rekeyed: boolean) => `已改成 Key「${name}」：今天新旧两把都算，明天起只算新的${rekeyed ? "；被挡住的几天会按新 Key 重新算" : ""}`,
-  notSelected: "还没选 Key",
-  panelTitle: "还没算利润的渠道",
-  panelDesc: "选 Key，从今天 0 点开始算",
-});
-
 export const COPY = Object.freeze({
   // 时间范围（§6）
   presets: Object.freeze({ today: "今天", yesterday: "昨天", "7d": "近 7 天", month: "本月", since: "开始算以来", custom: "自定义" }),
@@ -40,99 +17,55 @@ export const COPY = Object.freeze({
   daysFixed: (n: number) => `${n} 天已固定`,
   daysReading: (n: number) => `${n} 天还在读取`,
   todayLive: "今天实时",
-  // 四个数（设计稿 §2）
+  // 页顶一句后面接的：需处理的渠道没算进来（用语规范 §4）；多天时写有几天
+  caption: Object.freeze({
+    attention: (channels: number) => `其中 ${channels} 个渠道需处理，没算进来`,
+    attentionDays: (channels: number, days: number) => channels === 1 ? `其中 1 个渠道有 ${days} 天需处理，没算进来` : `其中 ${channels} 个渠道共 ${days} 天需处理，没算进来`,
+    // 提示类的（今天提醒换 Key）：这一行照常算进来，只提醒
+    notice: (channels: number) => `其中 ${channels} 个渠道成本可能少算了`,
+  }),
+  // 顶上四个数
+  summary: Object.freeze({ income: "收入", actual: "上游成本", gross: "毛利", margin: "毛利率" }),
+  // 毛利那一格（运营总览的利润卡片还在用：毛利、收入 − 上游成本、毛利率、净利）
   metric: Object.freeze({
     grossToday: "今天到现在的毛利",
     gross: "毛利",
     grossRange: (range: string) => `${range}毛利`,
-    grossTodayMobile: "今天到现在的毛利（还会变）",
     equation: (income: string, cost: string) => `收入 ${income} − 上游成本 ${cost}`,
     margin: (pct: string) => `毛利率 ${pct}`,
     netToday: (fixedCost: string, net: string) => `扣今天的固定成本 ${fixedCost} 后，净利 ${net}`,
     net: (fixedCost: string, net: string) => `扣固定成本 ${fixedCost} 后，净利 ${net}`,
     netUnknown: "固定成本算不出，净利先不算",
-    // 净利那一行的悬停（用语规范 §9）：只挂在每日利润页，别的页的固定成本还跟着现在的购买记录走
-    fixedHover: "固定成本按天平摊，那天固定时一起记下；改了固定成本，已固定的日子不变，还没固定的按新的算",
     // 按人民币显示时固定成本是按自营站点的汇率换的（用语规范 §7）
     approx: (money: string) => `≈ ${money}`,
-    gapToday: "今天的差额",
-    tomorrow: "明天出",
-    gapTodayHint: "应付成本和差额，等今天过了零点、固定以后才算",
-    lessThanExpected: "比预期少赚",
-    moreThanExpected: "比预期多赚",
-    lessThanExpectedDay: (day: string) => `${day}比预期少赚`,
-    moreThanExpectedDay: (day: string) => `${day}比预期多赚`,
-    lessThanExpectedFixed: (n: number) => `比预期少赚（已固定的 ${n} 天）`,
-    moreThanExpectedFixed: (n: number) => `比预期多赚（已固定的 ${n} 天）`,
-    gapNone: "差额",
-    gapNoneHint: "这几天没有算得出应付成本的行",
-    gapBreakdown: (over: string, under: string, within: string) => `多扣 ${over} · 少扣 ${under} · 门槛以内 ${within}`,
-    gapRows: (n: number) => `只算算得出应付成本的 ${n} 行`,
-    mismatchedChannelsLink: (n: number) => `${n} 个渠道对不上`,
-    seeDay: (day: string) => `看${day}`,
-    mismatched: "对不上",
-    channels: (n: number) => `${n} 个渠道`,
-    threshold: (usd: string, pct: string) => `差额同时超过 ${usd} 和应付成本的 ${pct}`,
-    mismatchedRangeHint: (n: number) => `这 ${n} 天里有一天对不上，就算这个渠道对不上`,
-    mismatchedDays: (over: number, under: number) => `多扣的在 ${over} 天，少扣的在 ${under} 天`,
-    uncomputable: "算不了差额",
-    // 「算不了差额」那一格的小字：原因缩成几个字，「Sub2API 上游 1 个 · 有模型没价格 1 个」
-    uncomputableShort: Object.freeze({
-      UPSTREAM_PRICE_UNSUPPORTED: "Sub2API 上游", MODEL_PRICE_MISSING: "有模型没价格", MODEL_PRICE_UNREADABLE: "读不到模型价格", CACHE_FIELDS_UNKNOWN: "看不出缓存用量",
-      KEY_SHARED: "Key 别处也在用", GROUP_AUTO: "分组会自动换", NOT_STARTED: "还没开始算", EXPECTED_COST_NOT_RECORDED: "开始算以前", EXPECTED_COST_DISABLED: "开关关着",
-      EXPECTED_COST_LAGGING: "收费记录还没读到", DAY_BOUNDARY_UNSUPPORTED: "一天不从整点开始", PARTIAL_HOUR_UNSUPPORTED: "这天的时段不是整点",
-      MODEL_PRICE_TIERED: "分档计价", KEY_CHANGE_RATIO_DIFFERS: "换 Key 倍率变了",
-    }),
-    uncomputableOther: "算不出",
-    count: (n: number) => `${n} 个`,
-    uncounted: "没算进来",
-    uncountedDays: (channels: number, days: number) => `${channels} 个渠道的 ${days} 天`,
-    allCounted: "全部算进来了",
-    attentionCount: (n: number) => `另有 ${n} 个需处理，没算进来`,
-    attentionSince: (name: string, day: string) => `「${name}」${day}起需处理`,
-    attentionWhy: (name: string, why: string) => `「${name}」${why}`,
   }),
-  // 表（设计稿 §2、§3）
+  // 每天的毛利小柱状图
+  chart: Object.freeze({
+    title: "每天的毛利",
+    legend: "浅色的还没固定",
+    label: "每天的毛利柱状图",
+    tip: (day: string, weekday: string, state: string) => `${day} ${weekday} · ${state}`,
+  }),
+  // 渠道表和点开以后每天一行
   table: Object.freeze({
     title: "渠道",
-    col: Object.freeze({ channel: "渠道", income: "收入", expected: "应付成本", actual: "上游成本", gap: "差额", gapSub: "上游成本 − 应付", gross: "毛利", margin: "毛利率" }),
-    gapFixedDays: (n: number) => `已固定的 ${n} 天`,
-    gapFixedDaysRange: (n: number, range: string) => `已固定的 ${n} 天（${range}）`,
-    latestGap: (day: string) => `${day}的差额`,
-    yesterdayGap: "昨天的差额",
-    filterAll: "全部",
-    filterMismatched: "对不上",
-    filterAttention: "需处理",
-    filterLabel: "只看",
-    sharedKey: (n: number, key: string) => `${n} 个渠道合用 Key ${key}`,
-    keyName: (key: string) => `Key ${key}`,
-    group: (group: string, ratio: string) => `${group} 分组 ×${ratio}`,
-    startedOn: (day: string) => `${day} 开始算`,
-    startedToday: (time: string) => `今天 ${time} 开始算，0 点以后的都算进来了`,
-    startedTodayShort: "今天开始算",
-    unreadable: "读不到",
+    col: Object.freeze({ channel: "渠道", income: "收入", actual: "上游成本", gross: "毛利", margin: "毛利率" }),
+    day: Object.freeze({ date: "日期", state: "状态", detail: "计算明细", live: "实时", fixed: "已固定", attention: "需处理", today: "今天" }),
+    mobileSort: (column: string, desc: boolean) => `按${column} ${desc ? "▼" : "▲"}`,
+    mobileLine: (income: string, margin: string) => `收入 ${income} · 毛利率 ${margin}`,
+    mobileDay: (income: string, actual: string) => `收入 ${income} · 成本 ${actual}`,
+    mobileGross: (gross: string) => `毛利 ${gross}`,
     totals: (n: number) => `合计（算进来的 ${n} 个渠道）`,
-    totalsPartial: (n: number, name: string, days: number) => `合计（算进来的 ${n} 个渠道；「${name}」只有前 ${days} 天）`,
-    // 已固定、又因为重算的事需处理、照算进了合计的行：单天、多天都写这句（不带具体哪几天，等接口按天给数再接，设计 10-26 定）
+    // 已固定、又因为重算的事需处理、照算进了合计的行（设计 10-26 定）
     totalsHeld: (n: number, held: number) => `合计（算进来的 ${n} 个渠道；其中 ${held} 个还没重算，先按原来固定的数算）`,
-    // 手机顶上卡片最后一行：和 totalsHeld 括号里同一句，不带「合计」
-    heldNote: (held: number) => `其中 ${held} 个还没重算，先按原来固定的数算`,
-    onlyRows: (n: number) => `只有 ${n} 行`,
-    sameRows: (n: number) => `同样这 ${n} 行`,
-    noMatch: "没有这样的渠道",
     emptyTitle: "还没有在算利润的渠道",
-    emptyDesc: "加好上游、让自营站点的渠道用它的 Key，就能算出今天从 0 点到现在的毛利。",
-    startCounting: "开始算利润",
+    emptyDesc: "在上游资源里把渠道绑到上游，就能算出今天从 0 点到现在的毛利。",
+    goUpstreams: "去上游资源",
     setupOwnStation: "设置自营站点",
     expand: (name: string) => `展开 ${name}`,
     collapse: (name: string) => `收起 ${name}`,
-    expandShort: "展开",
-    collapseShort: "收起",
-    mobileIncomeActual: (income: string, actual: string) => `收入 ${income} · 实付 ${actual}`,
-    // 手机卡片差额那一行的开头：「差额 +$0.01」「昨天差额 多扣 $1.20」「差额 —（Sub2API 上游读不到价格）」
-    gapLine: (label: string, text: string, reason: string) => `${label} ${text}${reason ? `（${reason}）` : ""}`,
-    yesterdayGapShort: "昨天差额",
-    dayGapShort: (day: string) => `${day}差额`,
+    issueTip: (name: string, title: string) => `${name}：${title}`,
+    unreadable: "读不到",
   }),
   // 差额那一格（用语规范 §5.7）
   gap: Object.freeze({
@@ -140,12 +73,8 @@ export const COPY = Object.freeze({
     under: (usd: string) => `少扣 ${usd}`,
     overRate: (pct: string) => `比应付多 ${pct}`,
     underRate: (pct: string) => `比应付少 ${pct}`,
-    mismatchedDaysIn: (n: number) => `其中 ${n} 天对不上`,
-    tag: "对不上",
     tomorrow: "明天出",
     reading: "还在读取",
-    yesterdayNotStarted: "昨天还没开始算",
-    dayNotStarted: (day: string) => `${day}还没开始算`,
     // 原因码 → 字（§5.7；码见 lib/expected-cost-day.js 顶部注释和 lib/profit-page.js）
     reason: Object.freeze({
       UPSTREAM_PRICE_UNSUPPORTED: "Sub2API 上游读不到价格",
@@ -180,46 +109,23 @@ export const COPY = Object.freeze({
     tieredPriceUnnamed: "有模型上游按用量分档计价，算不了应付成本",
     unknown: "算不出",
   }),
-  // 需处理那一行（§5.2、§5.1）
+  // 需处理的感叹号气泡（标题、说明、按钮都从问题码来，这里只放几句固定的）
   attention: Object.freeze({
-    prefix: "需处理：",
-    since: (day: string) => `${day}起没算进利润`,
-    sinceRange: (day: string, n: number) => `${day}起没算进利润，这 ${n} 天都不在合计里`,
-    sinceOnly: (day: string, n: number) => `${day}起没算进利润，上面只是前 ${n} 天`,
     more: (n: number) => `还有 ${n} 个问题`,
     retryFailed: "重新读取没完成，请稍后再试",
   }),
-  // 点开一行（设计稿 §4）
-  expanded: Object.freeze({
-    where: "差在哪",
-    dailyTitle: "近 7 天每天的差额",
-    dailyTitleRange: "每天的差额",
-    dot: "·",
-    single: (tokens: string, group: string, expected: string, actual: string) =>
-      `自营站点这个渠道这天用了 ${tokens} Token，按上游的价格和 ${group} 算，应付成本 ${expected}；上游这把 Key 这天实付 ${actual}。`,
-    singleNoTokens: (group: string, expected: string, actual: string) =>
-      `按上游的价格和 ${group} 算，应付成本 ${expected}；上游这把 Key 这天实付 ${actual}。`,
-    singleMobile: (tokens: string, group: string, expected: string, actual: string) => `这天用了 ${tokens} Token，按上游的价格和 ${group} 算，应付成本 ${expected}；上游实付 ${actual}。`,
-    alsoDay: (day: string, gap: string) => `${day} 也${gap}。`,
-    dayGap: (day: string, gap: string) => `${day} ${gap}`,
-    restMatched: (n: number) => `其余 ${n} 天对得上`,
-    allMatched: "这几天都对得上。",
-    clickDay: "点一天看那天的计算明细。",
-    noGap: "这几天算不了差额，原因在差额那一格。",
-    tomorrowOnly: "今天的应付成本和差额明天出。",
-    // 看今天时「差在哪」写最近一个已固定的日子（应付、实付的金额没有现成字段，只写 Token 和差额）
-    latestDay: (day: string, tokens: string, gap: string) => `${day}：自营站点这个渠道用了 ${tokens} Token，${gap}。`,
-    latestDayNoTokens: (day: string, gap: string) => `${day}：${gap}。`,
-    latestDayNone: (day: string, reason: string) => `${day}：算不了差额（${reason}）。`,
-    todayTomorrow: "今天的明天出。",
-    seeDetail: "看计算明细（按模型拆开）",
-    seeDetailShort: "看计算明细",
-    upstreamKey: "到上游后台查这把 Key",
-    dayCell: (day: string) => `${day}的差额`,
-    today: "今天",
-  }),
+  // 点开渠道里的链接
+  expanded: Object.freeze({ upstreamKey: "到上游后台查这把 Key" }),
   // 计算明细抽屉（设计稿 §5、用语规范 §9）
   detail: Object.freeze({
+    group: (group: string, ratio: string) => `${group} 分组 ×${ratio}`,
+    // 「核对上游扣费」一节：平时收起，右边一句结论，对不上的那天默认展开（设计 10-29）
+    verify: Object.freeze({
+      title: "核对上游扣费",
+      match: "对得上",
+      mismatch: (over: string) => `${over}，对不上`,
+      keyChange: "这天换了 Key，不比差额",
+    }),
     title: (name: string, day: string) => `计算明细 · ${name} · ${day}`,
     readFailed: "读不到计算明细",
     income: "收入",
@@ -227,7 +133,6 @@ export const COPY = Object.freeze({
     incomeFromMany: (n: number) => `来自自营站点 ${n} 个渠道的收费记录`,
     adminAll: (usd: string) => `已扣除管理员自用 ${usd}`,
     adminSome: (usd: string) => `已扣除管理员自用 ${usd}（部分日子没扣）`,
-    adminSomeTitle: "有几天的账是按以前的规矩固定的，那时还不扣管理员自用，这几天的收入里可能含着它",
     adminNone: "收入里可能含管理员自用（这一天的账是按以前的规矩固定的，那时还不扣管理员自用）",
     expected: "应付成本",
     expectedIntro: (upstream: string, group: string) => `这个渠道这天的用量，按上游「${upstream}」的价格和 ${group} 算：`,
@@ -263,14 +168,13 @@ export const COPY = Object.freeze({
     revisedTimes: (n: number) => `改过 ${n} 次`,
     notRevised: "没有",
     notFixed: "今天还没固定",
-    perChannel: "各渠道",
     expectedToday: "今天过了零点、固定以后才算",
   }),
   // 页顶的提示条、表下面那一行（设计稿 §6、用语规范 §8.1、§5.4）
   notice: Object.freeze({
     unaccounted: (usd: string) => `另有 ${usd} 上游成本没算进利润`,
     seeUpstreams: "查看各上游",
-    unlinked: (n: number) => `另有 ${n} 个渠道还没算利润`,
+    unlinked: (n: number) => `还有 ${n} 个渠道没绑定上游，没算进来。`,
     notCounted: (n: number) => `有 ${n} 天还没固定，没算进来`,
     // 这种接法这一版还不算利润：只提示，没有按钮（用语规范 §5.6）；最多点三个名，再多写「等 N 个渠道」
     unsupported: (items: string[], total: number) => `这一版还不算利润的渠道：${items.join("；")}${total > items.length ? `；等 ${total} 个渠道` : ""}`,

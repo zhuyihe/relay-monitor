@@ -7,7 +7,7 @@ import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } fr
 import type { MouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { App, Button, Dropdown, Grid, Input, Modal, Popover, Select, Tooltip } from "antd";
+import { App, Button, Dropdown, Grid, Input, Modal, Select, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { keepOrder, orderUpstreams } from "../../../lib/upstream-order.js";
@@ -22,6 +22,7 @@ import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES
 import { EmptyState, ErrorState, RefreshFailedBanner, Skeleton } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
+import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { Seg } from "../../components/seg";
@@ -230,7 +231,6 @@ export default function StationsPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [issueOpenId, setIssueOpenId] = useState<string | null>(null);
-  const [bangX, setBangX] = useState(0); // 感叹号的横向中心：手机上气泡占满屏宽，箭头要对着它
   const lastOrder = useRef<string[]>([]);
   const [unbinding, setUnbinding] = useState<ChannelOption | null>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
@@ -620,25 +620,16 @@ export default function StationsPage() {
     const asOf = v.checkedAt ? formatAsOf(v.checkedAt, tz) : null;
     const tip = [first, asOf].filter(Boolean).join(" · ");
     const needsLogin = ["auth", "permission", "captcha"].includes(String(issue.category));
-    const content = (
-      <div className="jy-issue-pop">
-        <b>{first}</b>
-        {asOf ? <span className="jy-issue-pop-asof">{asOf}</span> : null}
-        <ErrorDetail raw={issue.raw} />
-        <div className="jy-issue-pop-actions">
-          <Button size="small" loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>{TEST_READ}</Button>
-          {needsLogin ? <Button size="small" type="primary" onClick={(e) => { setIssueOpenId(null); openEditor(v.s, e.currentTarget, { focus: loginFieldOf(v.s.type) }); }}>{UPDATE_LOGIN}</Button> : null}
-        </div>
-      </div>
-    );
     return (
-      <Tooltip title={tip} {...(issueOpenId === popKey ? { open: false } : {})}>
-        <Popover trigger="click" placement="bottomLeft" rootClassName="jy-issue-popover" styles={{ root: { "--jy-bang-x": `${Math.max(12, bangX - 12 - 6)}px` } as React.CSSProperties }} content={content} open={issueOpenId === popKey} onOpenChange={(open) => setIssueOpenId(open ? popKey : null)} arrow>
-          <button type="button" className="jy-issue-bang" aria-label={`${stationDisplayName(v.s)}：${tip}`} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setBangX(r.left + r.width / 2); }}>
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7.2" fill="currentColor" /><rect x="7.1" y="3.6" width="1.8" height="5.8" rx=".9" fill="#fff" /><circle cx="8" cy="11.8" r="1.05" fill="#fff" /></svg>
-          </button>
-        </Popover>
-      </Tooltip>
+      <IssueBang tip={tip} label={`${stationDisplayName(v.s)}：${tip}`} open={issueOpenId === popKey} onOpenChange={(open) => setIssueOpenId(open ? popKey : null)}>
+        <IssuePop title={first} note={asOf}>
+          <ErrorDetail raw={issue.raw} />
+          <div className="jy-issue-pop-actions">
+            <Button size="small" loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>{TEST_READ}</Button>
+            {needsLogin ? <Button size="small" type="primary" onClick={(e) => { setIssueOpenId(null); openEditor(v.s, e.currentTarget, { focus: loginFieldOf(v.s.type) }); }}>{UPDATE_LOGIN}</Button> : null}
+          </div>
+        </IssuePop>
+      </IssueBang>
     );
   };
 

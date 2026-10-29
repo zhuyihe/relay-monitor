@@ -109,7 +109,9 @@ export type ConfirmedHistoryResponse = { ruleId: string; readOnly: true; records
 export type ReconciliationCurrency = "USD" | "CNY";
 // ---- 每日利润页（POST /api/reconciliation/profit、GET …/profit/detail；字段名照设计稿 daily-profit-a.md §9）----
 // 一行一天的小格：fixed 已固定 / reading 还在读取 / today 今天 / attention 需处理 / notStarted 还没开始算 / future 还没到
-export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" | "attention" | "notStarted" | "future"; gapUsd: number | null; gapState: "over" | "under" | "within" | null; reason: string | null; tokens: number | null };
+export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" | "attention" | "notStarted" | "future"; gapUsd: number | null; gapState: "over" | "under" | "within" | null; reason: string | null; tokens: number | null;
+  // 这天的收入、上游成本、毛利（美元原币）：已固定的取账本，今天取这一行整段的数，其余是 null
+  incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null };
 // 差额的状态：over / under 对不上（多扣 / 少扣）、within 门槛以内、today 明天出、reading 还在读取、uncomputable 算不了（reason 给原因）、attention 需处理、notStarted 还没开始算
 export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" | "none";
 export type ProfitRow = {

@@ -1,104 +1,92 @@
-/* 每日利润页（一张对账表，design/ux/daily-profit-a.md）：只放本页特有的布局，通用外观（面板、分段、抽屉、横幅）用 jy.css。
-   颜色只用 --jy-* 变量；金额不上色，对不上靠小标签和整行的底色（§3.2）。 */
+/* 每日利润页（设计 10-29）：只放本页特有的布局，通用外观（面板、分段、抽屉、横幅）用 jy.css。
+   颜色只用 --jy-* 变量；亏钱的毛利标红，需处理的渠道名字后面一个橙色感叹号。 */
 
 .jy-profit-page { gap: 16px; }
 
-/* 页顶一句、自定义日期、「以前的每日记录」 */
+/* 页顶一句、自定义日期 */
 .jy-profit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
 .jy-profit-caption { font-size: 14px; line-height: 22px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
-.jy-profit-head__history { margin-left: auto; }
 .jy-profit-custom { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; flex-basis: 100%; }
 .jy-profit-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 /* 换了范围、新数据还没回来：旧数字属于别的范围，变淡且不能点 */
 .jy-profit-switching { opacity: .5; pointer-events: none; transition: opacity .2s; }
 
-/* 四个数一行 */
+/* 四个数一行（手机两个一排） */
 .jy-profit-summary {
   display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0;
   background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); overflow: hidden;
 }
 .jy-profit-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 20px 24px; }
 .jy-profit-metric + .jy-profit-metric { border-left: 1px solid var(--jy-rule-soft); }
-.jy-profit-metric--crit { background: var(--jy-crit-tint); }
 .jy-profit-metric dd { margin: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .jy-profit-metric__title { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
 .jy-profit-metric__value { font-size: 28px; line-height: 36px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.jy-profit-metric p { margin: 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-/* 净利只在毛利下面一行小字，虚线隔开 */
-.jy-profit-metric__net { margin-top: 6px !important; padding-top: 6px; border-top: 1px dashed var(--jy-rule); }
-.jy-profit-metric__link.ant-btn { height: auto; padding: 0 0 0 4px; font-size: 12px; line-height: 18px; }
 
-/* 表 */
+/* 每天的毛利小柱状图 */
+.jy-profit-chart__body { min-width: 0; }
+.jy-profit-chart__body svg { display: block; overflow: visible; }
+.jy-profit-chart__grid { stroke: var(--jy-rule-soft); stroke-width: 1; }
+.jy-profit-chart__zero { stroke: var(--jy-rule); stroke-width: 1; }
+.jy-profit-chart__axis { font-size: 11px; fill: var(--jy-ink-3); }
+.jy-profit-chart__bar { fill: var(--jy-cobalt); opacity: .85; }
+.jy-profit-chart__bar.is-light { opacity: .3; }
+.jy-profit-chart__bar.is-loss { fill: var(--jy-crit); }
+.jy-profit-chart g[data-day] { outline: none; }
+.jy-profit-chart g[data-day]:hover .jy-profit-chart__bar, .jy-profit-chart g[data-day]:focus-visible .jy-profit-chart__bar { opacity: 1; }
+
+/* 渠道表 */
 .jy-profit-panel .jy-panel-head { flex-wrap: wrap; }
 .jy-profit-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-.jy-profit-table th, .jy-profit-table td { padding: 10px 16px; text-align: left; vertical-align: top; border-top: 1px solid var(--jy-rule-soft); }
+.jy-profit-table th, .jy-profit-table td { padding: 12px 16px; text-align: left; vertical-align: top; border-top: 1px solid var(--jy-rule-soft); }
 .jy-profit-table th:first-child, .jy-profit-table td:first-child { padding-left: 24px; }
 .jy-profit-table th:last-child, .jy-profit-table td:last-child { padding-right: 24px; }
 .jy-profit-table thead th { font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); background: var(--jy-sunken); border-top: 0; white-space: nowrap; }
-.jy-profit-table thead th small { display: inline-block; margin-left: 6px; font-weight: 400; color: var(--jy-ink-3); white-space: normal; }
 .jy-profit-num { text-align: right !important; white-space: nowrap; }
-.jy-profit-num small { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: normal; }
-.jy-profit-num--gap { white-space: normal; }
+.jy-profit-sort { display: inline-flex; align-items: center; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
+.jy-profit-sort:hover { color: var(--jy-ink); }
+.jy-profit-sort:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: 2px; }
 .jy-profit-row { cursor: pointer; }
-.jy-profit-row > td { border-left: 3px solid transparent; }
-.jy-profit-row > td:first-child { padding-left: 21px; }
 .jy-profit-row:hover > td { background: linear-gradient(var(--jy-cobalt-tint), var(--jy-cobalt-tint)), var(--jy-sheet); }
-/* 对不上多扣：浅红底 + 左边一道红线；需处理：橙线；对不上少扣：浅蓝底 + 蓝线（§3.2） */
-.jy-profit-row--over > td { background: var(--jy-crit-tint); }
-.jy-profit-row--over > td:first-child { border-left-color: var(--jy-crit); }
-.jy-profit-row--attention > td:first-child { border-left-color: var(--jy-warn); }
-.jy-profit-row--under > td { background: var(--jy-cobalt-tint); }
-.jy-profit-row--under > td:first-child { border-left-color: var(--jy-cobalt); }
-.jy-profit-row__attention > td, .jy-profit-row__expanded > td { border-top: 0; padding-top: 0; cursor: default; }
-.jy-profit-row__expanded > td { padding-bottom: 16px; }
+.jy-profit-row.is-open > td { background: var(--jy-sunken); }
+.jy-profit-row__expanded > td { padding: 4px 24px 16px 44px; background: var(--jy-sunken); border-top: 0; cursor: default; }
 .jy-profit-row__name { min-width: 240px; }
+.jy-profit-row__line { display: inline-flex; align-items: center; gap: 0; max-width: 100%; }
 .jy-profit-row__name small { display: block; margin-left: 20px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
 .jy-profit-row__toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; color: var(--jy-ink); font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
 .jy-profit-row__toggle strong { font-weight: 600; }
-.jy-profit-row__toggle .jy-icon { width: 14px; height: 14px; color: var(--jy-ink-3); flex: none; transition: transform .15s; }
-.jy-profit-row__toggle .jy-icon.is-open { transform: rotate(90deg); }
-.jy-profit-row__toggle:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: 2px; }
-.jy-profit-unread { display: inline-block; padding: 0 6px; border-radius: var(--jy-r1); background: var(--jy-warn-tint); color: var(--jy-warn-ink); font-size: 12px; line-height: 20px; }
+.jy-profit-row__toggle .jy-icon, .jy-profit-card__toggle .jy-icon { width: 14px; height: 14px; color: var(--jy-ink-3); flex: none; transition: transform .15s; }
+.jy-profit-row__toggle .jy-icon.is-open, .jy-profit-card__toggle .jy-icon.is-open { transform: rotate(90deg); }
+.jy-profit-row__toggle:focus-visible, .jy-profit-card__toggle:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: 2px; }
+.jy-profit-bang { display: inline-flex; }
+.jy-profit-neg { color: var(--jy-crit); }
 .jy-profit-totals > td { background: var(--jy-sunken); font-weight: 600; border-top: 1px solid var(--jy-rule); }
-.jy-profit-totals > td small { font-weight: 400; }
 
-/* 差额那一格 */
-.jy-profit-gap { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; }
-.jy-profit-gap__main { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.jy-profit-gap--muted .jy-profit-gap__main { color: var(--jy-ink-3); }
-.jy-profit-gap small { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); text-align: right; white-space: normal; }
-.jy-profit-tag { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border: 1px solid; border-radius: var(--jy-r1); font-size: 12px; line-height: 18px; font-weight: 500; }
-.jy-profit-tag--over { color: var(--jy-crit-ink); border-color: var(--jy-crit); background: var(--jy-sheet); }
-.jy-profit-tag--under { color: var(--jy-cobalt); border-color: var(--jy-cobalt); background: var(--jy-sheet); }
+/* 点开一个渠道：一天一行 */
+.jy-profit-days { width: 100%; background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); font-variant-numeric: tabular-nums; }
+.jy-profit-days th, .jy-profit-days td { padding: 10px 16px; border-top: 1px solid var(--jy-rule-soft); font-size: 13px; line-height: 20px; }
+.jy-profit-days thead th { border-top: 0; }
+.jy-profit-days__state { color: var(--jy-ink); }
+.jy-profit-days__state.is-attention { color: var(--jy-warn-ink); }
+.jy-profit-days__state.is-fixed { color: var(--jy-ink-2); }
+.jy-profit-days--cards { margin: 10px 0 0 20px; padding: 0; list-style: none; width: auto; }
+.jy-profit-days--cards li { padding: 8px 10px; border-top: 1px solid var(--jy-rule-soft); font-size: 13px; line-height: 20px; }
+.jy-profit-days--cards li:first-child { border-top: 0; }
+.jy-profit-days__top, .jy-profit-days__line { display: flex; justify-content: space-between; gap: 12px; }
+.jy-profit-days__line { margin-top: 2px; color: var(--jy-ink-2); font-size: 12px; }
+.jy-profit-days__line b { font-weight: 500; color: var(--jy-ink); white-space: nowrap; }
+.jy-profit-days--cards .ant-btn { padding: 0; height: auto; font-size: 12px; min-height: 32px; }
 
-/* 需处理那一行下面一行 */
-.jy-profit-attention { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; line-height: 20px; color: var(--jy-warn-ink); }
-.jy-profit-attention__text { overflow-wrap: anywhere; }
-.jy-profit-attention__text b { font-weight: 600; }
-.jy-profit-attention .ant-alert { flex-basis: 100%; }
-
-/* 点开一行：左边「差在哪」，右边每天的小格；一个月时上下排 */
-.jy-profit-where { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 32px; padding: 12px 16px; background: var(--jy-sheet); border: 1px solid var(--jy-rule-soft); border-radius: var(--jy-r2); }
-.jy-profit-where--wide { grid-template-columns: minmax(0, 1fr); }
-.jy-profit-where__text, .jy-profit-where__days { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.jy-profit-where strong { font-size: 13px; line-height: 20px; font-weight: 600; color: var(--jy-ink); }
-.jy-profit-where p { margin: 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
-.jy-profit-where__links { display: flex; flex-wrap: wrap; gap: 0 8px; margin-left: -7px; }
-.jy-profit-days { display: flex; flex-wrap: wrap; gap: 4px; }
-.jy-profit-day {
-  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; min-width: 48px; height: 44px; padding: 0 6px;
-  border: 1px solid var(--jy-rule-soft); border-radius: var(--jy-r1); background: var(--jy-sunken); color: var(--jy-ink-3); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; font-variant-numeric: tabular-nums;
-}
-.jy-profit-day b { font-weight: 600; color: var(--jy-ink-2); }
-.jy-profit-day:hover:not(:disabled) { border-color: var(--jy-cobalt); }
-.jy-profit-day:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
-.jy-profit-day:disabled { cursor: default; opacity: .6; }
-.jy-profit-day--over { background: var(--jy-crit-tint); border-color: var(--jy-crit); color: var(--jy-crit-ink); }
-.jy-profit-day--over b { color: var(--jy-crit-ink); }
-.jy-profit-day--under { background: var(--jy-cobalt-tint); border-color: var(--jy-cobalt); color: var(--jy-cobalt); }
-.jy-profit-day--under b { color: var(--jy-cobalt); }
-.jy-profit-day--today { background: var(--jy-sheet); border-style: dashed; }
-.jy-profit-day--today b { font-weight: 400; }
+/* 手机：一个渠道一张卡片 */
+.jy-profit-cards { margin: 0; padding: 0; list-style: none; }
+.jy-profit-card { padding: 12px 14px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-profit-card:first-child { border-top: 0; }
+.jy-profit-card.is-open { background: var(--jy-sunken); }
+.jy-profit-card__head { display: flex; align-items: center; min-width: 0; }
+.jy-profit-card__toggle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 0; border: 0; background: none; color: var(--jy-ink); font: inherit; text-align: left; cursor: pointer; }
+.jy-profit-card__toggle strong { font-size: 15px; line-height: 24px; font-weight: 600; overflow-wrap: anywhere; }
+.jy-profit-card__gross { margin-left: auto; padding-left: 12px; font-size: 15px; line-height: 24px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.jy-profit-card__sub { display: flex; justify-content: space-between; gap: 12px; margin-top: 2px; padding-left: 20px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-profit-card__sub span:last-child { text-align: right; }
 
 /* 表下面那一行 */
 .jy-profit-notes { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: -4px 0 0; padding: 0 24px; }
@@ -106,10 +94,6 @@
 /* 计算明细抽屉 */
 .jy-profit-drawer .ant-drawer-title { overflow-wrap: anywhere; }
 .jy-profit-detail { display: flex; flex-direction: column; gap: 16px; min-width: 0; font-variant-numeric: tabular-nums; }
-.jy-profit-detail__timing { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--jy-rule-soft); }
-.jy-profit-detail__timing h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
-.jy-profit-detail__timing > .jy-caption { margin: 0; }
-.jy-profit-detail__timing-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 .jy-profit-detail__sec { display: flex; flex-direction: column; gap: 6px; }
 .jy-profit-detail__sec + .jy-profit-detail__sec { padding-top: 12px; border-top: 1px solid var(--jy-rule-soft); }
 .jy-profit-detail__sec header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -121,6 +105,17 @@
 .jy-profit-detail__list li { display: flex; justify-content: space-between; gap: 12px; color: var(--jy-ink-2); }
 .jy-profit-detail__list b { font-weight: 500; color: var(--jy-ink); }
 .jy-profit-detail__facts { padding-top: 12px; border-top: 1px solid var(--jy-rule-soft); font-size: 13px; }
+/* 「核对上游扣费」：可收起，右边一句结论 */
+.jy-profit-verify { border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); overflow: hidden; }
+.jy-profit-verify__head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 12px 14px; border: 0; background: var(--jy-sunken); font: inherit; color: var(--jy-ink); text-align: left; cursor: pointer; }
+.jy-profit-verify__head h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 600; }
+.jy-profit-verify__head .jy-icon { width: 14px; height: 14px; color: var(--jy-ink-3); flex: none; transition: transform .15s; }
+.jy-profit-verify__head .jy-icon.is-open { transform: rotate(90deg); }
+.jy-profit-verify__head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--jy-cobalt); }
+.jy-profit-verify__summary { margin-left: auto; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); text-align: right; }
+.jy-profit-verify__summary.is-crit { color: var(--jy-crit-ink); }
+.jy-profit-verify__body { display: flex; flex-direction: column; gap: 12px; padding: 4px 14px 14px; }
+.jy-profit-verify__body .jy-profit-detail__facts { border-top: 1px solid var(--jy-rule-soft); }
 .jy-profit-models { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 20px; }
 .jy-profit-models th, .jy-profit-models td { padding: 6px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--jy-rule-soft); }
 .jy-profit-models th:first-child, .jy-profit-models td:first-child { padding-left: 0; }
@@ -130,95 +125,19 @@
 .jy-profit-models tfoot td { font-weight: 600; border-bottom: 0; }
 .jy-profit-models tfoot td:nth-child(2) { font-weight: 400; color: var(--jy-ink-2); }
 
-/* 手机：一张卡片 + 一个渠道一张卡片 */
-.jy-profit-summary--mobile { display: flex; flex-direction: column; }
-.jy-profit-summary__main { display: flex; flex-direction: column; gap: 4px; padding: 16px; }
-.jy-profit-summary__main p { margin: 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
-.jy-profit-summary__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--jy-rule-soft); font-size: 13px; line-height: 20px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
-.jy-profit-summary__foot b { font-weight: 600; color: var(--jy-ink); }
-.jy-profit-summary__foot.is-crit { background: var(--jy-crit-tint); }
-.jy-profit-summary__held { margin: 0; padding: 8px 16px 12px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
-.jy-profit-filter .jy-seg { display: flex; width: 100%; }
-.jy-profit-filter .jy-seg button { flex: 1; justify-content: center; min-height: 40px; }
-.jy-profit-mobile { display: flex; flex-direction: column; gap: 12px; }
-.jy-profit-cards { display: flex; flex-direction: column; gap: 12px; }
-.jy-profit-card { border: 1px solid var(--jy-rule); border-left: 4px solid transparent; border-radius: var(--jy-r2); background: var(--jy-sheet); overflow: hidden; }
-.jy-profit-card.jy-profit-row--over { border-left-color: var(--jy-crit); }
-.jy-profit-card.jy-profit-row--attention { border-left-color: var(--jy-warn); }
-.jy-profit-card.jy-profit-row--under { border-left-color: var(--jy-cobalt); }
-.jy-profit-card__head { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 14px 16px; border: 0; background: none; color: var(--jy-ink); font: inherit; text-align: left; cursor: pointer; }
-.jy-profit-card__head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--jy-cobalt); }
-.jy-profit-card__top { display: flex; justify-content: space-between; gap: 12px; }
-.jy-profit-card__top strong { font-size: 16px; line-height: 24px; font-weight: 600; overflow-wrap: anywhere; }
-.jy-profit-card__top b { font-size: 16px; line-height: 24px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.jy-profit-card__head small, .jy-profit-card__line { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.jy-profit-card__head small { color: var(--jy-ink-3); }
-.jy-profit-card__line { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.jy-profit-card__line--muted { color: var(--jy-ink-3); }
-.jy-profit-card .jy-profit-attention { padding: 0 16px 14px; }
-.jy-profit-card .jy-profit-attention .ant-btn { min-height: 44px; }
-.jy-profit-card__body { display: flex; flex-direction: column; gap: 12px; padding: 0 16px 16px; }
-.jy-profit-card__facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 16px; margin: 0; font-size: 14px; line-height: 22px; }
-.jy-profit-card__facts dt { color: var(--jy-ink-2); }
-.jy-profit-card__facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-.jy-profit-card__facts dd .jy-profit-gap { align-items: flex-end; }
-.jy-profit-card .jy-profit-where { grid-template-columns: minmax(0, 1fr); padding: 0; border: 0; }
-.jy-profit-card .jy-profit-days { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
-.jy-profit-card .jy-profit-day { flex: none; min-width: 56px; height: 48px; }
-.jy-profit-card .jy-profit-where__days .ant-btn { align-self: flex-start; min-height: 44px; }
-
-/* 以前的每日记录（抽屉内，沿用） */
-.reconciliation-detail { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.reconciliation-detail__label { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
-.reconciliation-detail__value { font-size: 14px; line-height: 22px; color: var(--jy-ink); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.reconciliation-detail__value small { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
-.reconciliation-table-identity { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
-.reconciliation-table-identity small { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
-.reconciliation-table-identity .jy-tag { align-self: flex-start; }
-.reconciliation-confirmed { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.reconciliation-confirmed > .jy-caption { margin: 0; }
-.reconciliation-confirmed > .ant-btn { align-self: flex-start; }
-.reconciliation-confirmed__field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.reconciliation-confirmed__field .ant-select, .reconciliation-confirmed__field .ant-picker { width: 100%; }
-.reconciliation-confirmed__label { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
-.reconciliation-confirmed-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.reconciliation-confirmed-table .ant-table-expanded-row > td { background: var(--jy-sunken); }
-.reconciliation-confirmed-table .ant-table-tbody > tr.ant-table-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--jy-cobalt); }
-.reconciliation-confirmed-cards { display: flex; flex-direction: column; border-top: 1px solid var(--jy-rule-soft); }
-.reconciliation-confirmed-card { border-bottom: 1px solid var(--jy-rule-soft); border-radius: 0; }
-.reconciliation-confirmed-card.ant-collapse > .ant-collapse-item > .ant-collapse-header { padding-inline: 0; }
-.reconciliation-confirmed-card.ant-collapse .ant-collapse-content-box { padding-inline: 0 !important; }
-.reconciliation-confirmed-card__head { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
-.reconciliation-confirmed-card__head > span { font-size: 12px; line-height: 18px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
-
-/* 平板宽度下四个数两列 */
-@media (max-width: 1023px) {
+@media (max-width: 767px) {
+  .jy-profit-custom, .jy-profit-custom .ant-picker { width: 100%; }
+  .jy-profit-page .ant-picker-input > input { font-size: 16px; }
+  /* 四个数两个一排 */
   .jy-profit-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-profit-metric { padding: 12px 14px; }
   .jy-profit-metric + .jy-profit-metric { border-left: 0; }
   .jy-profit-metric:nth-child(even) { border-left: 1px solid var(--jy-rule-soft); }
   .jy-profit-metric:nth-child(n + 3) { border-top: 1px solid var(--jy-rule-soft); }
-  .jy-profit-where { grid-template-columns: minmax(0, 1fr); }
-}
-
-@media (max-width: 767px) {
-  .jy-profit-head__history { margin-left: 0; }
-  .jy-profit-custom, .jy-profit-custom .ant-picker { width: 100%; }
-  .jy-profit-page .ant-picker-input > input { font-size: 16px; }
-  .jy-profit-metric__value { font-size: 32px; line-height: 40px; }
+  .jy-profit-metric__value { font-size: 22px; line-height: 30px; }
   .jy-profit-notes { padding: 0; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .jy-profit-switching, .jy-profit-row__toggle .jy-icon { transition: none; }
+  .jy-profit-switching, .jy-profit-row__toggle .jy-icon, .jy-profit-card__toggle .jy-icon, .jy-profit-verify__head .jy-icon { transition: none; }
 }
-
-/* 手动选 Key：每个渠道一行的「选 Key」下拉框，和还没算利润的渠道那一块 */
-.jy-keypicker { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; max-width: 100%; }
-.jy-keypicker__upstream { min-width: 140px; }
-.jy-keypicker__key { min-width: 160px; }
-.jy-profit-card__picker { margin-top: 6px; }
-.jy-keypicker--stacked { flex-direction: column; align-items: flex-start; }
-.jy-profit-unbound { border: 1px solid var(--jy-line, #e5e5e5); border-radius: 8px; padding: 12px 16px; }
-.jy-profit-unbound h3 { margin: 0 0 2px; font-size: 14px; }
-.jy-profit-unbound ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
-.jy-profit-unbound li { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }

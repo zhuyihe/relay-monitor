@@ -1,4 +1,4 @@
-// 每日利润页的纯函数（profit-format.ts）：差额那一格怎么写、原因码翻字、排序筛选、小格状态、合计行、四个数、页顶一句、表下面那一行。
+// 每日利润页的纯函数（profit-format.ts）：页顶一句、四个数、渠道表的排法和每天一行、柱状图的数、合计行、原因码翻字、表下面那一行、计算明细里的几句。
 // node 直接跑 .ts（去掉类型）；profit-format.ts 引 lib 下的带 .js 后缀，引同目录的 copy.ts 不带后缀（Turbopack 打包要这样），node 靠下面的 resolve 钩子补上 .ts。夹具照 lib/profit-page.test.js 的形状（接口响应）。
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,8 +17,8 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 
 const { COPY } = await import("./copy.ts");
 const {
-  attentionNote, dayCellView, filterCounts, filterRows, footerNotes, gapCell, gapHeader, gapReasonText, heldNote, metrics, pageMoney, rangeCaption, rowMoney, rowSubtitle, rowTone,
-  marginText, showExpectedColumn, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, totalsRow, utcOffsetText, whereGapText, unitPriceText, adminUsageText, ratioLine,
+  attentionSuffix, chartDays, dayRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
+  marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
 const { EMPTY, RATE_UNSET_USD } = await import("../../../lib/format.js");
@@ -65,40 +65,6 @@ test("按人民币显示：固定成本直接用接口给的人民币原值，�
   assert.equal(pageMoney(page({ rows: [r], fixedCostUsd: 100, displayCurrency: "CNY" }), "CNY").fixedExact, false, "接口没给人民币原值时才是折算的");
 });
 
-test("差额那一格（§5.7）：多扣 / 少扣带百分比和「对不上」；门槛以内灰字写数；今天「明天出」；算不了写「—」和原因", () => {
-  const p = page();
-  assert.deepEqual(gapCell(row(), p, ctx), { main: "多扣 $1.20", sub: "比应付多 15%", tag: true, tone: "over", muted: false });
-  assert.deepEqual(gapCell(row({ gap: { usd: -0.5, rate: -0.036, state: "under", mismatchedDays: [{ day: D("10-25"), usd: -0.5, state: "under" }], days: 1, reason: null, missingPriceModels: [] } }), p, ctx),
-    { main: "少扣 $0.50", sub: "比应付少 3.6%", tag: true, tone: "under", muted: false });
-  assert.deepEqual(gapCell(row({ gap: { usd: 0.01, rate: 0.0003, state: "within", mismatchedDays: [], days: 1, reason: null, missingPriceModels: [] } }), p, ctx), { main: "+$0.01", sub: "", tag: false, tone: null, muted: true });
-  assert.deepEqual(gapCell(row({ gap: { usd: null, rate: null, state: "uncomputable", mismatchedDays: [], days: 0, reason: "UPSTREAM_PRICE_UNSUPPORTED", missingPriceModels: [] } }), p, ctx), { main: EMPTY, sub: "Sub2API 上游读不到价格", tag: false, tone: null, muted: false });
-  assert.equal(gapCell(row({ gap: { usd: null, rate: null, state: "uncomputable", mismatchedDays: [], days: 0, reason: "MODEL_PRICE_MISSING", missingPriceModels: ["o3-pro"] } }), p, ctx).sub, "上游没给 o3-pro 的价格");
-  assert.equal(gapCell(row({ gap: { usd: null, rate: null, state: "uncomputable", mismatchedDays: [], days: 0, reason: "MODEL_PRICE_MISSING", missingPriceModels: ["o3-pro", "a", "b"] } }), p, ctx).sub, "上游没给 o3-pro 等 3 个模型的价格");
-  assert.deepEqual(gapCell(row({ gap: { usd: null, rate: null, state: "reading", mismatchedDays: [], days: 0, reason: null, missingPriceModels: [] } }), p, ctx), { main: EMPTY, sub: "还在读取", tag: false, tone: null, muted: false });
-  assert.deepEqual(gapCell(row({ attention: { code: "X", title: "t", detail: null, action: null, fromDay: null, moreCount: 0 }, gap: { usd: null, rate: null, state: "attention", mismatchedDays: [], days: 0, reason: null, missingPriceModels: [] } }), p, ctx), { main: EMPTY, sub: "", tag: false, tone: null, muted: false });
-  // 多天：差额后面写其中几天对不上
-  assert.deepEqual(gapCell(row({ gap: { usd: 2.1, rate: 0.1, state: "over", mismatchedDays: [{ day: D("10-24"), usd: 0.9, state: "over" }, { day: D("10-25"), usd: 1.2, state: "over" }], days: 6, reason: null, missingPriceModels: [] } }), weekPage(), ctx),
-    { main: "多扣 $2.10", sub: "其中 2 天对不上", tag: true, tone: "over", muted: false });
-  assert.equal(gapCell(row({ gap: { usd: null, rate: null, state: "today", mismatchedDays: [], days: 0, reason: null, missingPriceModels: [] } }), weekPage(), ctx).main, "明天出");
-  // 不写 0
-  assert.notEqual(gapCell(row({ gap: { usd: null, rate: null, state: "today", mismatchedDays: [], days: 0, reason: null, missingPriceModels: [] } }), weekPage(), ctx).main, "$0.00");
-});
-
-test("看今天时差额那一列是最近一个已固定日子的：对不上照写，昨天还没开始算、算不出的写原因", () => {
-  const p = todayPage();
-  assert.deepEqual(gapCell(row(), p, ctx), { main: "多扣 $1.20", sub: "", tag: true, tone: "over", muted: false });
-  assert.deepEqual(gapCell(row({ latestSettledGap: { day: D("10-25"), usd: 0.01, state: "within", reason: null } }), p, ctx), { main: "+$0.01", sub: "", tag: false, tone: null, muted: true });
-  assert.equal(gapCell(row({ latestSettledGap: null, startedOn: D("10-26") }), p, ctx).sub, "昨天还没开始算");
-  assert.equal(gapCell(row({ latestSettledGap: { day: D("10-25"), usd: null, state: null, reason: "EXPECTED_COST_NOT_RECORDED" } }), p, ctx).sub, "这天在开始算应付成本以前，没算");
-  // latestSettledGap 自己带 reason: NOT_STARTED（接口按字段表允许给）：照「还没开始算」写，不进 reason 表（设计验收 10-26）
-  assert.equal(gapCell(row({ latestSettledGap: { day: D("10-25"), usd: null, state: null, reason: "NOT_STARTED" } }), p, ctx).sub, "昨天还没开始算");
-  const p24 = todayPage({ latestSettledGap: { day: D("10-24"), usd: 0.9, mismatchedRowCount: 1 } });
-  assert.equal(gapCell(row({ latestSettledGap: { day: D("10-24"), usd: null, state: null, reason: "NOT_STARTED" } }), p24, ctx).sub, "10月24日还没开始算");
-  // 最近固定的日子不是昨天时，表头跟着写那一天
-  assert.equal(gapHeader(todayPage({ latestSettledGap: { day: D("10-24"), usd: 0.9, mismatchedRowCount: 1 } }), ctx).title, "10月24日的差额");
-  assert.equal(gapHeader(p, ctx).title, "昨天的差额");
-});
-
 test("原因码翻字：「算应付成本」关着分固定了没有；一天不从整点开始写时差", () => {
   assert.equal(gapReasonText("EXPECTED_COST_DISABLED"), "「算应付成本」关了，这天没算，以后打开也不补");
   assert.equal(gapReasonText("EXPECTED_COST_DISABLED", [], { settled: false }), "「算应付成本」关着");
@@ -115,147 +81,11 @@ test("原因码翻字：「算应付成本」关着分固定了没有；一天�
   assert.equal(gapReasonText(null), "");
 });
 
-test("排序和筛选按渠道数：合用一把 Key 的两个渠道算 2 个；底色：多扣红、需处理橙、少扣蓝", () => {
-  const over = row(), under = row({ rowKey: "b", channels: [{ channelId: 2, name: "直连 E" }], gap: { ...row().gap, usd: -0.5, state: "under" }, latestSettledGap: { day: D("10-25"), usd: -0.5, state: "under", reason: null } });
-  const attention = row({ rowKey: "c", channels: [{ channelId: 3, name: "备用 F" }, { channelId: 4, name: "备用 G" }], counted: false, attention: { code: "KEY_INVALID_OR_DENIED", title: "上游拒绝读取这把 Key", detail: null, action: null, fromDay: D("10-17"), moreCount: 0 }, gap: { ...row().gap, usd: null, state: "attention" }, latestSettledGap: null, excludedDays: 1 });
-  const p = page({ rows: [over, attention, under] });
-  assert.deepEqual(filterCounts(p), { all: 4, mismatched: 2, attention: 2 });
-  assert.deepEqual(filterRows(p.rows, "mismatched", p).map((r) => r.rowKey), ["up:7", "b"]);
-  assert.deepEqual(filterRows(p.rows, "attention", p).map((r) => r.rowKey), ["c"]);
-  assert.deepEqual(p.rows.map((r) => rowTone(r, p)), ["over", "attention", "under"]);
-  // 看今天按最近一个已固定日子判
-  assert.deepEqual(filterCounts(todayPage({ rows: [over, attention, under] })), { all: 4, mismatched: 2, attention: 2 });
-  assert.equal(attentionNote(attention, p, ctx), "10月17日起没算进利润");
-  assert.equal(attentionNote(attention, todayPage(), ctx), "10月17日起没算进利润", "看今天也写");
-  assert.equal(attentionNote({ ...attention, excludedDays: 7 }, weekPage(), ctx), "10月17日起没算进利润，这 7 天都不在合计里");
-});
-
-test("名字下面那行小字：上游 · Key · 分组倍率 · 范围中间开始算的写开始日期，今天开始的写时刻", () => {
-  assert.equal(rowSubtitle(row(), page(), ctx), "拼车团队 · Key team-c · vip 分组 ×0.8");
-  assert.equal(rowSubtitle(row({ channels: [{ channelId: 1, name: "高速 A" }, { channelId: 2, name: "备用 B" }], key: { name: "oai", groupName: "default", groupRatio: 1, upstreamKeyUrl: null } }), page(), ctx), "拼车团队 · 2 个渠道合用 Key oai · default 分组 ×1.0");
-  assert.equal(rowSubtitle(row({ startedOn: D("10-24") }), weekPage(), ctx), "拼车团队 · Key team-c · vip 分组 ×0.8 · 10月24日 开始算");
-  assert.equal(rowSubtitle(row({ startedOn: D("10-26"), startedAt: NOW }), weekPage(), ctx), "拼车团队 · Key team-c · vip 分组 ×0.8 · 今天 14:30 开始算，0 点以后的都算进来了");
-  // 范围第一天就开始的不写；看今天时今天开始的照写时刻
-  assert.equal(rowSubtitle(row({ startedOn: D("10-20") }), weekPage(), ctx), "拼车团队 · Key team-c · vip 分组 ×0.8");
-  assert.equal(rowSubtitle(row({ startedOn: D("10-26"), startedAt: NOW }), todayPage(), ctx), "拼车团队 · Key team-c · vip 分组 ×0.8 · 今天 14:30 开始算，0 点以后的都算进来了");
-});
-
-test("每天的小格：对不上的那天上底色写数，对得上写「·」，今天虚线框「明天出」，没开始算的灰掉；月份已在上面写了，格子只写「20日」", () => {
-  const p = weekPage();
-  const cells = [
-    { day: D("10-20"), state: "notStarted", gapUsd: null, gapState: null, reason: null, tokens: null },
-    { day: D("10-24"), state: "fixed", gapUsd: 0.9, gapState: "over", reason: null, tokens: 100 },
-    { day: D("10-23"), state: "fixed", gapUsd: 0.01, gapState: "within", reason: null, tokens: 100 },
-    { day: D("10-22"), state: "fixed", gapUsd: null, gapState: null, reason: "MODEL_PRICE_MISSING", tokens: 100 },
-    { day: D("10-21"), state: "reading", gapUsd: null, gapState: null, reason: null, tokens: null },
-    { day: D("10-26"), state: "today", gapUsd: null, gapState: null, reason: null, tokens: null },
-  ].map((cell) => dayCellView(cell, p, ctx, null));
-  assert.deepEqual(cells.map((c) => [c.label, c.text, c.tone, c.today, c.disabled, c.clickable]), [
-    ["20日", EMPTY, null, false, true, false], ["24日", "+0.90", "over", false, false, true], ["23日", "·", null, false, false, true],
-    ["22日", EMPTY, null, false, false, true], ["21日", EMPTY, null, false, false, false], ["今天", "明天出", null, true, false, true],
-  ]);
-  assert.equal(cells[1].title, "10月24日的差额");
-});
-
-test("「差在哪」那一句：看一天写用量、分组倍率、应付和实付，带上前面也对不上的日子；看几天列出对不上的日子", () => {
-  const r = row({ daily: [{ day: D("10-24"), state: "fixed", gapUsd: 0.9, gapState: "over", reason: null, tokens: 2_000_000 }, { day: D("10-25"), state: "fixed", gapUsd: 1.2, gapState: "over", reason: null, tokens: 2_880_000 }] });
-  assert.equal(whereGapText(r, page(), ctx), "自营站点这个渠道这天用了 288 万 Token，按上游的价格和 vip 分组 ×0.8 算，应付成本 $8.00；上游这把 Key 这天实付 $9.20。10月24日 也多扣 $0.90。");
-  const w = row({ gap: { usd: 2.1, rate: 0.1, state: "over", mismatchedDays: [{ day: D("10-24"), usd: 0.9, state: "over" }, { day: D("10-25"), usd: 1.2, state: "over" }], days: 6, reason: null, missingPriceModels: [] } });
-  assert.equal(whereGapText(w, weekPage(), ctx), "10月24日 多扣 $0.90，10月25日 多扣 $1.20，其余 4 天对得上。点一天看那天的计算明细。");
-  assert.equal(whereGapText(row({ gap: { usd: 0.05, rate: 0.001, state: "within", mismatchedDays: [], days: 6, reason: null, missingPriceModels: [] } }), weekPage(), ctx), "这几天都对得上。点一天看那天的计算明细。");
-  assert.equal(whereGapText(row({ gap: { usd: null, rate: null, state: "today", mismatchedDays: [], days: 0, reason: null, missingPriceModels: [] } }), weekPage(), ctx), "今天的应付成本和差额明天出。");
-  // 看今天：写最近一个已固定的日子（Token 在那天的小格里、差额用 latestSettledGap），后面接「今天的明天出」
-  const todayRow = row({ gap: { usd: null, rate: null, state: "today", mismatchedDays: [], days: 0, reason: null, missingPriceModels: [] }, daily: [{ day: D("10-25"), state: "fixed", gapUsd: 1.2, gapState: "over", reason: null, tokens: 2_880_000 }, { day: D("10-26"), state: "today", gapUsd: null, gapState: null, reason: null, tokens: null }] });
-  assert.equal(whereGapText(todayRow, todayPage(), ctx), "昨天：自营站点这个渠道用了 288 万 Token，多扣 $1.20。今天的明天出。", "设计验收 10-26：去掉「差额」两个字");
-  assert.equal(whereGapText({ ...todayRow, daily: [], latestSettledGap: { day: D("10-25"), usd: 0.01, state: "within", reason: null } }, todayPage(), ctx), "昨天：+$0.01。今天的明天出。");
-  assert.equal(whereGapText({ ...todayRow, latestSettledGap: { day: D("10-25"), usd: null, state: null, reason: "KEY_SHARED" } }, todayPage(), ctx), "昨天：算不了差额（这把 Key 别处也在用）。今天的明天出。");
-  assert.equal(whereGapText({ ...todayRow, latestSettledGap: null }, todayPage(), ctx), "今天的应付成本和差额明天出。");
-});
-
-test("表头和合计行：全固定出应付成本一列，有今天时不出、表头写清是哪几天；合计只加算进来的，应付和差额只加算得出的那几行", () => {
-  const fixed = page();
-  assert.equal(showExpectedColumn(fixed), true);
-  assert.deepEqual(gapHeader(fixed, ctx), { title: "差额", sub: "上游成本 − 应付" });
-  const totals = totalsRow(page({ rows: [row(), row({ rowKey: "b", channels: [{ channelId: 2, name: "x" }] }), row({ rowKey: "c", channels: [{ channelId: 3, name: "y" }] }), row({ rowKey: "d", channels: [{ channelId: 4, name: "z" }], gap: { ...row().gap, usd: null, state: "uncomputable", reason: "KEY_SHARED" } })] }), ctx);
-  assert.deepEqual(totals, { label: "合计（算进来的 6 个渠道）", income: "$103.70", actual: "$64.51", gross: "$39.19", expected: "$57.60", expectedSub: "只有 3 行", gap: "+$0.71", gapSub: "同样这 3 行" });
-  const week = weekPage();
-  assert.equal(showExpectedColumn(week), false);
-  assert.deepEqual(gapHeader(week, ctx), { title: "差额", sub: "已固定的 6 天（10月20日–10月25日）" });
-  assert.equal(gapHeader(weekPage({ gap: { ...week.gap, days: { ...week.gap.days, contiguous: false } } }), ctx).sub, "已固定的 6 天");
-  const weekTotals = totalsRow(week, ctx);
-  assert.equal(weekTotals.expected, EMPTY); assert.equal(weekTotals.gap, "+$1.65");
-  // 看今天：差额合计是最近一个已固定日子的
-  assert.equal(totalsRow(todayPage(), ctx).gap, "+$0.71");
-});
-
-test("合计行：已固定、又因为重算的事需处理、照算进来的行，括号里补一句「其中 N 个还没重算」；手机顶上卡片最后一行写同一句不带「合计」（设计 10-26 定）", () => {
-  const held = row({ rowKey: "h", channels: [{ channelId: 5, name: "h1" }, { channelId: 6, name: "h2" }], counted: true,
-    attention: { code: "RESETTLE_SHRUNK", title: "这天重算的数比原来少了一半多", detail: null, action: null, fromDay: null, moreCount: 0 } });
-  const p = page({ rows: [row(), held], counts: { channels: 3, countedChannels: 3, mismatchedChannels: 0, attentionChannels: 2, uncomputable: {}, mismatchedDays: { over: 0, under: 0 } } });
-  assert.equal(totalsRow(p, ctx).label, "合计（算进来的 3 个渠道；其中 2 个还没重算，先按原来固定的数算）");
-  assert.equal(heldNote(p), "其中 2 个还没重算，先按原来固定的数算");
-  // 没有这种行：照旧，不带这半句
-  const plain = page({ rows: [row()], counts: { channels: 1, countedChannels: 1, mismatchedChannels: 1, attentionChannels: 0, uncomputable: {}, mismatchedDays: { over: 1, under: 0 } } });
-  assert.equal(totalsRow(plain, ctx).label, "合计（算进来的 1 个渠道）");
-  assert.equal(heldNote(plain), "");
-  // 需处理但没算进合计（counted:false）的不算
-  const excluded = row({ rowKey: "e", channels: [{ channelId: 7, name: "e1" }], counted: false,
-    attention: { code: "RESETTLE_SHRUNK", title: "t", detail: null, action: null, fromDay: null, moreCount: 0 } });
-  assert.equal(heldNote(page({ rows: [row(), excluded] })), "", "counted 是 false 的不算「照算进了合计」");
-});
-
-test("四个数：今天 / 已固定 / 近 7 天各一套标题；上游整体少扣写「比预期多赚」不写负数；净利只在毛利下面一行", () => {
-  const today = metrics(todayPage(), ctx);
-  assert.deepEqual(today.map((m) => [m.title, m.value]), [["今天到现在的毛利", "$39.19"], ["今天的差额", "明天出"], ["昨天比预期少赚", "$0.71"], ["没算进来", "全部算进来了"]]);
-  assert.deepEqual(today[0].lines, ["收入 $103.70 − 上游成本 $64.51", "毛利率 37.8%", "扣今天的固定成本 $2.33 后，净利 $36.86"]);
-  assert.deepEqual(today[1].lines, ["应付成本和差额，等今天过了零点、固定以后才算"]);
-  // 几个渠道对不上按行上最近一个已固定日子的状态数（夹具里只有一行）
-  assert.deepEqual([today[2].lines, today[2].link], [["1 个渠道对不上"], { text: "看昨天", day: D("10-25") }]);
-  assert.equal(today[2].crit, true);
-  const fixed = metrics(page(), ctx);
-  assert.deepEqual(fixed.map((m) => [m.title, m.value]), [["毛利", "$39.19"], ["比预期少赚", "$0.71"], ["对不上", "2 个渠道"], ["算不了差额", "2 个渠道"]]);
-  assert.deepEqual(fixed[1].lines, ["多扣 $1.20 · 少扣 $0.50 · 门槛以内 +$0.01", "只算算得出应付成本的 3 行"]);
-  assert.deepEqual(fixed[2].lines, ["差额同时超过 $0.05 和应付成本的 2%"]);
-  // 「算不了差额」的小字短写，第二行另有几个需处理；「对不上」那一格不上色
-  assert.deepEqual(fixed[3].lines, ["Sub2API 上游 1 个 · 有模型没价格 1 个", "另有 1 个需处理，没算进来"]); assert.equal(fixed[2].crit, false);
-  assert.equal(fixed[0].lines[2], "扣固定成本 $2.33 后，净利 $36.86");
-  const more = metrics(page({ gap: { ...page().gap, usd: -0.3, overUsd: 0, underUsd: 0.3, withinUsd: 0 }, counts: { ...page().counts, mismatchedChannels: 1 } }), ctx)[1];
-  assert.deepEqual([more.title, more.value, more.crit], ["比预期多赚", "$0.30", false]);
-  const week = metrics(weekPage(), ctx);
-  assert.deepEqual(week.map((m) => m.title), ["近 7 天毛利", "比预期少赚（已固定的 6 天）", "对不上", "没算进来"]);
-  assert.deepEqual(week[2].lines, ["这 6 天里有一天对不上，就算这个渠道对不上"]);
-  // 固定成本算不出（有上游没设汇率）时净利先不算，不写 0
-  assert.equal(metrics(page({ fixedCostUsd: null, netProfitUsd: null }), ctx)[0].lines[2], "固定成本算不出，净利先不算");
-});
-
-test("页顶一句（§2、§6）：今天写 0:00–现在；一天写日期和周几、已固定；几天写几天已固定、今天实时", () => {
-  assert.equal(rangeCaption(todayPage(), ctx), "10月26日 0:00–14:30 · 今天的数还会变，过了零点自动固定");
-  assert.equal(rangeCaption(page(), ctx), `10月25日 ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][new Date(Date.UTC(year, 9, 25)).getUTCDay()]} · 已固定`);
-  assert.equal(rangeCaption(weekPage(), ctx), "10月20日–10月26日 · 6 天已固定，今天实时");
-  assert.equal(rangeCaption(weekPage({ dayCounts: { fixed: 4, reading: 1, today: 1 } }), ctx), "10月20日–10月26日 · 4 天已固定，1 天还在读取，今天实时");
-  assert.equal(rangeCaption(page({ range: { preset: "custom", startMs: dayStartInTz(D("10-18"), TZ), endMs: dayStartInTz(D("10-25"), TZ), timezone: TZ }, dayCounts: { fixed: 7, reading: 0, today: 0 } }), ctx), "10月18日–10月24日 · 已固定");
-});
-
-test("按人民币显示：收入按自营站点的汇率、成本和差额按上游的汇率换算，整页的数由各行加起来", () => {
-  const cny = { currency: "CNY", tz: TZ, now: NOW };
-  const r = row({ rates: { income: 7, cost: 6, costBasis: "usage" } });
-  const m = rowMoney(r, "CNY");
-  assert.deepEqual([m.income, m.actual, m.gross.toFixed(2), m.gap.toFixed(2)], [14.6 * 7, 9.2 * 6, (14.6 * 7 - 9.2 * 6).toFixed(2), (1.2 * 6).toFixed(2)]);
-  assert.equal(gapCell(r, page(), cny).main, "多扣 ¥7.20");
-  const money = pageMoney(page({ rows: [r] }), "CNY");
-  assert.deepEqual([money.income, money.actual, money.gap.toFixed(2), money.over.toFixed(2)], [14.6 * 7, 9.2 * 6, "7.20", "7.20"]);
-  assert.equal(signedMoney(-0.5, "CNY"), "−¥0.50");
-  // 固定成本、没算进利润的上游成本是按自营站点汇率换的：带「≈」
-  const cnyPage = page({ rows: [r], unaccountedUpstreamCostUsd: 4.2 });
-  assert.equal(metrics(cnyPage, cny)[0].lines[2], "扣固定成本 ≈ ¥16.31 后，净利 ≈ ¥" + (14.6 * 7 - 9.2 * 6 - 2.33 * 7).toFixed(2));
-  assert.equal(footerNotes(cnyPage, cny, { upstreams: "/stations", start: "/s", settings: "/settings" })[0].text, "另有 ≈ ¥29.40 上游成本没算进利润");
-});
-
 test("表下面那一行：没算进利润的上游成本、还没算利润的渠道、没设置汇率；收费记录落后 1 小时以上才写读到哪儿了", () => {
-  const hrefs = { upstreams: "/stations", start: "/stations?view=accounts", settings: "/settings" };
+  const hrefs = { upstreams: "/stations", settings: "/settings" };
   const notes = footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 2 * 3600000 });
   assert.deepEqual(notes.map((n) => [n.key, n.text, n.link?.text]), [
-    ["unaccounted", "另有 $4.20 上游成本没算进利润", "查看各上游"], ["unlinked", "另有 2 个渠道还没算利润", "开始算利润"], ["rate", RATE_UNSET_USD, undefined],
+    ["unaccounted", "另有 $4.20 上游成本没算进利润", "查看各上游"], ["unlinked", "还有 2 个渠道没绑定上游，没算进来。", "去上游资源"], ["rate", RATE_UNSET_USD, undefined],
     ["lagging", "自营站点的收费记录读得慢，只读到 12:30，这以后的应付成本还没算。", "去设置"],
   ]);
   assert.equal(footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 10 * 60000 }).some((n) => n.key === "lagging"), false);
@@ -303,7 +133,7 @@ test("marginText：毛利 ÷ 收入；收入是 0 或毛利算不出写「—」
 });
 
 test("footerNotes：这一版还不算利润的渠道（Key 在两个上游里都有）只提示一句，最多点三个名，再多写「等 N 个渠道」", () => {
-  const hrefs = { upstreams: "/stations", start: "/s", settings: "/settings" };
+  const hrefs = { upstreams: "/stations", settings: "/settings" };
   const note = (unsupportedChannels) => footerNotes({ ...page(), unsupportedChannels }, ctx, hrefs).find((n) => n.key === "unsupported")?.text;
   const item = (id, upstreamNames = ["甲", "乙"]) => ({ channelId: id, name: `渠道 ${id}`, reason: "KEY_IN_OTHER_UPSTREAM", upstreamNames });
   assert.equal(note([]), undefined);
@@ -315,8 +145,113 @@ test("footerNotes：这一版还不算利润的渠道（Key 在两个上游里�
 });
 
 test("footerNotes：多天范围里没算进来的天写一句", () => {
-  const hrefs = { upstreams: "/stations", start: "/s", settings: "/settings" };
+  const hrefs = { upstreams: "/stations", settings: "/settings" };
   const notes = (notCountedDays) => footerNotes({ ...page(), notCountedDays }, ctx, hrefs).map((n) => n.text);
   assert.deepEqual(notes({ count: 0 }).filter((t) => /还没固定/.test(t)), []);
   assert.ok(notes({ count: 3 }).includes("有 3 天还没固定，没算进来"));
+});
+
+
+// ---- 新的：渠道表、每天一行、柱状图、四个数、合计行、页顶一句、核对上游扣费的结论 ----
+const day = (md, state, overrides = {}) => ({ day: D(md), state, gapUsd: null, gapState: null, reason: null, tokens: null, incomeUsd: null, actualCostUsd: null, grossUsd: null, ...overrides });
+const fixedDay = (md, income, cost) => day(md, "fixed", { incomeUsd: income, actualCostUsd: cost, grossUsd: income - cost });
+const chan = (name, income, cost, extra = {}) => row({ rowKey: name, channels: [{ channelId: name.length, name }], incomeUsd: income, actualCostUsd: cost, grossProfitUsd: income - cost, ...extra });
+
+test("渠道表默认按毛利从高到低，亏钱的在后面；没算进利润的行排最后；点表头换列、再点换方向，名字从小到大", () => {
+  const rows = [chan("丙", 10, 12), chan("甲", 50, 20), chan("乙", 30, 10), chan("丁", 99, 0, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, uncountedIncomeUsd: 99 })];
+  const names = (sort) => sortRows(rows, sort, ctx).map((r) => r.channels[0].name);
+  assert.deepEqual(names({ key: "gross", dir: "desc" }), ["甲", "乙", "丙", "丁"], "毛利 30、20、−2，没算进来的排最后");
+  assert.deepEqual(names({ key: "gross", dir: "asc" }), ["丙", "乙", "甲", "丁"], "反过来，没算进来的还是最后");
+  assert.deepEqual(names({ key: "margin", dir: "desc" }), ["乙", "甲", "丙", "丁"], "毛利率 66.7%、60%、−20%");
+  assert.deepEqual(names({ key: "income", dir: "desc" }), ["丁", "甲", "乙", "丙"], "收入没算进来的也读得到（排第一）");
+  assert.deepEqual(names({ key: "name", dir: "asc" }).length, 4);
+  assert.deepEqual(nextSort({ key: "gross", dir: "desc" }, "gross"), { key: "gross", dir: "asc" });
+  assert.deepEqual(nextSort({ key: "gross", dir: "asc" }, "gross"), { key: "gross", dir: "desc" });
+  assert.deepEqual(nextSort({ key: "gross", dir: "desc" }, "income"), { key: "income", dir: "desc" });
+  assert.deepEqual(nextSort({ key: "gross", dir: "desc" }, "name"), { key: "name", dir: "asc" });
+});
+
+test("点开一个渠道：一天一行，新的在上；已固定写已固定、今天和还在读取写实时、需处理写需处理；没开始算、还没到的不列；亏钱标出来", () => {
+  const r = chan("甲", 100, 60, { daily: [day("10-22", "notStarted"), fixedDay("10-23", 20, 30), day("10-24", "attention", { reason: "OWN_CONSUME_LOG_GAP" }), fixedDay("10-25", 40, 25),
+    day("10-26", "today", { incomeUsd: 8, actualCostUsd: 5, grossUsd: 3 }), day("10-27", "future")] });
+  const rows = dayRows(r, weekPage({ rows: [r] }), ctx);
+  assert.deepEqual(rows.map((x) => [x.label.split(" ")[0], x.state, x.stateText, x.income, x.actual, x.gross, x.margin, x.negative]), [
+    ["10月26日", "live", "实时", "$8.00", "$5.00", "$3.00", "37.5%", false],
+    ["10月25日", "fixed", "已固定", "$40.00", "$25.00", "$15.00", "37.5%", false],
+    ["10月24日", "attention", "需处理", EMPTY, EMPTY, EMPTY, EMPTY, false],
+    ["10月23日", "fixed", "已固定", "$20.00", "$30.00", "−$10.00", "−50.0%", true],
+  ]);
+  assert.match(rows[0].label, /今天$/, "今天写「今天」，别的天写周几");
+  assert.match(rows[1].label, /周[日一二三四五六]$/);
+});
+
+test("每天的毛利：多天才有；一天 = 算进利润的渠道这天的数相加；今天和没固定的天浅色；需处理没算进来的渠道不加；一个数都没有的天不画", () => {
+  assert.deepEqual(chartDays(page(), ctx), [], "一天的范围不画");
+  const a = chan("甲", 100, 60, { daily: [fixedDay("10-24", 10, 4), fixedDay("10-25", 20, 12), day("10-26", "today", { incomeUsd: 5, actualCostUsd: 2, grossUsd: 3 })] });
+  const b = chan("乙", 50, 30, { daily: [fixedDay("10-24", 6, 1), day("10-25", "reading"), day("10-26", "today", { incomeUsd: 1, actualCostUsd: 1, grossUsd: 0 })] });
+  const held = chan("丙", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, daily: [fixedDay("10-24", 1000, 1)] });
+  const days = chartDays(weekPage({ range: { ...weekPage().range, startMs: dayStartInTz(D("10-24"), TZ) }, rows: [a, b, held] }), ctx);
+  assert.deepEqual(days.map((x) => [x.day, x.income, x.actual, x.gross, x.light, x.stateText]), [
+    [D("10-24"), 16, 5, 11, false, "已固定"],
+    [D("10-25"), 20, 12, 8, true, "实时"],
+  ].concat([[D("10-26"), 6, 3, 3, true, "实时"]]), "10-25 乙还在读取：这天没固定，用浅色，只加有数的渠道");
+  assert.deepEqual(days.map((x) => x.margin), ["68.8%", "40.0%", "50.0%"]);
+});
+
+test("四个数：收入、上游成本、毛利、毛利率；按人民币时各行按各自汇率换算再加", () => {
+  assert.deepEqual(metrics(page(), ctx).map((m) => [m.title, m.value]), [["收入", "$103.70"], ["上游成本", "$64.51"], ["毛利", "$39.19"], ["毛利率", "37.8%"]]);
+  const cny = { currency: "CNY", tz: TZ, now: NOW };
+  const r = row({ rates: { income: 7, cost: 6, costBasis: "usage" } });
+  const m = rowMoney(r, "CNY");
+  assert.deepEqual([m.income, m.actual, m.gross.toFixed(2)], [14.6 * 7, 9.2 * 6, (14.6 * 7 - 9.2 * 6).toFixed(2)]);
+  assert.equal(pageMoney(page({ rows: [r] }), "CNY").income, 14.6 * 7);
+  assert.equal(signedMoney(-0.5, "CNY"), "−¥0.50");
+  assert.deepEqual(metrics(page({ rows: [r] }), cny).map((x) => x.value).slice(0, 3), ["¥102.20", "¥55.20", "¥47.00"]);
+  assert.equal(metrics(page({ rows: [], pageTotals: { incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, grossMarginRate: null } }), ctx)[3].value, EMPTY, "没有渠道算进来：毛利率写「—」");
+});
+
+test("合计行：只加算进来的渠道；已固定又因为重算需处理、照算进来的，括号里补一句", () => {
+  assert.deepEqual(totalsRow(page(), ctx), { label: "合计（算进来的 6 个渠道）", income: "$103.70", actual: "$64.51", gross: "$39.19", margin: "37.8%" });
+  const held = row({ attention: { code: "RESETTLE_SHRUNK", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null } });
+  assert.equal(totalsRow(page({ rows: [held] }), ctx).label, "合计（算进来的 6 个渠道；其中 1 个还没重算，先按原来固定的数算）");
+});
+
+test("页顶一句：需处理没算进来的渠道接在后面——单天「其中 N 个渠道需处理，没算进来」，多天「其中 N 个渠道有 M 天需处理，没算进来」；算进来的、没有需处理的不接", () => {
+  const out = chan("丙", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, excludedDays: 3, channels: [{ channelId: 1, name: "丙" }, { channelId: 2, name: "丁" }],
+    attention: { code: "OWN_BILLING_UNAVAILABLE", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null } });
+  assert.equal(attentionSuffix(page()), "");
+  assert.equal(rangeCaption(page({ rows: [out] }), ctx).endsWith(" · 其中 2 个渠道需处理，没算进来"), true, "按渠道数，同一把 Key 的两个渠道算 2 个");
+  assert.equal(rangeCaption(weekPage({ rows: [out] }), ctx), "10月20日–10月26日 · 6 天已固定，今天实时 · 其中 2 个渠道共 3 天需处理，没算进来", "多天：几个渠道写共几天，天数加起来");
+  const one = chan("戊", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, excludedDays: 2, attention: out.attention });
+  assert.equal(attentionSuffix(weekPage({ rows: [one] })), "其中 1 个渠道有 2 天需处理，没算进来");
+  assert.equal(attentionSuffix(weekPage({ rows: [one, { ...one, excludedDays: 3 }] })), "其中 2 个渠道共 5 天需处理，没算进来");
+  // 提示类的（今天提醒换 Key，照常算进来）：再接一句，和需处理的那句用「 · 」隔开
+  const hint = row({ notice: { code: "CHANNEL_KEY_IDLE_TODAY", text: "t", detail: null, action: null } });
+  assert.equal(attentionSuffix(page({ rows: [hint] })), "其中 1 个渠道成本可能少算了");
+  assert.equal(attentionSuffix(page({ rows: [hint, out] })), "其中 2 个渠道需处理，没算进来 · 其中 1 个渠道成本可能少算了");
+  assert.equal(rangeCaption(todayPage({ rows: [out] }), ctx), "10月26日 0:00–14:30 · 今天的数还会变，过了零点自动固定 · 其中 2 个渠道需处理，没算进来");
+  assert.equal(attentionSuffix(page({ rows: [row({ attention: out.attention })] })), "", "算进来的行（已固定又需处理）不算没算进来");
+});
+
+test("「核对上游扣费」的结论：对得上、多扣 / 少扣、换了 Key、今天；对不上的默认展开，别的收起", () => {
+  const base = (gap, expected = {}) => ({ day: D("10-25"), settled: true, gap, expected: { reason: null, missingPriceModels: [], ...expected } });
+  const p = page();
+  assert.deepEqual(verifyView(base({ usd: 9.26, rate: 0.085, state: "over" }), p, ctx, null), { text: "多扣 $9.26，对不上", open: true, tone: "crit" });
+  assert.deepEqual(verifyView(base({ usd: -0.7, rate: -0.05, state: "under" }), p, ctx, null), { text: "少扣 $0.70，对不上", open: true, tone: "crit" });
+  assert.deepEqual(verifyView(base({ usd: 0.01, rate: 0, state: "within" }), p, ctx, null), { text: "对得上", open: false, tone: null });
+  assert.deepEqual(verifyView(base(null, { reason: "KEY_CHANGE_RATIO_DIFFERS" }), p, ctx, null), { text: "这天换了 Key，不比差额", open: false, tone: null });
+  assert.deepEqual(verifyView(base(null, { reason: "KEY_SHARED" }), p, ctx, null), { text: "这把 Key 别处也在用", open: false, tone: null });
+  assert.deepEqual(verifyView({ ...base(null), day: p.today }, p, ctx, null), { text: "明天出", open: false, tone: null });
+  assert.equal(verifyView(base({ usd: 1, rate: 0.1, state: "over" }), p, { ...ctx, currency: "CNY" }, 6).text, "多扣 ¥6.00，对不上");
+});
+
+test("运营总览的毛利一格（grossMetric）：今天、已固定、近 7 天各一套标题；收入 − 上游成本、毛利率、净利三行照旧", () => {
+  const today = grossMetric(todayPage(), ctx);
+  assert.deepEqual([today.title, today.value], ["今天到现在的毛利", "$39.19"]);
+  assert.deepEqual(today.lines, ["收入 $103.70 − 上游成本 $64.51", "毛利率 37.8%", "扣今天的固定成本 $2.33 后，净利 $36.86"]);
+  assert.equal(grossMetric(page(), ctx).lines[2], "扣固定成本 $2.33 后，净利 $36.86");
+  assert.equal(grossMetric(weekPage(), ctx).title, "近 7 天毛利");
+  assert.equal(grossMetric(page({ fixedCostUsd: null, netProfitUsd: null }), ctx).lines[2], "固定成本算不出，净利先不算");
+  const cny = { currency: "CNY", tz: TZ, now: NOW };
+  assert.equal(grossMetric(page({ rows: [row({ rates: { income: 7, cost: 6, costBasis: "usage" } })] }), cny).lines[2], "扣固定成本 ≈ ¥16.31 后，净利 ≈ ¥" + (14.6 * 7 - 9.2 * 6 - 2.33 * 7).toFixed(2));
 });

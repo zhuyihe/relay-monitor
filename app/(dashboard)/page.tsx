@@ -31,7 +31,7 @@ import { StatusText } from "../components/status";
 import { useShellPage } from "../components/shell-context";
 import { useWorkflowActions } from "../components/use-workflow-actions";
 import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
-import { fmtMoney, metrics, pageMoney } from "./reconciliation/profit-format";
+import { fmtMoney, grossMetric, pageMoney } from "./reconciliation/profit-format";
 import type { Ctx } from "./reconciliation/profit-format";
 import TrendModal, { TREND_TEXT } from "./trend-modal";
 import "../styles/pages/overview.css";
@@ -279,7 +279,7 @@ function ProfitToday({ profit, error, onRetry }: { profit: ProfitPageResponse | 
       </Panel>
     );
   }
-  const gross = metrics(profit, ctx)[0];
+  const gross = grossMetric(profit, ctx);
   const lines = [...gross.lines];
   lines[0] = COPY.equation(fmtMoney(money.income, currency), fmtMoney(money.actual, currency));
   return (
