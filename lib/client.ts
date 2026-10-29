@@ -163,7 +163,7 @@ export type ProfitDetailResponse = {
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）
   id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict"
-    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "fix_agent_url" | "fix_agent_token" | "open_channels" | "add_upstream" | "recheck_consume_log";
+    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "fix_agent_url" | "fix_agent_token" | "go_swap_key" | "add_upstream" | "recheck_consume_log";
   label: string; title?: string; detail?: string; code?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string | null;
 };
@@ -188,9 +188,11 @@ export function readWorkflowDestination(search: string, page: "stations" | "reco
   const params = new URLSearchParams(search), action = params.get("action") || "inspect";
   if (!params.has("action") && !params.has("stationId") && !params.has("accountKey")) return null;
   const result: WorkflowDestination = { action, ruleId: params.get("ruleId"), stationId: params.get("stationId"), accountKey: params.get("accountKey"), ownStationId: params.get("ownStationId"), channelIds: [], window: null, error: "" };
-  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "channels", "inspect", "scope", "conflict"] : ["retry", "conflict", "scope"];
+  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "channels", "swap-key", "inspect", "scope", "conflict"] : ["retry", "conflict", "scope"];
   if (!allowed.includes(action)) result.error = DESTINATION_EXPIRED;
   else if (page === "stations" && ["scope", "conflict"].includes(action) && !result.ruleId) result.error = DESTINATION_EXPIRED;
+  const channelId = params.get("channelId");
+  if (channelId != null) { if (!/^\d+$/.test(channelId) || !Number.isSafeInteger(Number(channelId)) || Number(channelId) < 1) result.error = DESTINATION_EXPIRED; else result.channelIds = [Number(channelId)]; }
   const channelIds = params.get("channelIds");
   if (channelIds != null) {
     const values = channelIds.split(",");
