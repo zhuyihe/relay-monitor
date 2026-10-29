@@ -129,9 +129,9 @@ function profitRow(id, name, o = {}) {
     expectedCostUsd: o.expected ?? null,
     gap: { usd: gapUsd, rate: gapUsd != null && o.expected ? gapUsd / o.expected : null, state, mismatchedDays: o.mismatchedDays || (dayState && dayState !== "within" ? [{ day: o.day || PROFIT_YESTERDAY, usd: gapUsd, state: dayState }] : []), days: o.days ?? (gapUsd != null ? 1 : 0), reason: o.reason || null, missingPriceModels: o.missing || [] },
     attention: o.attention || null, excludedDays: o.attention ? 1 : 0,
-    daily: o.daily || (gapUsd != null ? [{ day: PROFIT_YESTERDAY, state: "fixed", gapUsd, gapState: dayState, reason: null, tokens: 720000 }]
+    daily: o.daily || (gapUsd != null ? [{ day: PROFIT_YESTERDAY, state: "fixed", gapUsd, gapState: dayState, reason: null, tokens: 720000, incomeUsd: income, actualCostUsd: cost, grossUsd: income - cost }]
       // 看今天：近 7 天——前 6 天已固定（只有昨天有差额，用 latest 的），最后一格今天
-      : [...["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", PROFIT_YESTERDAY].map((day) => ({ day, state: "fixed", gapUsd: day === PROFIT_YESTERDAY ? o.latest?.usd ?? null : null, gapState: day === PROFIT_YESTERDAY ? o.latest?.state ?? null : null, reason: null, tokens: 720000 })), { day: PROFIT_TODAY, state: "today", gapUsd: null, gapState: null, reason: null, tokens: null }]),
+      : [...["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", PROFIT_YESTERDAY].map((day) => ({ day, state: "fixed", gapUsd: day === PROFIT_YESTERDAY ? o.latest?.usd ?? null : null, gapState: day === PROFIT_YESTERDAY ? o.latest?.state ?? null : null, reason: null, tokens: 720000, incomeUsd: o.dayIncome ?? 2, actualCostUsd: o.dayCost ?? 1, grossUsd: (o.dayIncome ?? 2) - (o.dayCost ?? 1) })), { day: PROFIT_TODAY, state: "today", gapUsd: null, gapState: null, reason: null, tokens: null, incomeUsd: o.attention ? null : income, actualCostUsd: o.attention ? null : cost, grossUsd: o.attention ? null : income - cost }]),
     latestSettledGap: "latest" in o ? o.latest : gapUsd != null ? { day: PROFIT_YESTERDAY, usd: gapUsd, state: dayState, reason: null } : null,
   };
 }
@@ -197,145 +197,112 @@ async function openDailyPage(t, options = {}) {
 // 页面上的字都来自 copy.ts（页面文件不能导出）和共用的常量，这里只填夹具的数
 const metricOf = (page, title) => page.locator(".jy-profit-metric").filter({ has: page.getByText(title, { exact: true }) });
 const rowOf = (page, name) => page.locator(`.jy-profit-row[data-row-key]`).filter({ has: page.locator(".jy-profit-row__toggle", { hasText: name }) });
-const cardOf = (page, name) => page.locator(".jy-profit-card").filter({ has: page.locator(".jy-profit-card__top", { hasText: name }) });
+const cardOf = (page, name) => page.locator(".jy-profit-card").filter({ has: page.locator(".jy-profit-card__toggle", { hasText: name }) });
+// 渠道名字后面的感叹号和点开的气泡
+const bangOf = (scope, name) => scope.getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}：`) });
 const presets = (page) => page.getByRole("group", { name: PROFIT_COPY.rangeLabel, exact: true });
 const pickPreset = (page, label) => presets(page).getByRole("button", { name: label, exact: true }).filter({ visible: true }).click();
-const filterSeg = (page) => page.getByRole("group", { name: PROFIT_COPY.table.filterLabel, exact: true });
 
-test("changing a past transition reports saved time without claiming fixed days were recalculated", async (t) => {
-  let saved = 0;
-  const segment = { id: "past-transition", group: "default", ratio: 1, timingSource: "detected",
-    effectiveFrom: window.startMs, effectiveTo: null };
-  const { page } = await openDailyPage(t, {
-    segments: [segment],
-    query: (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture reload failed" }) }),
-    extraAPI(route, path) {
-      if (path !== "/api/reconciliation/rules/rule-1/transitions/past-transition") throw new Error("unexpected daily fixture API: " + path);
-      assert.equal(route.request().method(), "PUT");
-      saved += 1;
-      return fulfill(route, { segments: [segment] });
-    },
-  });
-  await page.getByRole("button", { name: new RegExp(`^${PROFIT_COPY.expanded.dayCell("10月8日")}`) }).first().click();
-  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true });
-  const timing = drawer.getByRole("region", { name: "改时间", exact: true });
-  await timing.waitFor();
-  await timing.getByText("保存以后，改到的那几天会按新的时间重新算，已经固定的也一样。31 天以前的不自动重算；要按新的时间算，到每日利润选那天点「重新读取」。", { exact: true }).waitFor();
-  const input = timing.getByPlaceholder("倍率变化的时间");
-  await input.fill("2026年10月8日 09:30");
-  await input.press("Enter");
-  await timing.getByRole("button", { name: "改时间", exact: true }).click();
-  await page.getByText("时间已修改，但最新结果没读到，请重新读取", { exact: true }).waitFor();
-  assert.equal(saved, 1);
-  assert.equal(await page.getByText("已修改，受影响的日子已重算", { exact: true }).count(), 0);
-});
-
-test("每日利润默认打开今天：整页一次 POST /profit；页顶一句；四个数；表没有应付成本列、最后一列是昨天的差额；今天写「明天出」不写 0；合计只加算进来的、等于顶上第一个数", async (t) => {
-  const { page, profitReads, queries } = await openDailyPage(t);
+test("每日利润默认打开今天：整页一次 POST /profit；页顶一句；四个数；今天不画柱状图；渠道表五列、按毛利从高到低、亏钱标红；合计等于顶上的数；最底下一句没绑定的渠道", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 }), profitRow("rule-3", "Rule C", { income: 1, cost: 2 })];
+  const { page, profitReads, queries } = await openDailyPage(t, { rows, pageOptions: { unlinked: 2 } });
   assert.deepEqual(profitReads, [{ preset: "today" }]); assert.equal(queries.length, 0);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.locator(".jy-profit-caption").getByText("10月9日 0:00–11:00 · " + PROFIT_COPY.todayCaption, { exact: true }).waitFor();
-  const gross = metricOf(page, PROFIT_COPY.metric.grossToday); await gross.getByText("$4.50", { exact: true }).waitFor();
-  await gross.getByText(PROFIT_COPY.metric.equation("$7.50", "$3.00"), { exact: true }).waitFor(); await gross.getByText(PROFIT_COPY.metric.netToday("$0.50", "$4.00"), { exact: true }).waitFor();
-  await metricOf(page, PROFIT_COPY.metric.gapToday).getByText(PROFIT_COPY.metric.tomorrow, { exact: true }).waitFor();
-  const latest = metricOf(page, PROFIT_COPY.metric.lessThanExpectedDay("昨天")); await latest.getByText("$0.21", { exact: true }).waitFor(); await latest.locator("p", { hasText: PROFIT_COPY.metric.mismatchedChannelsLink(1) }).waitFor();
-  await metricOf(page, PROFIT_COPY.metric.uncounted).getByText(PROFIT_COPY.metric.allCounted, { exact: true }).waitFor();
-  // 表头：渠道、收入、上游成本、毛利、昨天的差额；没有应付成本
+  // 四个数：收入、上游成本、毛利、毛利率（和合计行同一份）
+  const four = async () => page.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => [node.querySelector("dt").textContent, node.querySelector("dd").textContent]));
+  assert.deepEqual(await four(), [["收入", "$8.50"], ["上游成本", "$4.00"], ["毛利", "$4.50"], ["毛利率", "52.9%"]]);
+  assert.equal(await page.locator(".jy-profit-chart").count(), 0, "只有今天：不画每天的毛利");
   const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin, PROFIT_COPY.table.yesterdayGap]);
-  const rowA = rowOf(page, "Rule A"); await rowA.locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor(); await rowA.locator(".jy-profit-tag", { hasText: PROFIT_COPY.gap.tag }).waitFor(); assert.ok((await rowA.getAttribute("class")).includes("jy-profit-row--over"));
-  await rowOf(page, "Rule B").getByText("+$0.01", { exact: true }).waitFor();
-  // 昨天还没开始算的渠道写原因，不写 $0.00
-  await rowOf(page, "Rule C").getByText(PROFIT_COPY.gap.yesterdayNotStarted, { exact: true }).waitFor(); assert.equal(await page.getByText("$0.00", { exact: true }).count(), 0);
-  await rowOf(page, "Rule C").getByText(`Fixture upstream · ${PROFIT_COPY.table.keyName("Rule C")} · ${PROFIT_COPY.table.group("default", "1.0")} · ${PROFIT_COPY.table.startedToday("9:30")}`, { exact: true }).waitFor();
-  const totals = page.locator(".jy-profit-totals"); await totals.getByText(PROFIT_COPY.table.totals(3), { exact: true }).waitFor(); await totals.getByText("$4.50", { exact: true }).waitFor(); await totals.getByText("$7.50", { exact: true }).waitFor();
-  // 对不上的行默认展开：「差在哪」写昨天（Token 和差额），接「今天的明天出」；近 7 天七个小格，最后一格今天「明天出」
-  const expanded = page.locator(".jy-profit-row__expanded").first(); await expanded.getByText(`${PROFIT_COPY.expanded.latestDay("昨天", "72 万", "多扣 $0.20")}${PROFIT_COPY.expanded.todayTomorrow}`, { exact: true }).waitFor();
-  const days = expanded.getByRole("group", { name: PROFIT_COPY.expanded.dailyTitle, exact: true }); assert.equal(await days.locator(".jy-profit-day").count(), 7); await days.getByRole("button", { name: `${PROFIT_COPY.expanded.dayCell("10月9日")} ${PROFIT_COPY.gap.tomorrow}`, exact: true }).waitFor();
-  // 标题旁的数是灰色徽标
-  assert.ok((await page.locator(".jy-profit-panel .jy-count-badge").getAttribute("class")).includes("jy-count-badge--muted"));
-  // 没有需处理区块、日条、按天看、等式
-  assert.equal(await page.locator(".jy-attention, .jy-eq, .jy-equation").count(), 0); assert.equal(await page.getByText("按天看", { exact: true }).count(), 0);
+  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), ["渠道", "收入", "上游成本", "毛利▼", "毛利率"]);
+  assert.deepEqual(await page.locator(".jy-profit-row__toggle strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C"], "默认按毛利从高到低");
+  // 名字下面只写上游名；没有 Key、分组、差额、选 Key
+  await rowOf(page, "Rule A").getByText("Fixture upstream", { exact: true }).waitFor();
+  assert.equal(await page.getByText(/Key|分组|差额|应付成本|对不上/).count(), 0);
+  // 亏钱的毛利、毛利率标红
+  assert.equal(await rowOf(page, "Rule C").locator(".jy-profit-neg").count(), 2); assert.equal(await rowOf(page, "Rule B").locator(".jy-profit-neg").count(), 0);
+  const totals = page.locator(".jy-profit-totals");
+  assert.deepEqual((await totals.locator("td").allInnerTexts()).map((text) => text.trim()), [PROFIT_COPY.table.totals(3), "$8.50", "$4.00", "$4.50", "52.9%"]);
+  await page.locator(".jy-profit-notes").getByText(PROFIT_COPY.notice.unlinked(2), { exact: false }).waitFor();
+  assert.equal(await page.locator(".jy-profit-notes").getByRole("link", { name: PROFIT_COPY.table.goUpstreams, exact: true }).getAttribute("href"), "/stations");
+  // 没有以前的东西：每日记录按钮、选 Key、还没算利润的渠道
+  assert.equal(await page.getByRole("button", { name: "以前的每日记录", exact: true }).count(), 0); assert.equal(await page.getByText("还没算利润的渠道", { exact: true }).count(), 0);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-today-1440x900.png` });
 });
 
-test("切昨天：五个数一行（收入、应付成本、上游成本、差额、毛利），对不上的行红底 / 蓝底带标签，门槛以内灰字；比预期少赚拆成多扣、少扣、门槛以内；筛选和合计按渠道数", async (t) => {
-  const { page, profitReads } = await openDailyPage(t);
-  await pickPreset(page, PROFIT_COPY.presets.yesterday);
-  await page.locator(".jy-profit-caption").getByText("10月8日 周四 · " + PROFIT_COPY.fixed, { exact: true }).waitFor(); assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
-  const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.expected, PROFIT_COPY.table.col.actual, `${PROFIT_COPY.table.col.gap}${PROFIT_COPY.table.col.gapSub}`.replace(/\s+/g, ""), PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin]);
-  const less = metricOf(page, PROFIT_COPY.metric.lessThanExpected); await less.getByText("$0.11", { exact: true }).waitFor(); await less.getByText(PROFIT_COPY.metric.gapBreakdown("$0.20", "$0.10", "+$0.01"), { exact: true }).waitFor(); await less.getByText(PROFIT_COPY.metric.gapRows(3), { exact: true }).waitFor();
-  await metricOf(page, PROFIT_COPY.metric.mismatched).getByText(PROFIT_COPY.metric.channels(2), { exact: true }).waitFor();
-  assert.ok((await less.getAttribute("class")).includes("jy-profit-metric--crit")); assert.ok(!(await metricOf(page, PROFIT_COPY.metric.mismatched).getAttribute("class")).includes("jy-profit-metric--crit"));
-  const rowA = rowOf(page, "Rule A"), rowC = rowOf(page, "Rule C");
-  await rowA.locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor(); await rowA.getByText(PROFIT_COPY.gap.overRate("20%"), { exact: true }).waitFor(); assert.ok((await rowA.getAttribute("class")).includes("jy-profit-row--over"));
-  await rowC.locator(".jy-profit-gap__main", { hasText: "少扣 $0.10" }).waitFor(); await rowC.getByText(PROFIT_COPY.gap.underRate("10%"), { exact: true }).waitFor(); assert.ok((await rowC.getAttribute("class")).includes("jy-profit-row--under"));
-  assert.ok(!(await rowOf(page, "Rule B").getAttribute("class")).includes("jy-profit-row--"));
-  // 金额不上色：对不上靠标签，数字还是墨色
-  assert.equal(await rowA.locator(".jy-profit-gap__main").evaluate((node) => getComputedStyle(node).color), await rowOf(page, "Rule B").locator(".jy-profit-num").first().evaluate((node) => getComputedStyle(node).color));
-  // 筛选：全部 3 / 对不上 2 / 需处理 0，0 也能点
-  const seg = filterSeg(page); await seg.getByRole("button", { name: `${PROFIT_COPY.table.filterMismatched} 2`, exact: true }).click(); assert.equal(await page.locator(".jy-profit-row[data-row-key]").count(), 2);
-  await seg.getByRole("button", { name: `${PROFIT_COPY.table.filterAttention} 0`, exact: true }).click(); await page.getByText(PROFIT_COPY.table.noMatch, { exact: true }).waitFor();
-  await seg.getByRole("button", { name: `${PROFIT_COPY.table.filterAll} 3`, exact: true }).click();
-  const totals = page.locator(".jy-profit-totals"); await totals.getByText(PROFIT_COPY.table.totals(3), { exact: true }).waitFor(); await totals.getByText("$3.00", { exact: true }).waitFor(); await totals.getByText("+$0.11", { exact: true }).waitFor();
-  assert.equal(profitReads.length, 2, "筛选不再请求");
+test("近 7 天：每天的毛利小柱状图（今天浅色、悬停看那天四个数）；点开一个渠道一天一行，点「计算明细」打开那天的明细（GET /profit/detail）；点表头换排法", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 }), profitRow("rule-3", "Rule C", { income: 1, cost: 2 })];
+  const { page, detailReads, profitReads } = await openDailyPage(t, { rows, pageOf: (body) => profitPage(rows, { preset: "7d", customPreset: body.preset }) });
+  await pickPreset(page, PROFIT_COPY.presets["7d"]);
+  await page.locator(".jy-profit-caption").getByText(`10月3日–10月9日 · ${PROFIT_COPY.daysFixed(6)}，${PROFIT_COPY.todayLive}`, { exact: true }).waitFor();
+  assert.deepEqual(profitReads.at(-1), { preset: "7d" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const chart = page.locator(".jy-profit-chart"); await chart.getByText(PROFIT_COPY.chart.title, { exact: true }).waitFor(); await chart.getByText(PROFIT_COPY.chart.legend, { exact: true }).waitFor();
+  const bars = chart.locator("g[data-day]"); assert.equal(await bars.count(), 7);
+  assert.deepEqual(await bars.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-light"))), ["0", "0", "0", "0", "0", "0", "1"], "已固定的 6 天深色，今天浅色");
+  // 悬停 10月8日：四个数是各渠道这天的相加（每个渠道这天收入 $2.00、成本 $1.00）
+  await bars.nth(5).hover();
+  const tip = page.getByRole("tooltip"); await tip.getByText("10月8日 周四 · 已固定", { exact: true }).waitFor();
+  assert.deepEqual((await tip.locator(".t-row").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), ["收入 $6.00", "上游成本 $3.00", "毛利 $3.00", "毛利率 50.0%"]);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-7d-1440x900.png` });
+  await page.mouse.move(5, 5);
+  // 点开 Rule B：一天一行，新的在上；已固定写已固定、今天写实时
+  const rowB = rowOf(page, "Rule B"); await rowB.locator(".jy-profit-row__toggle").click();
+  const days = page.locator(".jy-profit-row__expanded .jy-profit-days tbody tr"); assert.equal(await days.count(), 7);
+  assert.deepEqual((await days.first().locator("td").allInnerTexts()).map((text) => text.trim()), ["10月9日 今天", "$5.00", "$1.00", "$4.00", "80.0%", "实时", "计算明细"]);
+  assert.deepEqual((await days.nth(1).locator("td").allInnerTexts()).map((text) => text.trim()), ["10月8日 周四", "$2.00", "$1.00", "$1.00", "50.0%", "已固定", "计算明细"]);
+  await days.nth(1).getByRole("button", { name: PROFIT_COPY.table.day.detail }).click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }); await drawer.waitFor();
+  assert.deepEqual(detailReads, [{ ruleIds: "rule-2", day: PROFIT_YESTERDAY }]);
+  if (process.env.UI_SHOT_DIR) { await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); await page.locator(".jy-profit-row__expanded").scrollIntoViewIfNeeded(); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-expand-1440x900.png` }); }
+  else { await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); }
+  // 点表头换排法：上游成本从大到小、再点从小到大；收起再展开不影响
+  const order = () => page.locator(".jy-profit-row__toggle strong").allInnerTexts();
+  assert.deepEqual(await order(), ["Rule B", "Rule A", "Rule C"]);
+  await page.locator(".jy-profit-table > thead").getByRole("button", { name: PROFIT_COPY.table.col.actual }).click();
+  assert.deepEqual(await order(), ["Rule C", "Rule A", "Rule B"], "成本 2、1、1：C 在前，一样的按名字");
+  await page.locator(".jy-profit-table > thead").getByRole("button", { name: new RegExp(PROFIT_COPY.table.col.actual) }).click();
+  assert.equal(await page.locator(".jy-profit-table > thead th").filter({ hasText: PROFIT_COPY.table.col.actual }).getAttribute("aria-sort"), "ascending");
+  assert.equal(profitReads.length, 2, "排序、展开不再请求");
 });
 
-test("点开一行：对不上的默认展开，「差在哪」一句写用量、倍率、应付和实付；近 7 天每天的小格，点一格或「看计算明细」打开那天的计算明细抽屉（GET /profit/detail）", async (t) => {
-  const { page, detailReads } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }) });
-  const rowA = rowOf(page, "Rule A"), rowB = rowOf(page, "Rule B");
-  assert.equal(await rowA.locator(".jy-profit-row__toggle").getAttribute("aria-expanded"), "true"); assert.equal(await rowB.locator(".jy-profit-row__toggle").getAttribute("aria-expanded"), "false");
-  const expanded = page.locator(".jy-profit-row__expanded").first(); await expanded.getByText(PROFIT_COPY.expanded.where, { exact: true }).waitFor();
-  await expanded.getByText(PROFIT_COPY.expanded.single("72 万", "default 分组 ×1.0", "$1.00", "$1.20"), { exact: true }).waitFor();
-  const days = expanded.getByRole("group", { name: PROFIT_COPY.expanded.dailyTitle, exact: true }); await days.getByRole("button", { name: `${PROFIT_COPY.expanded.dayCell("10月8日")} +0.20`, exact: true }).waitFor();
-  // 第一版没有上游后台地址，不出「到上游后台查这把 Key」
-  assert.equal(await expanded.getByText(PROFIT_COPY.expanded.upstreamKey, { exact: true }).count(), 0);
-  await expanded.getByRole("button", { name: PROFIT_COPY.expanded.seeDetail, exact: true }).click();
-  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
-  assert.deepEqual(detailReads, [{ ruleIds: "rule-1", day: PROFIT_YESTERDAY }]);
-  await drawer.getByText(`${PROFIT_COPY.detail.incomeFrom("Rule A")}，${PROFIT_COPY.detail.adminAll("$0.12")}。`, { exact: true }).waitFor();
-  await drawer.getByText(PROFIT_COPY.detail.expectedIntro("Fixture upstream", "default 分组 ×1.0"), { exact: true }).waitFor();
-  const models = drawer.locator(".jy-profit-models"); await models.getByText("gpt-4o", { exact: true }).waitFor(); await models.locator("td", { hasText: PROFIT_COPY.detail.usage("60 万", "12 万") }).waitFor(); await models.locator("td small", { hasText: PROFIT_COPY.detail.unitPrice("$2.50", "$10") }).waitFor();
-  await drawer.getByText(PROFIT_COPY.detail.actualFrom("Rule A"), { exact: true }).waitFor(); await drawer.getByText("多扣 $0.20", { exact: true }).waitFor(); await drawer.getByText(PROFIT_COPY.detail.ratioSame("default 分组 ×1.0"), { exact: true }).waitFor();
-  await drawer.getByText("10月9日 8:05", { exact: true }).waitFor(); await drawer.getByText(PROFIT_COPY.detail.notRevised, { exact: true }).waitFor();
-  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-  // 收起、再展开 Rule B，点它的小格
-  await rowB.locator(".jy-profit-row__toggle").click(); await page.locator(".jy-profit-row__expanded").nth(1).getByRole("button", { name: `${PROFIT_COPY.expanded.dayCell("10月8日")} ${PROFIT_COPY.expanded.dot}`, exact: true }).click();
-  await page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }).waitFor(); assert.deepEqual(detailReads.at(-1), { ruleIds: "rule-2", day: PROFIT_YESTERDAY });
-});
-
-test("需处理那一行：原因、附注和按钮同一行，差额写「—」，收入照写、实付「读不到」、不进合计；「重新读取」只读这一行（/query 带 observe）再读整页；顶上「没算进来」点名是哪个", async (t) => {
+test("需处理的渠道：名字后面一个感叹号（点它不展开这一行），点开写原因加按钮，按钮和文案从问题码来；收入照写、别的写「—」、不进合计；页顶一句点出有几个渠道没算进来；「重新读取」只读这一行再读整页", async (t) => {
   const attention = { code: "KEY_INVALID_OR_DENIED", title: reconciliationIssue("KEY_INVALID_OR_DENIED").title, detail: reconciliationIssue("KEY_INVALID_OR_DENIED").detail, action: workflowAction("update_authorization", { stationId: "upstream-1" }), fromDay: "2026-10-01", moreCount: 1 };
   const retryable = { ...attention, code: "OWN_BILLING_UNAVAILABLE", title: reconciliationIssue("OWN_BILLING_UNAVAILABLE").title, detail: "", action: workflowAction("retry_bill", { ruleId: "rule-3", window }, { code: "WAITING_FOR_BILL" }), moreCount: 0 };
-  const rows = [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { attention, channels: [{ channelId: 2, name: "Rule B" }, { channelId: 4, name: "Rule D" }] }), profitRow("rule-3", "Rule C", { attention: retryable })];
+  const rows = [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { attention }), profitRow("rule-3", "Rule C", { attention: retryable })];
   const { page, queries, profitReads } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }) });
-  const rowB = rowOf(page, "Rule B、Rule D"); assert.ok((await rowB.getAttribute("class")).includes("jy-profit-row--attention"));
-  // 看今天时需处理那一行同样带「· 10月1日起没算进利润」
-  const today = await openDailyPage(t, { rows: [rows[0], rows[1]], pageOf: () => profitPage([rows[0], rows[1]]) });
-  await today.page.locator(".jy-profit-attention").filter({ hasText: attention.title }).getByText(new RegExp(` · ${PROFIT_COPY.attention.since("10月1日")} · `)).waitFor();
-  await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText(PROFIT_COPY.table.unreadable, { exact: true }).waitFor(); assert.equal(await rowB.locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 4); // 差额、毛利、毛利率（新加的一列）和应付成本这几格都写「—」
-  await page.locator(".jy-profit-attention").filter({ hasText: attention.title }).getByText(`${PROFIT_COPY.attention.prefix}${attention.title}。${attention.detail} · ${PROFIT_COPY.attention.since("10月1日")} · ${PROFIT_COPY.attention.more(1)}`, { exact: true }).waitFor();
-  const update = page.getByRole("link", { name: `${UPDATE_AUTH} Rule B、Rule D`, exact: true }); assert.equal(await update.getAttribute("href"), attention.action.href);
-  // 排序：多扣的在前、需处理第二；筛选「需处理 3」按渠道数
-  assert.deepEqual(await page.locator(".jy-profit-row__toggle strong").allInnerTexts(), ["Rule A", "Rule B、Rule D", "Rule C"]);
-  await filterSeg(page).getByRole("button", { name: `${PROFIT_COPY.table.filterAttention} 3`, exact: true }).waitFor();
-  const uncounted = metricOf(page, PROFIT_COPY.metric.uncomputable); await uncounted.getByText(PROFIT_COPY.metric.channels(0), { exact: true }).waitFor(); await uncounted.getByText(PROFIT_COPY.metric.attentionCount(3), { exact: true }).waitFor();
-  const totals = page.locator(".jy-profit-totals"); await totals.getByText(PROFIT_COPY.table.totals(1), { exact: true }).waitFor(); await totals.getByText("$2.50", { exact: true }).waitFor();
-  // 重新读取：只带这一行的绑定、带 observe，然后再读整页
-  await page.getByRole("button", { name: `${RETRY} Rule C`, exact: true }).click(); await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
-  assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-3"], observe: true }]); assert.equal(profitReads.length, 2);
+  await pickPreset(page, PROFIT_COPY.presets.yesterday);
+  await page.locator(".jy-profit-caption").getByText("10月8日 周四 · " + PROFIT_COPY.fixed + " · " + PROFIT_COPY.caption.attention(2), { exact: true }).waitFor();
+  const rowA = rowOf(page, "Rule A"), rowB = rowOf(page, "Rule B");
+  assert.equal(await bangOf(rowA, "Rule A").count(), 0, "没有需处理的渠道没有感叹号");
+  // 收入照写，上游成本、毛利、毛利率写「—」；合计只有算进来的那一个
+  await rowB.getByText("$2.50", { exact: true }).waitFor(); assert.equal(await rowB.locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 3);
+  const totals = page.locator(".jy-profit-totals"); await totals.getByText(PROFIT_COPY.table.totals(1), { exact: true }).waitFor();
+  // 点感叹号：不展开这一行；气泡里是标题、说明（和还有几个问题）、按钮
+  await bangOf(rowB, "Rule B").click();
+  const pop = page.locator(".jy-issue-pop"); await pop.waitFor();
+  if (process.env.UI_SHOT_DIR) { await page.setViewportSize({ width: 1440, height: 900 }); await page.mouse.move(700, 700); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-attention-1440x900.png` }); }
+  assert.equal(await rowB.locator(".jy-profit-row__toggle").getAttribute("aria-expanded"), "false");
+  assert.equal(await pop.locator("b").innerText(), attention.title); await pop.getByText(`${attention.detail}。${PROFIT_COPY.attention.more(1)}`, { exact: true }).waitFor();
+  assert.equal(await pop.getByRole("link", { name: `${UPDATE_AUTH} Rule B`, exact: true }).getAttribute("href"), attention.action.href);
+  await page.locator(".jy-profit-caption").click(); await pop.waitFor({ state: "hidden" });
+  // 「重新读取」：只带这一行的绑定、带 observe，然后再读整页
+  await bangOf(page.locator(".jy-profit-row[data-row-key]").filter({ hasText: "Rule C" }), "Rule C").click();
+  await page.locator(".jy-issue-pop").getByRole("button", { name: `${RETRY} Rule C`, exact: true }).click(); await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
+  assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-3"], observe: true }]); assert.ok(profitReads.length >= 2);
 });
 
-test("空和出错：还没有在算利润的渠道时表的位置写一句加「开始算利润」（没设置自营站点时是「设置自营站点」）；刷新失败页顶一条、下面照旧显示上次的数；读不到自营站点的收入时页顶一条", async (t) => {
+test("空和出错：还没有在算利润的渠道时表的位置写一句加「去上游资源」（没设置自营站点时是「设置自营站点」）；刷新失败页顶一条、下面照旧显示上次的数；读不到自营站点的收入时页顶一条", async (t) => {
   const empty = await openDailyPage(t, { rows: [], pageOf: () => profitPage([]), path: "/reconciliation" });
   await empty.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); await empty.page.getByText(PROFIT_COPY.table.emptyDesc, { exact: true }).waitFor();
-  assert.equal(await empty.page.getByRole("link", { name: PROFIT_COPY.table.startCounting, exact: true }).getAttribute("href"), "/stations?view=accounts"); assert.equal(await empty.page.locator(".jy-profit-summary").count(), 0);
+  assert.equal(await empty.page.getByRole("link", { name: PROFIT_COPY.table.goUpstreams, exact: true }).getAttribute("href"), "/stations"); assert.equal(await empty.page.locator(".jy-profit-summary").count(), 0);
   const unset = await openDailyPage(t, { rows: [], pageOf: () => profitPage([]), configuration: { ...configuration, ownStation: null, rules: [] }, path: "/reconciliation" });
   await unset.page.getByRole("link", { name: PROFIT_COPY.table.setupOwnStation, exact: true }).waitFor();
   // 刷新失败：第一次读到，刷新时 503
   let fail = false;
   const failing = await openDailyPage(t, { profit: (route, body) => fail ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture reload failed" }) }) : fulfill(route, profitPage(todayRows())) });
   fail = true; await failing.page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
-  await failing.page.locator(".jy-banner").getByText(refreshFailedText(Date.parse(PROFIT_AS_OF), PROFIT_TZ), { exact: true }).waitFor(); await rowOf(failing.page, "Rule A").locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor();
+  await failing.page.locator(".jy-banner").getByText(refreshFailedText(Date.parse(PROFIT_AS_OF), PROFIT_TZ), { exact: true }).waitFor(); await rowOf(failing.page, "Rule A").getByText("$2.50", { exact: true }).waitFor();
   assert.deepEqual(failing.queries, [{ preset: "today", observe: true }]);
   // 读不到自营站点的收入：和运营总览同一句，收入、毛利写「—」，上游成本照常
   const rows = todayRows().map((row) => ({ ...row, incomeUsd: null, grossProfitUsd: null }));
@@ -351,40 +318,28 @@ test("表下面一行：没算进利润的上游成本、还没算利润的渠�
   const fresh = await openDailyPage(t, { ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 60000, behindMs: 60000 } }); await rowOf(fresh.page, "Rule A").waitFor(); assert.equal(await fresh.page.locator(".jy-profit-notes").count(), 0);
 });
 
-test("近 7 天 / 本月：不出应付成本列；差额只加已固定的日子，表头写「已固定的 6 天（10月3日–10月8日）」，行上写「其中 2 天对不上」；今天开始的渠道差额「明天出」，名字下面写「今天开始算」", async (t) => {
-  const rows = [profitRow("rule-1", "Rule A", { gapUsd: 0.3, expected: 6, days: 6, mismatchedDays: [{ day: "2026-10-07", usd: 0.1, state: "over" }, { day: PROFIT_YESTERDAY, usd: 0.2, state: "over" }] }), profitRow("rule-2", "Rule B", { gapUsd: 0.01, expected: 6, days: 6 }),
-    { ...profitRow("rule-3", "Rule C", { latest: null }), startedOn: PROFIT_TODAY }];
-  const { page } = await openDailyPage(t, { rows, pageOf: (body) => profitPage(rows, { preset: "7d", customPreset: body.preset }), path: "/reconciliation" });
+test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片（右上毛利、右下收入和毛利率）；点开一天一块、「计算明细」整屏；不横向滚动", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
+  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 375, height: 812 }, pageOf: (body) => profitPage(rows, { preset: "7d", customPreset: body.preset }) });
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
-  await page.locator(".jy-profit-caption").getByText(`10月3日–10月9日 · ${PROFIT_COPY.daysFixed(6)}，${PROFIT_COPY.todayLive}`, { exact: true }).waitFor();
-  const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin, `${PROFIT_COPY.table.col.gap}${PROFIT_COPY.table.gapFixedDaysRange(6, "10月3日–10月8日")}`.replace(/\s+/g, "")]);
-  const rowA = rowOf(page, "Rule A"); await rowA.locator(".jy-profit-gap__main", { hasText: "多扣 $0.30" }).waitFor(); await rowA.getByText(PROFIT_COPY.gap.mismatchedDaysIn(2), { exact: true }).waitFor();
-  await metricOf(page, PROFIT_COPY.metric.lessThanExpectedFixed(6)).getByText("$0.31", { exact: true }).waitFor();
-  const rowC = rowOf(page, "Rule C"); await rowC.getByText(PROFIT_COPY.gap.tomorrow, { exact: true }).waitFor(); await rowC.getByText(new RegExp(` · ${PROFIT_COPY.table.startedTodayShort}$`)).waitFor();
+  await page.locator(".jy-profit-chart").waitFor(); assert.equal(await page.locator(".jy-profit-table").count(), 0);
+  const metrics = await page.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; }));
+  assert.equal(metrics[0][1], metrics[1][1], "第一排两个"); assert.equal(metrics[2][1], metrics[3][1], "第二排两个"); assert.ok(metrics[2][1] > metrics[0][1]);
+  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText(PROFIT_COPY.table.mobileLine("$5.00", "80.0%"), { exact: true }).waitFor(); await cardB.getByText("Fixture upstream", { exact: true }).waitFor();
+  assert.deepEqual(await page.locator(".jy-profit-card__toggle strong").allInnerTexts(), ["Rule B", "Rule A"], "按毛利从高到低");
+  await page.getByText(PROFIT_COPY.table.mobileSort(PROFIT_COPY.table.col.gross, true), { exact: true }).waitFor();
+  await cardB.locator(".jy-profit-card__toggle").click();
+  const days = cardB.locator(".jy-profit-days--cards li"); assert.equal(await days.count(), 7);
+  await days.first().getByText("10月9日 今天", { exact: true }).waitFor(); await days.first().getByText(PROFIT_COPY.table.day.live, { exact: true }).waitFor(); await days.first().getByText(PROFIT_COPY.table.mobileDay("$5.00", "$1.00"), { exact: true }).waitFor(); await days.first().getByText(PROFIT_COPY.table.mobileGross("$4.00"), { exact: true }).waitFor();
+  await days.nth(1).getByRole("button", { name: PROFIT_COPY.table.day.detail, exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }); await drawer.waitFor();
+  assert.deepEqual(detailReads, [{ ruleIds: "rule-2", day: PROFIT_YESTERDAY }]);
+  assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 374);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px document root overflows horizontally");
+  if (process.env.UI_SHOT_DIR) { await cardB.scrollIntoViewIfNeeded(); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-375x812-expand.png` }); await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-375x812.png` }); }
 });
 
-test("手机 390：顶上一张卡片（毛利大字、底下一行昨天的差额和「看昨天」）、筛选一排、一个渠道一张卡片；点开五个数竖排、小格横滑、「看计算明细」整屏；不横向滚动", async (t) => {
-  const { page, profitReads } = await openDailyPage(t, { viewport: { width: 390, height: 844 } });
-  const summary = page.locator(".jy-profit-summary--mobile"); await summary.getByText(PROFIT_COPY.metric.grossTodayMobile, { exact: true }).waitFor(); await summary.getByText("$4.50", { exact: true }).waitFor();
-  await summary.locator(".jy-profit-summary__foot").getByText(`${PROFIT_COPY.metric.lessThanExpectedDay("昨天")} $0.21 · ${PROFIT_COPY.metric.mismatchedChannelsLink(1)}`, { exact: true }).waitFor();
-  assert.equal(await page.locator(".jy-profit-table").count(), 0);
-  const cardA = cardOf(page, "Rule A"); await cardA.getByText("$1.50", { exact: true }).waitFor(); await cardA.getByText(PROFIT_COPY.table.mobileIncomeActual("$2.50", "$1.00"), { exact: true }).waitFor();
-  // 差额那一行写成一行「昨天差额 多扣 $0.20 [对不上]」「昨天差额 —（昨天还没开始算）」；卡片一律默认收起（桌面才默认展开对不上的）
-  await cardA.locator(".jy-profit-card__line", { hasText: PROFIT_COPY.table.gapLine(PROFIT_COPY.table.yesterdayGapShort, "多扣 $0.20", "") }).locator(".jy-profit-tag", { hasText: PROFIT_COPY.gap.tag }).waitFor();
-  await cardOf(page, "Rule C").getByText(PROFIT_COPY.table.gapLine(PROFIT_COPY.table.yesterdayGapShort, EMPTY, PROFIT_COPY.gap.yesterdayNotStarted), { exact: true }).waitFor();
-  assert.equal(await page.locator(".jy-profit-card.is-open").count(), 0);
-  assert.ok((await cardA.getAttribute("class")).includes("jy-profit-row--over"));
-  await summary.getByRole("button", { name: PROFIT_COPY.metric.seeDay("昨天"), exact: true }).click(); assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
-  const card = cardOf(page, "Rule A"); await card.locator(".jy-profit-card__line", { hasText: PROFIT_COPY.table.gapLine(PROFIT_COPY.table.col.gap, "多扣 $0.20", "") }).waitFor(); assert.equal(await page.locator(".jy-profit-card.is-open").count(), 0); await card.locator(".jy-profit-card__head").click();
-  const facts = card.locator(".jy-profit-card__facts"); assert.deepEqual(await facts.locator("dt").allInnerTexts(), [PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.expected, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gap, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin]);
-  await card.getByRole("group", { name: PROFIT_COPY.expanded.dailyTitle, exact: true }).waitFor();
-  await card.getByRole("button", { name: PROFIT_COPY.expanded.seeDetailShort, exact: true }).click();
-  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
-  assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 389);
-  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "390px document root overflows horizontally");
-});
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
@@ -441,80 +396,45 @@ test("workflow retry destination opens the linked day, expands that row with its
   assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"], observe: true }]); assert.equal(profitReads.length, 2);
 });
 
+test("计算明细：上面收入、上游成本、毛利三节；下面「核对上游扣费」可收起，右边一句结论；对不上的那天默认展开，对得上的收起；没有「改时间」", async (t) => {
+  const { page } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }),
+    detail: (route, params) => fulfill(route, params.ruleIds === "rule-2" ? profitDetail({ gap: { usd: 0.01, rate: 0.01, state: "within" } }) : profitDetail()) });
+  await pickPreset(page, PROFIT_COPY.presets.yesterday);
+  // 对不上（Rule A 多扣 $0.20）：默认展开，里面是应付成本、差额、倍率
+  await rowOf(page, "Rule A").locator(".jy-profit-row__toggle").click();
+  await page.locator(".jy-profit-row__expanded tbody tr").first().getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
+  await drawer.locator(".jy-profit-verify").waitFor();
+  assert.deepEqual(await drawer.locator(".jy-profit-detail > .jy-profit-detail__sec h3").allInnerTexts(), [PROFIT_COPY.detail.income, PROFIT_COPY.detail.actual, PROFIT_COPY.detail.gross]);
+  const verify = drawer.locator(".jy-profit-verify"); assert.equal(await verify.getAttribute("data-open"), "1");
+  await verify.getByRole("button", { name: new RegExp(PROFIT_COPY.detail.verify.title) }).getByText("多扣 $0.20，对不上", { exact: true }).waitFor();
+  assert.deepEqual(await verify.locator(".jy-profit-detail__sec h3").allInnerTexts(), [PROFIT_COPY.detail.expected, PROFIT_COPY.detail.gap]);
+  await verify.getByText(PROFIT_COPY.detail.ratioSame("default 分组 ×1.0"), { exact: true }).waitFor();
+  assert.equal(await drawer.getByText(/改时间|倍率变化的时间是系统估的/).count(), 0);
+  // 点标题收起、再点展开
+  const head = verify.getByRole("button", { name: new RegExp(PROFIT_COPY.detail.verify.title) }); await head.click(); assert.equal(await verify.getAttribute("data-open"), "0"); assert.equal(await verify.locator(".jy-profit-models").count(), 0);
+  await head.click(); await verify.locator(".jy-profit-models").waitFor();
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  // 对得上（Rule B）：默认收起，右边写「对得上」
+  await rowOf(page, "Rule B").locator(".jy-profit-row__toggle").click();
+  await page.locator("tbody.jy-profit-group").filter({ has: page.locator('[data-row-key="upstream-1:rule-2"]') }).locator(".jy-profit-days tbody tr").first().getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).click();
+  const drawerB = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }); await drawerB.waitFor();
+  const verifyB = drawerB.locator(".jy-profit-verify"); assert.equal(await verifyB.getAttribute("data-open"), "0");
+  await verifyB.getByText(PROFIT_COPY.detail.verify.match, { exact: true }).waitFor(); assert.equal(await verifyB.locator(".jy-profit-models").count(), 0);
+});
+
 test("每日利润 is read-only: no create or edit entry; the attention row's fix links back to 上游资源 and nothing is written", async (t) => {
   const attention = { code: "CANONICAL_KEY_CONFLICT", title: reconciliationIssue("CANONICAL_KEY_CONFLICT").title, detail: reconciliationIssue("CANONICAL_KEY_CONFLICT").detail, action: workflowAction("review_conflict", { ruleId: "rule-1" }), fromDay: null, moreCount: 0 };
   const rows = [profitRow("rule-1", "Rule A", { attention }), profitRow("rule-2", "Rule B", { expected: 1, cost: 1.01, gapUsd: 0.01 })];
   const { page, queries } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }) }), writeLike = new RegExp(`^(添加|编辑|停止|更换|操作|${[EDIT_BINDING, CONNECT, workflowActionMeta("swap_key").label, workflowActionMeta("unbind").label].join("|")})`);
   const FIX = workflowActionMeta("review_conflict").label;
-  await page.locator(".jy-profit-attention").getByText(`${PROFIT_COPY.attention.prefix}${attention.title}。${attention.detail}`, { exact: true }).waitFor();
+  await bangOf(rowOf(page, "Rule A"), "Rule A").click();
+  await page.locator(".jy-issue-pop").getByText(`${attention.detail}`, { exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: writeLike }).count(), 0); assert.equal(await page.getByRole("dialog", { name: CONNECT }).count(), 0);
   assert.equal(await page.getByRole("link", { name: `${FIX} Rule A`, exact: true }).getAttribute("href"), "/stations?action=conflict&ruleId=rule-1");
   assert.equal(await rowOf(page, "Rule B").locator('a[href^="/stations"]').count(), 0); assert.equal(queries.length, 0);
   // 每日利润不再嵌渠道接入：不读接入目录，也没有任何接入写请求
   const calls = onboardingRequests.get(page); assert.equal(calls.filter((call) => call.pathname === "/api/channel-onboarding").length, 0); assert.deepEqual(calls.filter((call) => call.method !== "GET"), []);
-});
-
-test("confirmed history shows the Oct8 time, Key and channels it was fixed with, not current channel 9 or source details", async (t) => {
-  const { page, reads, historyReads, records } = await openConfirmedHistoryPage(t, { groupHistory: true }); const summary = page.locator(".jy-profit-summary"), before = await summary.innerText(); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); const record = await expandConfirmedRecord(drawer, records[0]); await drawer.locator(`tr.ant-table-row[data-row-key="${records[0].historyId}"]`).getByText("old-1、old-2、old-3", { exact: true }).waitFor(); await historyFact(record, "时间", formatZonedWindow(records[0].window)); await historyFact(record, "Key", "old-name"); await record.getByText("来自自营站点 3 个渠道的收费记录", { exact: true }).waitFor();
-  // A1：来源（平台、地址、账号、namespace）和范围版本不再上页面（§11）
-  assert.doesNotMatch(await record.innerText(), /New channel 9|new-name|范围版本|old-own|old-up\.test|newapi|namespace/); assert.equal(await summary.innerText(), before); assert.deepEqual(historyReads[0], { ruleId: "rule-1", params: { limit: "20" } }); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(historyReads.every((read) => read.params.limit === "20"));
-});
-
-test("confirmed history remains discoverable after stopping and reload even without an own station", async (t) => {
-  const { page, reads, historyReads, stopElsewhere } = await openConfirmedHistoryPage(t, { removeOwnAfterStop: true }); stopElsewhere(); await page.reload(); await page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); await page.getByRole("link", { name: PROFIT_COPY.table.setupOwnStation, exact: true }).waitFor(); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer, historyOption("Rule A", true)); await drawer.getByText(historyCount(1), { exact: true }).waitFor(); assert.equal(reads.filter((read) => read.method !== "GET" && read.path !== "/api/reconciliation/query" && read.path !== "/api/reconciliation/profit").length, 0); assert.equal(historyReads.length, 1); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(reads.filter((read) => read.path.endsWith("/confirmed")).every((read) => read.method === "GET"));
-});
-
-test("confirmed history keeps zero and negative original profit and labels incomplete legacy evidence without filling current identity", async (t) => {
-  const zero = confirmedHistoryRecord("zero", 0), negative = confirmedHistoryRecord("negative", -1), legacy = confirmedHistoryRecord("legacy"); zero.upstreamSource.tokenName = "old-zero"; negative.upstreamSource.tokenName = "old-negative"; Object.assign(legacy, { ownSource: null, scopeVersion: null, scopeFingerprint: null, billingEffectiveFromMs: null, sourceCompleteness: "legacy_partial" }); legacy.window.timezone = null; legacy.upstreamSource = { provider: null, baseUrl: null, accountId: null, tokenId: null, tokenName: null };
-  const { page } = await openConfirmedHistoryPage(t, { records: [zero, negative, legacy], rate: 7 }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); await drawer.locator("tr.ant-table-row", { hasText: "old-zero" }).getByText("$0.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-negative" }).getByText(`${MINUS}$1.00`, { exact: true }).waitFor();
-  // 早期记录缺来源和时区：行上和展开后都写「这天的数据不完整」；没记下的 Key 写「—」，不拿现在的绑定去补
-  await drawer.locator(`tr.ant-table-row[data-row-key="${legacy.historyId}"]`).getByText(INCOMPLETE_DAY_TEXT, { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, legacy); await record.getByText(INCOMPLETE_DAY_TEXT, { exact: true }).waitFor(); await historyFact(record, "Key", EMPTY); await historyFact(record, "汇率", EMPTY); assert.doesNotMatch(await record.innerText(), /Fixture upstream|upstream-1|New channel 9|Rule A|new-name|¥/);
-});
-
-test("3b confirmed history for a fixed-purchase upstream keeps the original Key-usage cost and explains today's zero cost", async (t) => {
-  const note = HISTORY_FIXED_NOTE;
-  const fixed = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" })) });
-  await fixed.page.getByRole("button", { name: HISTORY, exact: true }).click(); let drawer = fixed.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(fixed.page, drawer);
-  await drawer.getByText(note, { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$2.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$1.00", { exact: true }).waitFor();
-  const usage = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "usage" })) });
-  await usage.page.getByRole("button", { name: HISTORY, exact: true }).click(); drawer = usage.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(usage.page, drawer);
-  await drawer.getByText(historyCount(1), { exact: true }).waitFor(); assert.equal(await drawer.getByText(note, { exact: true }).count(), 0);
-});
-
-test("4a ledger history shows each record's settle-time cost basis, revision and rates; the fixed note only covers Key-usage records", async (t) => {
-  const note = HISTORY_FIXED_NOTE, fixedUpstreams = configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" }));
-  const fixed = { ...confirmedHistoryRecord("ledger-fixed", 3), billDate: "2026-10-08", revision: 2, settlementSource: "resettle", settledRates: { income: 7.1, cost: null }, costBasis: "fixed" }; fixed.upstreamSource = { ...fixed.upstreamSource, tokenName: "fixed-key" };
-  const migrated = { ...confirmedHistoryRecord("ledger-migrated"), billDate: "2026-10-07", revision: 1, settlementSource: "migrated", settledRates: { income: null, cost: null }, costBasis: null }; migrated.upstreamSource = { ...migrated.upstreamSource, tokenName: "migrated-key" };
-  const mixed = await openConfirmedHistoryPage(t, { records: [fixed, migrated], upstreams: fixedUpstreams });
-  await mixed.page.getByRole("button", { name: HISTORY, exact: true }).click(); let drawer = mixed.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(mixed.page, drawer);
-  await drawer.getByText(note, { exact: true }).waitFor(); const fixedRow = drawer.locator("tr.ant-table-row", { hasText: "fixed-key" }), migratedRow = drawer.locator("tr.ant-table-row", { hasText: "migrated-key" });
-  // 固定时计入固定成本的那天：上游成本一格写「计入固定成本」，不写金额（§3.2）；重新固定过的写「改过 N 次」（§4）
-  await fixedRow.getByText(FIXED_COST_TEXT, { exact: true }).waitFor(); assert.equal(await fixedRow.getByText("$2.00", { exact: true }).count(), 0); assert.equal(await fixedRow.getByText("$0.00", { exact: true }).count(), 0); await fixedRow.getByText("改过 1 次", { exact: true }).waitFor(); await fixedRow.getByText("$3.00", { exact: true }).waitFor();
-  // 以前的数据（迁移的旧账）按用量算，没改过，不加说明
-  await migratedRow.getByText("$2.00", { exact: true }).waitFor(); assert.equal(await migratedRow.getByText(FIXED_COST_TEXT).count(), 0); assert.equal(await migratedRow.getByText(/改过/).count(), 0);
-  let record = await expandConfirmedRecord(drawer, fixed); await historyFact(record, "收入", "$5.00来自自营站点 3 个渠道的收费记录"); await historyFact(record, "上游成本", FIXED_COST_TEXT); await historyFact(record, "毛利", "$3.00"); await historyFact(record, "改过", "改过 1 次"); await historyFact(record, "汇率", `${formatRate(7.1)}，${formatZonedDateTime(fixed.confirmedAt, fixed.window.timezone)} 固定时记下`); assert.doesNotMatch(await record.innerText(), /\$2\.00/);
-  record = await expandConfirmedRecord(drawer, migrated); await historyFact(record, "收入", "$3.00来自自营站点 3 个渠道的收费记录"); await historyFact(record, "上游成本", "$2.00"); await historyFact(record, "毛利", "$1.00"); await historyFact(record, "汇率", EMPTY); assert.doesNotMatch(await record.innerText(), new RegExp(`成本计法|未设置|改过|${FIXED_COST_TEXT}`));
-  const onlyFixed = await openConfirmedHistoryPage(t, { records: [fixed], upstreams: fixedUpstreams });
-  await onlyFixed.page.getByRole("button", { name: HISTORY, exact: true }).click(); drawer = onlyFixed.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(onlyFixed.page, drawer);
-  await drawer.getByText(historyCount(1), { exact: true }).waitFor(); assert.equal(await drawer.getByText(note, { exact: true }).count(), 0, "全是计入固定成本的日子时不需要说明");
-});
-
-test("confirmed history pagination failure retains read records and retry reuses the opaque cursor without duplicate history", async (t) => {
-  const first = confirmedHistoryRecord(), second = confirmedHistoryRecord("saved-negative", -1), cursor = Buffer.from(JSON.stringify([first.window.endMs, "2026-10-08 16:01:01", "old-bill-z"])).toString("base64url"); let failed = false;
-  const { page, historyReads } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.params.cursor && !failed) { failed = true; return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "HISTORY_UNAVAILABLE", error: "确认账单历史暂不可用", retryable: true }) }); } return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: read.params.cursor ? [second] : [first], nextCursor: read.params.cursor ? null : cursor }); } }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); const before = Date.now(); await chooseConfirmedHistoryRule(page, drawer); await drawer.getByText(historyCount(1), { exact: true }).waitFor(); const after = Date.now(); await drawer.getByRole("button", { name: "加载更多", exact: true }).click();
-  // 已经读到一页时，失败写「刷新失败，数据截至 …」（上一次读到的时间），原因收在「查看详细原因」里；刷新按原 cursor 再读一次
-  const failure = drawer.locator(".ant-alert", { has: page.locator("details.jy-error-detail") }); await failure.waitFor(); assert.ok([refreshFailedText(before), refreshFailedText(after)].includes(await failure.locator(".ant-alert-title").innerText()), await failure.locator(".ant-alert-title").innerText()); assert.equal(await failure.getByText("确认账单历史暂不可用", { exact: true }).count(), 1); assert.equal(await drawer.locator("tr.ant-table-row").count(), 1); await failure.getByRole("button", { name: REFRESH, exact: true }).click(); await drawer.getByText(historyCount(2), { exact: true }).waitFor(); assert.deepEqual(historyReads[1], historyReads[2]); assert.equal(historyReads[2].params.cursor, cursor); assert.equal(await drawer.getByRole("button", { name: "加载更多", exact: true }).count(), 0);
-});
-
-test("confirmed history rule changes ignore a late response from the previous rule", async (t) => {
-  let deferred, ready; const started = new Promise((resolve) => { ready = resolve; }); const original = confirmedHistoryRecord(), other = confirmedHistoryRecord("other-rule"); other.upstreamSource.tokenName = "saved-other-rule";
-  const { page } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.ruleId === "rule-1") return new Promise((resolve) => { deferred = { route, resolve }; ready(); }); return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: [other], nextCursor: null }); } }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); await within(started, "打开以前的每日记录后页面去读 rule-1 的记录"); await chooseConfirmedHistoryRule(page, drawer, historyOption("new-name", true)); await drawer.locator("tr.ant-table-row", { hasText: "saved-other-rule" }).waitFor(); deferred.resolve(fulfill(deferred.route, { ruleId: "rule-1", readOnly: true, records: [original], nextCursor: null })); await page.waitForResponse((response) => response.url().includes("/rule-1/confirmed")); assert.equal(await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).count(), 0);
-});
-
-test("confirmed history selector and record expansion support keyboard at 320/390/768/1440 without root overflow", async (t) => {
-  for (const width of [320, 390, 768, 1440]) {
-    const { page, records } = await openConfirmedHistoryPage(t, { viewport: { width, height: 900 } }); const entry = page.getByRole("button", { name: HISTORY, exact: true }); await entry.focus(); await page.keyboard.press("Enter"); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }), select = drawer.getByRole("combobox", { name: "绑定", exact: true }); await drawer.waitFor(); await page.waitForFunction(() => !document.querySelector(".ant-drawer-open .ant-drawer-content-wrapper")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running")); await select.focus(); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter"); await drawer.getByText(historyCount(1), { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, records[0], width < 768); await historyFact(record, "Key", "old-name"); await page.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `confirmed history overflow at ${width}`); if (width < 768) assert.equal(await drawer.locator(".ant-drawer-body").evaluate((element) => element.scrollWidth <= element.clientWidth), true, `confirmed history drawer overflow at ${width}`); await drawer.locator(".ant-drawer-close").focus(); await page.keyboard.press("Enter"); await drawer.waitFor({ state: "hidden" });
-  }
 });
 
 test("今天每 30 秒重读一次（只读 POST /profit，不带 observe）；本月 5 分钟一次；昨天不轮询；选了自定义还没查询时暂停", async (t) => {
@@ -2456,6 +2376,7 @@ test("这天重算的数比原来少了一半多（需处理）：点「重新�
   const { page, queries } = await openDailyPage(t, { rows });
   const dialog = page.getByRole("dialog", { name: "按重算的数固定 10月8日？", exact: true });
   // 取消：不发请求
+  await bangOf(rowOf(page, "Rule A"), "Rule A").click();
   await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await dialog.waitFor();
   await dialog.getByText("收入：原来 $45.17，重算 $12.40", { exact: true }).waitFor();
   await dialog.getByText("上游成本：原来 $15.12，重算 $15.10", { exact: true }).waitFor();
@@ -2463,45 +2384,17 @@ test("这天重算的数比原来少了一半多（需处理）：点「重新�
   await dialog.getByRole("button", { name: "取消", exact: true }).click(); await dialog.waitFor({ state: "hidden" });
   assert.equal(queries.length, 0, "取消不读取");
   // 确认：带确认读取
+  await bangOf(rowOf(page, "Rule A"), "Rule A").click();
   await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await dialog.waitFor();
   const read = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query"));
   await dialog.getByRole("button", { name: "重新读取", exact: true }).click(); await read;
   assert.equal(queries.length, 1); assert.equal(queries[0].confirmShrink, true); assert.equal(queries[0].observe, true); assert.deepEqual(queries[0].confirmedAfter, { revenueUsd: 12.4, costUsd: 15.1 }, "带上框里写的重算数");
   // 别的行（没有这个问题）点「重新读取」不弹框、不带确认
   const readB = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query")); // 点之前先等，免得响应比等待先到
+  await page.keyboard.press("Escape");
+  await bangOf(rowOf(page, "Rule B"), "Rule B").click();
   await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click(); await readB;
   assert.equal(queries[1].confirmShrink, undefined); assert.equal(await page.getByRole("dialog").count(), 0);
-});
-
-test("昨天还没开始算的渠道（C②）：看昨天时差额写「—」加「还没开始算」，不写 0、不算对不上", async (t) => {
-  const rows = [...yesterdayRows().slice(0, 2), profitRow("rule-3", "Rule C", { reason: "NOT_STARTED", state: "none", income: 0, cost: 0 })];
-  const { page } = await openDailyPage(t, { pageOf: () => profitPage(rows, { preset: "yesterday" }) });
-  await pickPreset(page, PROFIT_COPY.presets.yesterday);
-  const rowC = rowOf(page, "Rule C"); await rowC.waitFor();
-  await rowC.getByText(PROFIT_COPY.gap.reason.NOT_STARTED, { exact: true }).waitFor();
-  assert.equal(await rowC.locator(".jy-profit-tag").count(), 0, "没有「对不上」标签");
-});
-
-test("改时间以后有几天太早没自动重算：成功提示写出是哪几天、为什么，不自动消失，点关闭才收起（C2b）", async (t) => {
-  const segment = { id: "past-transition", group: "default", ratio: 1, timingSource: "detected", effectiveFrom: window.startMs, effectiveTo: null };
-  const { page } = await openDailyPage(t, {
-    segments: [segment],
-    query: (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture reload failed" }) }),
-    extraAPI(route, path) {
-      if (path !== "/api/reconciliation/rules/rule-1/transitions/past-transition") throw new Error("unexpected daily fixture API: " + path);
-      return fulfill(route, { segments: [segment], resettle: { recent: 4, tooOld: ["2025-12-30", "2025-12-31", "2026-01-01"] } });
-    },
-  });
-  await page.getByRole("button", { name: new RegExp(`^${PROFIT_COPY.expanded.dayCell("10月8日")}`) }).first().click();
-  const timing = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }).getByRole("region", { name: "改时间", exact: true });
-  await timing.waitFor();
-  const input = timing.getByPlaceholder("倍率变化的时间"); await input.fill("2026年10月8日 09:30"); await input.press("Enter");
-  await timing.getByRole("button", { name: "改时间", exact: true }).click();
-  const notice = page.locator(".ant-notification-notice").filter({ hasText: "时间已修改，改到的那几天会重新算。其中 2025年12月30日–1月1日 在 31 天以前，没自动重算；要按新的时间算，到每日利润选那天点「重新读取」。" });
-  await notice.waitFor();
-  await page.waitForTimeout(5500);
-  assert.equal(await notice.count(), 1, "5 秒以后还在");
-  await notice.locator(".ant-notification-notice-close").click(); await notice.waitFor({ state: "hidden" });
 });
 
 test("重新检查（R2）：点了才读一次自营站点的设置，读完提示结果，每日利润自己重读整页（不是打开页面就读）", async (t) => {
@@ -2517,6 +2410,7 @@ test("重新检查（R2）：点了才读一次自营站点的设置，读完提
   await rowOf(page, "Rule B").waitFor();
   assert.equal(checks, 0, "打开页面不读设置");
   const before = profitReads.length;
+  await bangOf(rowOf(page, "Rule B"), "Rule B").click();
   await page.getByRole("button", { name: `重新检查 Rule B`, exact: true }).click();
   await page.locator(".ant-message").getByText("已经在记收费记录了", { exact: true }).waitFor();
   await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
@@ -2545,16 +2439,14 @@ test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 PO
   await advance(600000); await settle(); assert.equal(profitReads.length, before + 1, "已固定以后不再读");
 });
 
-test("手机 320：一个渠道一张卡片，点开能看计算明细，页面不横向溢出", async (t) => {
+test("手机 320：一个渠道一张卡片，点开一天一块、能看计算明细，页面不横向溢出", async (t) => {
   const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 } });
   assert.equal(await page.locator(".jy-profit-table").count(), 0);
-  const summary = page.locator(".jy-profit-summary--mobile"); await summary.waitFor();
-  await summary.getByRole("button", { name: PROFIT_COPY.metric.seeDay("昨天"), exact: true }).click();
   const card = cardOf(page, "Rule A"); await card.waitFor();
-  assert.equal(await page.locator(".jy-profit-card.is-open").count(), 0, "卡片默认收起，点头部才展开（和 390 一样）");
-  await card.locator(".jy-profit-card__head").click();
-  await card.getByRole("group", { name: PROFIT_COPY.expanded.dailyTitle, exact: true }).waitFor();
-  await card.getByRole("button", { name: PROFIT_COPY.expanded.seeDetailShort, exact: true }).click();
+  assert.equal(await page.locator(".jy-profit-card.is-open").count(), 0, "卡片默认收起，点头部才展开");
+  await card.locator(".jy-profit-card__toggle").click();
+  await card.locator(".jy-profit-days--cards li").first().waitFor();
+  await card.locator(".jy-profit-days--cards li").nth(1).getByRole("button", { name: PROFIT_COPY.table.day.detail, exact: true }).click();
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
   assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 319);
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
@@ -2635,47 +2527,6 @@ function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
 }
 
 // ---- 共用夹具（原来夹在已删用例之间）----
-// 展开的记录里一项：左边名称，右边写法（Detail，recon-parts.tsx）
-async function historyFact(record, label, value) { await record.locator(".reconciliation-detail").filter({ has: record.page().locator(".reconciliation-detail__label").filter({ hasText: exactText(label) }) }).locator(".reconciliation-detail__value").filter({ hasText: exactText(value) }).first().waitFor(); }
-// 账号卡片里的事实按 dt/dd 成对展示：等到这一项的值出现
-const exactText = (text) => new RegExp(`^\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
-async function expandConfirmedRecord(drawer, record, compact = false) { const button = compact ? drawer.getByRole("button", { name: new RegExp(` · ${historyKey(record).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).first() : drawer.locator(`tr.ant-table-row[data-row-key="${record.historyId}"]`); await button.focus(); await drawer.page().keyboard.press("Enter"); return drawer.locator(`[data-history-id="${record.historyId}"]`); }
-// 记录里没有 Key 名称和 ID 时写「—」，不拿现在的绑定去补
-const historyKey = (record) => record.upstreamSource.tokenName || (record.upstreamSource.tokenId != null ? `Key #${record.upstreamSource.tokenId}` : EMPTY);
-async function chooseConfirmedHistoryRule(page, drawer, label = historyOption("Rule A")) { await drawer.getByRole("combobox", { name: "绑定", exact: true }).click(); await page.getByText(label, { exact: true }).last().click(); }
-const historyOption = (key, ended = false) => `${key} · ${HISTORY_UPSTREAM} · ${ended ? "已解除绑定" : "在用"}`;
-const HISTORY_FIXED_NOTE = `这个上游现在计入固定成本；没标「${FIXED_COST_TEXT}」的日子是当时按用量算的上游成本，不改。`;
-const historyCount = (n) => `${n} 条每日记录 · 按美元显示。只列每天的记录，以前的数据还在。`;
-// 以前的每日记录（recon-history.tsx）：抽屉标题和入口按钮都是「以前的每日记录」，绑定下拉写「Key · 上游 · 在用 / 已解除绑定」
-const HISTORY = workflowActionMeta("open_history").label, HISTORY_UPSTREAM = configuration.upstreams[0].name;
-async function openConfirmedHistoryPage(t, options = {}) {
-  const current = rule("rule-1", "Rule A", 10); Object.assign(current.rule, { enabled: true, archivedAt: null, scopeVersion: 2, tokenId: 99, channels: [{ channelId: 9, name: "New channel 9" }] });
-  if (options.groupHistory) current.transitionSegments = [{ id: "seg-old", group: "g1", ratio: 1, effectiveFrom: 1000, effectiveTo: 1500 }, { id: "seg-new", group: "g2", ratio: 2, effectiveFrom: 1500, effectiveTo: null }];
-  const archived = { ...current.rule, id: "old-rule", tokenName: "new-name", enabled: false, archivedAt: "2026-10-09T00:00:00Z" }, reads = [], historyReads = [], queries = [];
-  const records = options.records || [confirmedHistoryRecord()];
-  const page = await openFixturePage(t, async (route) => {
-    const request = route.request(), url = new URL(request.url()); reads.push({ path: url.pathname, method: request.method(), params: Object.fromEntries(url.searchParams) });
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ...(options.upstreams ? { upstreams: options.upstreams } : {}), ownStation: current.rule.archivedAt && options.removeOwnAfterStop ? null : { ...configuration.ownStation, cnyPerUsd: options.rate || null }, rules: [current.rule, archived].filter((rule) => !rule.archivedAt || url.searchParams.get("includeArchived") === "true") });
-    if (url.pathname === "/api/reconciliation" && request.method() === "GET") return fulfill(route, { actions: [] });
-    if (url.pathname === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ, ownLog: null });
-    if (url.pathname === "/api/reconciliation/profit") { const body = request.postDataJSON(); queries.push(body); return fulfill(route, profitPage(current.rule.archivedAt ? [] : [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 })], { preset: body.preset === "yesterday" ? "yesterday" : "today" })); }
-    if (url.pathname === "/api/reconciliation/query") { const body = request.postDataJSON(); queries.push(body); assert.ok(!body.ruleIds?.some((id) => id === archived.id || current.rule.archivedAt && id === current.rule.id)); return fulfill(route, { results: [] }); }
-    if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: current.transitionSegments || [] });
-    if (url.pathname.endsWith("/confirmed")) { assert.equal(request.method(), "GET"); historyReads.push({ ruleId: url.pathname.split("/").at(-2), params: Object.fromEntries(url.searchParams) }); return options.history ? options.history(route, historyReads.at(-1), historyReads.length) : fulfill(route, { ruleId: historyReads.at(-1).ruleId, readOnly: true, records, nextCursor: null }); }
-    throw new Error("unexpected confirmed history fixture API: " + url.pathname);
-  }, options.viewport);
-  const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
-  // 核算页只读：停止核算在上游账单完成，这里只模拟它已发生
-  const stopElsewhere = () => Object.assign(current.rule, { enabled: false, archivedAt: "2026-10-09T00:00:00Z" });
-  return { page, reads, historyReads, queries, records, stopElsewhere };
-}
-function confirmedHistoryRecord(id = "saved-oct8", profit = 1) {
-  const window = { preset: "yesterday", startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), timezone: "Asia/Shanghai" };
-  const side = (amount) => ({ state: "complete", quotaUnits: amount * 100, quotaPerUnit: 100, amountUsd: amount, knownAmountUsd: amount, countedAmountUsd: null, successfulCount: 1, expectedCount: 1, observedAt: null, window });
-  const channels = [1, 2, 3].map((channelId) => ({ channelId, name: "old-" + channelId }));
-  return { historyId: id, confirmedAt: "2026-10-08T16:01:00.000Z", window, ownSource: { stationId: "old-own", provider: "newapi", baseUrl: "https://old-own.test", accountId: "11", namespaceKey: "old-own-namespace" }, upstreamSource: { provider: "newapi", baseUrl: "https://old-up.test", accountId: "7", tokenId: 9, tokenName: "old-name" }, scopeVersion: 1, scopeFingerprint: "old-scope", billingEffectiveFromMs: window.startMs, channels, amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: "channel-log-stat", calculationVersion: 3, conversion: "quota_per_unit" }, upstream: side(2), downstream: { ...side(2 + profit), channels: channels.map((channel) => ({ ...channel, billingState: "complete", quotaUnits: 100, amountUsd: 1, knownAmountUsd: 1 })) }, calculation: { differenceUsd: profit, profitUsd: profit, riskDifferenceUsd: null, marginRate: profit / (2 + profit) }, sourceCompleteness: "complete" };
-}
 const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", "https://own.example", "1"])).digest("hex") };
 const UPDATE_AUTH = workflowActionMeta("update_authorization").label, USE_SAVED = "用已有上游", NEW_UPSTREAM = "新增上游", CREATE_HINT = "保存后，别的渠道也能直接用这个上游。";
 // 渠道绑定的话：按钮名来自 lib/workflow-actions.js，其余在 app/components/channel-onboarding.tsx 的 COPY 表（tsx 测试里引用不到，照抄原句）
@@ -2684,28 +2535,3 @@ const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeC
 
 test("占位：夹具段结束", () => {});
 
-test("手动选 Key：每个渠道一行有「选 Key」下拉框，绑过的换 Key 只发 tokenId；还没算利润的渠道选上游和 Key 就开始算", async (t) => {
-  const posts = [];
-  const channelOptions = { ok: true, upstreams: [{ id: "upstream-1", name: "Up" }], channels: [
-    { channelId: 1, name: "Channel A", ruleId: "rule-1", upstreamStationId: "upstream-1", tokenId: 9, tokenName: "Key 9", suggestedUpstreamId: null },
-    { channelId: 5, name: "新渠道", ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, suggestedUpstreamId: "upstream-1" }] };
-  const { page } = await openDailyPage(t, { channelOptions, extraAPI(route, path) {
-    if (path === "/api/reconciliation/upstreams/upstream-1/keys") return fulfill(route, { platform: "newapi", tokens: [{ id: 9, name: "Key 9", status: 1 }, { id: 20, name: "Key 20", status: 1 }, { id: 21, name: "停用的", status: 2 }] });
-    if (path === "/api/reconciliation/channels/select-key") { posts.push(route.request().postDataJSON()); return fulfill(route, { changed: true, ruleId: "rule-1" }); }
-    return fulfill(route, {});
-  } });
-  const until = async (check) => { for (let i = 0; i < 60 && !(await check()); i++) await page.waitForTimeout(100); };
-  const rowA = rowOf(page, "Rule A");
-  await rowA.getByLabel("选 Key：Channel A").waitFor();
-  await rowA.getByLabel("选 Key：Channel A").click();
-  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").getByTitle("Key 20").click();
-  await within(until(() => posts.length === 1), "换 Key 请求");
-  assert.deepEqual(posts[0], { ownStationId: "own-1", channelId: 1, tokenId: 20 });
-  // 还没算利润的渠道：上游默认选上地址对得上的那个，选 Key 以后带上游一起发
-  const unbound = page.getByRole("region", { name: "还没算利润的渠道" });
-  await unbound.getByText("新渠道").waitFor();
-  await unbound.getByLabel("选 Key：新渠道").click();
-  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last().getByTitle("Key 20").click();
-  await within(until(() => posts.length === 2), "开始算请求");
-  assert.deepEqual(posts[1], { ownStationId: "own-1", channelId: 5, upstreamStationId: "upstream-1", tokenId: 20 });
-});

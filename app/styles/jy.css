@@ -745,3 +745,20 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   /* 提示条里的「查看」「去合并」、确认框里的按钮：手机上点的地方至少 44 高 */
   .jy-merge-notice .ant-btn, .jy-merge-costline .ant-btn, .jy-merge-modal .ant-btn { min-height: 44px; }
 }
+
+/* 名字后面的感叹号（app/components/issue-bang.tsx）：行高不变，悬停一句，点开小气泡；上游列表读不到余额用红色，每日利润需处理的渠道用橙色 */
+.jy-issue-bang { flex: none; display: inline-flex; align-items: center; margin-left: 6px; padding: 0; border: 0; background: none; color: var(--jy-crit); cursor: pointer; }
+.jy-issue-bang.is-warn { color: var(--jy-warn-ink); }
+.jy-issue-bang svg { display: block; }
+.jy-issue-pop { display: flex; flex-direction: column; gap: 2px; width: 340px; max-width: calc(100vw - 48px); font-size: 12px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-issue-pop b { font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-crit-ink); }
+.jy-issue-pop.is-warn b { color: var(--jy-warn-ink); }
+.jy-issue-pop-asof { color: var(--jy-ink-3); }
+.jy-issue-pop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+/* 手机：气泡占满屏宽（左右各留 12），箭头对着感叹号 */
+@media (max-width: 767px) {
+  .jy-issue-popover { left: 12px !important; width: calc(100vw - 24px) !important; max-width: none !important; }
+  .jy-issue-popover .ant-popover-content, .jy-issue-popover .ant-popover-container, .jy-issue-popover .ant-popover-inner { width: 100%; box-sizing: border-box; }
+  .jy-issue-popover .jy-issue-pop { width: auto; max-width: none; }
+  .jy-issue-popover .ant-popover-arrow { inset-inline-start: var(--jy-bang-x) !important; }
+}

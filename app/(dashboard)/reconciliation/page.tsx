@@ -1,5 +1,5 @@
 "use client";
-// 每日利润（一张对账表，设计稿 design/ux/daily-profit-a.md）：页顶一句 + 四个数一行 + 一张表；点开一行看每天的差额，再点看计算明细。
+// 每日利润（设计 10-29）：页顶一句 + 四个数 + 每天的毛利小柱状图（选了好几天才有）+ 一张渠道表；点开一个渠道看每天一行，再点「计算明细」。
 // 数据只来自 POST /api/reconciliation/profit 和 GET …/profit/detail（只读）；「刷新」和需处理那一行的「重新读取」才让服务端读取并保存。
 // 默认打开今天，每 30 秒重读一次。这一页只看结果，不改设置。用语按 design/ui-copy-spec.md；报错原文只放进「查看详细原因」（§8.2）。
 import "../../styles/pages/reconciliation.css";
@@ -19,18 +19,15 @@ import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
 import { loadWorkflowActions } from "../../components/use-workflow-actions";
 import { RECON_BUTTONS, SETUP_HREF } from "./recon-format";
-import { COPY, KEY_PICKER } from "./copy";
+import { COPY } from "./copy";
 import { useProfitPage } from "./use-profit-page";
 import type { ProfitPreset, ProfitWindow } from "./use-profit-page";
-import { useConfirmedHistory } from "./use-confirmed-history";
-import { ReconHistory } from "./recon-history";
 import { ProfitSummary } from "./profit-summary";
+import { ProfitChart } from "./profit-chart";
 import { ProfitTable } from "./profit-table";
-import { KeyPicker, useChannelOptions } from "./key-picker";
-import type { ChannelOption } from "./key-picker";
 import { ProfitDetail, detailTitle } from "./profit-detail";
-import { footerNotes, isMismatched, rangeCaption, rowName } from "./profit-format";
-import type { Ctx, ProfitFilter } from "./profit-format";
+import { DEFAULT_SORT, footerNotes, nextSort, rangeCaption, rowName } from "./profit-format";
+import type { Ctx, Sort, SortKey } from "./profit-format";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel, shiftedDayStartInTz } from "../../../lib/business-time";
 
 const { RangePicker } = DatePicker;
@@ -38,7 +35,6 @@ const { RangePicker } = DatePicker;
 const REMOVED = describeError({ code: "RULE_NOT_FOUND" }).text;
 const PRESETS = (["today", "yesterday", "7d", "month", "since", "custom"] as ProfitPreset[]).map((value) => ({ value, label: COPY.presets[value] }));
 const UPSTREAMS_HREF = "/stations";
-const START_HREF = `/stations?view=accounts`;
 const SETTINGS_HREF = "/settings";
 
 export default function ReconciliationPage() {
@@ -46,15 +42,12 @@ export default function ReconciliationPage() {
   const compact = !Grid.useBreakpoint().md;
   const state = useProfitPage();
   const { config, data, loading, querying, error, preset, activeWindow, switching, retryingKeys, retryErrors, detail } = state;
-  const history = useConfirmedHistory();
-  const channelOptions = useChannelOptions(config?.ownStation?.id);
-  const [filter, setFilter] = useState<ProfitFilter>("all");
+  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
   const [workflowError, setWorkflowError] = useState("");
   const [destinationClosed, setDestinationClosed] = useState(false);
   const destinationResolved = useRef(false);
-  const autoExpanded = useRef<string | null>(null);
 
   const tz = data?.tz || data?.range?.timezone;
   // 这一行上游算一天的时区：从绑定配置里取（只给「这个上游按 UTC+5:30 算一天」那一句用）
@@ -89,14 +82,6 @@ export default function ReconciliationPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 桌面上对不上的行默认展开（设计稿 §4）；手机卡片一律默认收起（设计验收 10-26）；换了范围重新算一次
-  const rangeKey = data ? `${data.range.startMs}-${data.range.endMs}` : "";
-  useEffect(() => {
-    if (!data || autoExpanded.current === rangeKey) return;
-    autoExpanded.current = rangeKey;
-    setExpanded(new Set(compact ? [] : data.rows.filter((row) => isMismatched(row, data)).map((row) => row.rowKey)));
-  }, [data, rangeKey, compact]);
-
   // 第一次读到数据后定位到链接指的那一行：日期还是链接那天就展开它、打开那天的计算明细；不是了写「这条已经变了」
   const workflowRow = data?.rows.find((row) => destination?.ruleId && row.ruleIds.includes(destination.ruleId)) || null;
   useEffect(() => {
@@ -114,17 +99,11 @@ export default function ReconciliationPage() {
   }, [destination, data, workflowError]);
 
   const toggleRow = (rowKey: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(rowKey)) next.delete(rowKey); else next.add(rowKey); return next; });
-  // 「看昨天」这类链接：跳到那一天（按业务时区的整天）
-  const selectDay = (day: string) => {
-    if (!tz) return;
-    if (data && day === shiftDayLabel(data.today, -1)) state.selectPreset("yesterday");
-    else { const start = dayStartInTz(day, tz); state.selectDay(start, shiftedDayStartInTz(start, 1, tz)); }
-  };
   const refresh = async () => { await state.refresh(); void loadWorkflowActions(true, ["bills"]); };
   const retryRow = async (row: ProfitRow) => { await state.retryRow(row); void loadWorkflowActions(true, ["bills"]); };
 
-  const closeDrawer = () => { state.closeDetail(); history.close(); };
-  const drawerOpen = history.open || !!detail;
+  const closeDrawer = () => { state.closeDetail(); };
+  const drawerOpen = !!detail;
   useDrawerEscape(drawerOpen, closeDrawer);
 
   const rangeControl = useMemo(
@@ -150,11 +129,9 @@ export default function ReconciliationPage() {
 
   const drawer = <Drawer
     className="jy-drawer jy-profit-drawer" placement="right" size={compact ? "100%" : 560} open={drawerOpen} onClose={closeDrawer} keyboard={false} destroyOnHidden
-    title={history.open ? RECON_BUTTONS.history : detail ? detailTitle(detail.row, detail.day, ctx) : COPY.detail.expected}
+    title={detail ? detailTitle(detail.row, detail.day, ctx) : COPY.detail.expected}
   >
-    {history.open
-      ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} upstreams={config?.upstreams} businessTimezone={tz} />
-      : detail && data ? <ProfitDetail detail={detail} page={data} ctx={ctx} compact={compact} onRetry={() => void state.openDetail(detail.row, detail.day)} onCorrected={() => state.load(activeWindow, { observe: true })} /> : null}
+    {detail && data ? <ProfitDetail detail={detail} page={data} ctx={ctx} onRetry={() => void state.openDetail(detail.row, detail.day)} /> : null}
   </Drawer>;
 
   if (!data) return <>{drawer}</>;
@@ -171,18 +148,8 @@ export default function ReconciliationPage() {
     </div>}
   /> : null;
 
-  // 手动选 Key：每个渠道一行的下拉框，和还没算利润的渠道那一块（选了上游和 Key 就开始算）
-  const ownerId = config?.ownStation?.id as string | undefined;
-  const optionList: ChannelOption[] = channelOptions.options?.ok ? channelOptions.options.channels : [];
-  const unbound = optionList.filter((channel) => channel.ruleId == null);
-  const onPicked = async () => { await channelOptions.reload(); await state.load(activeWindow); void loadWorkflowActions(true, ["bills"]); };
-  const pickerOf = ownerId && channelOptions.options?.ok ? (row: ProfitRow) => {
-    const channel = optionList.find((item) => item.ruleId != null && row.ruleIds.includes(item.ruleId));
-    return channel ? <KeyPicker key={`${channel.channelId}:${channel.tokenId}`} ownStationId={ownerId} channel={channel} upstreams={channelOptions.options?.ok ? channelOptions.options.upstreams : []}
-      autoOpen={destination?.action === "choose-key" && !!destination.ruleId && row.ruleIds.includes(destination.ruleId)} onChanged={onPicked} /> : null;
-  } : undefined;
-  const notes = footerNotes(page, ctx, { upstreams: UPSTREAMS_HREF, start: START_HREF, settings: SETTINGS_HREF }, ownLog);
-  const emptyAction = config?.ownStation ? { href: START_HREF, label: COPY.table.startCounting } : { href: SETUP_HREF, label: COPY.table.setupOwnStation };
+  const notes = footerNotes(page, ctx, { upstreams: UPSTREAMS_HREF, settings: SETTINGS_HREF }, ownLog);
+  const emptyAction = config?.ownStation ? { href: UPSTREAMS_HREF, label: COPY.table.goUpstreams } : { href: SETUP_HREF, label: COPY.table.setupOwnStation };
 
   return <div className="jy-page jy-profit-page">
     <div className="jy-profit-head">
@@ -193,7 +160,6 @@ export default function ReconciliationPage() {
         </div>
         : null}
       <span className="jy-profit-caption">{switching ? "" : rangeCaption(page, ctx)}</span>
-      <Button className="jy-profit-head__history" onClick={() => { state.closeDetail(); history.show(); }}>{RECON_BUTTONS.history}</Button>
     </div>
 
     {destinationAlert}
@@ -205,22 +171,14 @@ export default function ReconciliationPage() {
     </div> : null}
     {!config?.ownStation && page.rows.length ? <Alert type="warning" showIcon title={OWN_STATION_UNSET} action={<Button size="small" href={SETUP_HREF}>{RECON_BUTTONS.setup}</Button>} /> : null}
 
-    {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitSummary page={page} ctx={ctx} compact={compact} onSelectDay={selectDay} /></div> : null}
+    {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitSummary page={page} ctx={ctx} /></div> : null}
+    {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitChart page={page} ctx={ctx} compact={compact} /></div> : null}
 
     <ProfitTable
-      renderPicker={pickerOf}
-      page={page} ctx={ctx} compact={compact} switching={switching} filter={filter} onFilter={setFilter} expanded={expanded} onToggle={toggleRow}
-      onOpenDetail={(row, day) => { history.close(); void state.openDetail(row, day); }} onRetry={(row) => void retryRow(row)} onRefresh={() => void refresh()}
+      page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} expanded={expanded} onToggle={toggleRow}
+      onOpenDetail={(row, day) => void state.openDetail(row, day)} onRetry={(row) => void retryRow(row)} onRefresh={() => void refresh()}
       retryingKeys={retryingKeys} retryErrors={retryErrors} empty={emptyAction}
     />
-
-    {unbound.length && ownerId ? <section className="jy-profit-unbound" aria-label={KEY_PICKER.panelTitle}>
-      <h3>{KEY_PICKER.panelTitle}</h3>
-      <p className="jy-caption">{KEY_PICKER.panelDesc}</p>
-      <ul>{unbound.map((channel) => <li key={channel.channelId}><span>{channel.name} <small className="jy-caption">{KEY_PICKER.notSelected}</small></span>
-        <KeyPicker key={channel.channelId} ownStationId={ownerId} channel={channel} upstreams={channelOptions.options?.ok ? channelOptions.options.upstreams : []} onChanged={onPicked} />
-      </li>)}</ul>
-    </section> : null}
 
     {notes.length && page.rows.length ? <p className="jy-caption jy-profit-notes">
       {notes.map((note) => <span key={note.key}>{note.text}{note.link ? <> <a className="jy-link" href={note.link.href}>{note.link.text}</a></> : null}</span>)}
