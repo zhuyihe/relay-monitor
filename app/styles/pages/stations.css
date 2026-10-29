@@ -23,7 +23,7 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* 这张表里状态下面那行小字最多两行，多的省略（悬停看全文）；手机卡片的不受影响 */
 .jy-stations-table .jy-stations-sub > span:not(.sr-only) { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.jy-stations-unowned { margin: -8px 0 0; }
+.jy-stations-unowned { margin: 12px 0 0; }
 /* 余额那一格的上一行：近 48 小时的小图在左、余额在右；小图那一格定宽，没有小图的行也留着，金额上下对齐 */
 .jy-stations-money { display: flex; justify-content: flex-end; align-items: center; gap: 8px; line-height: 20px; }
 .jy-stations-spark { flex: none; width: 96px; display: flex; }
@@ -34,18 +34,21 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-table .jy-cell-runway { min-height: 20px; }
 .jy-stations-table .jy-cell-runway .v { line-height: 20px; }
 
-/* 查询失败的说明行：跨整行，横向滚动时贴左 */
-.jy-stations-table tr.has-issue td { border-bottom: 0; }
-.jy-stations-table tr.jy-stations-issue-row td { padding-top: 0; }
-.jy-stations-issue {
-  position: sticky; left: 16px; max-width: 760px;
-  display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px 12px;
-  padding: 10px 12px; border-radius: var(--jy-r2);
-  border-left: 2px solid var(--jy-crit); background: var(--jy-crit-tint);
+/* 读不到余额：名字后面一个红色感叹号（行高不变），悬停一句，点开小气泡 */
+.jy-issue-bang { flex: none; display: inline-flex; align-items: center; margin-left: 6px; padding: 0; border: 0; background: none; color: var(--jy-crit); cursor: pointer; }
+.jy-issue-bang svg { display: block; }
+.jy-issue-pop { display: flex; flex-direction: column; gap: 2px; width: 340px; max-width: calc(100vw - 48px); font-size: 12px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-issue-pop b { font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-crit-ink); }
+.jy-issue-pop-asof { color: var(--jy-ink-3); }
+.jy-issue-pop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.jy-stations-m .m-name { display: flex; align-items: center; min-width: 0; }
+/* 手机：气泡占满屏宽（左右各留 12），箭头对着感叹号 */
+@media (max-width: 767px) {
+  .jy-issue-popover { left: 12px !important; width: calc(100vw - 24px) !important; max-width: none !important; }
+  .jy-issue-popover .ant-popover-content, .jy-issue-popover .ant-popover-container, .jy-issue-popover .ant-popover-inner { width: 100%; box-sizing: border-box; }
+  .jy-issue-popover .jy-issue-pop { width: auto; max-width: none; }
+  .jy-issue-popover .ant-popover-arrow { inset-inline-start: var(--jy-bang-x) !important; }
 }
-.jy-stations-issue > .jy-sym { width: 14px; height: 14px; margin-top: 3px; color: var(--jy-crit); flex: none; }
-.jy-stations-issue-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
-.jy-stations-issue-body b { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--jy-crit-ink); }
 
 .jy-stations-sort {
   display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none;
@@ -68,8 +71,6 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-confirm code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 4px; border-radius: var(--jy-r1); background: var(--jy-sunken); }
 
 /* 移动端卡片 */
-.jy-stations-m-issue { grid-column: 1 / -1; margin-top: 6px; }
-.jy-stations-m-issue .jy-stations-issue { position: static; }
 
 /* 渠道接入（main 的共享组件，内部仍是 antd 原生件）：去掉组件自带的外边距，折叠面板对齐新版面板 */
 .jy-stations-onboarding { display: flex; flex-direction: column; gap: 16px; min-width: 0; }

@@ -32,7 +32,7 @@ import type { ConnectionTestResult } from "./model";
 export type StationDrawerHandle = {
   // trigger：关闭后把焦点还给它（名称链接、编辑按钮、更多菜单按钮）
   // own：设置自营站点（只在自营业务页用）；不给就是上游（地址 + 令牌，其余在「更多设置」）；focus：打开后停在读取服务地址或令牌那一栏
-  open: (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" }) => void;
+  open: (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" | "accessToken" | "apiKey" | "password" }) => void;
 };
 
 // 参与“有未保存的修改”判断的字段；密钥框初始为空，输入即算修改
@@ -223,7 +223,7 @@ export function StationDrawer({
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
-  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" }) => {
+  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" | "accessToken" | "apiKey" | "password" }) => {
     if (!types.length) {
       message.warning(TYPES_MISSING_TEXT);
       return;
