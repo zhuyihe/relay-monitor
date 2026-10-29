@@ -1030,6 +1030,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { keyIssues, keyAgentDown, rules: applied ? await repository.listRules().catch(() => rules) : rules };
   }
 
+  // 今天「有收入、Key 一点用量都没有」要连着多久才提醒换 Key（防上游账单晚到误报）
+  const KEY_IDLE_TODAY_MS = 60 * 60 * 1000;
+
   // 每天都有 Key 记录：从开始算那天到昨天，还没记录的天补一行，用这条绑定现在配的那把 Key（装读取服务之前、手动选 Key 之前结账用的就是它）；
   // 最多补最近 800 天（超出的丢最老的）。前提：过去的天用的都是绑定现在配的这把 Key。返回 false 是没写成
   async function fillMissingDayKeys(rule, today) {
@@ -2845,6 +2848,22 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 只在结账（要固定的整天）时判；今天、固定成本的上游、收入是 0 的天不判
       if (settle && billDayOf(window) && !probe && costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own)) {
         return unavailable(health("CHANNEL_KEY_NO_USAGE", issueText("CHANNEL_KEY_NO_USAGE"), { channelId: rule.channels?.[0]?.channelId ?? null }), { metadata, token }, false);
+      }
+      // 今天就提醒换 Key（CHANNEL_KEY_IDLE_TODAY，条件和上面一样，只看今天、用今天已经读到的收入和 Key 用量，不另读）：
+      // 上游账单可能晚到几分钟，所以「有收入、Key 今天一点用量都没有」要连着满 1 小时才亮（从这个进程第一次看到这个情况起算；重启会重新计时）。
+      // Key 有了用量、收入没了、用户解绑再绑（规则换了），下一次实时读自己消失。亮了以后这一行和别的需处理一样：成本、毛利写「—」，不算进今天的合计
+      if (window.preset === "today" && !settle && !probe) {
+        const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own);
+        const tracker = (rt._keyIdleSince ||= new Map()), seen = tracker.get(rule.id);
+        const dayKey = dayKeyInTz(Date.now(), rule.timezone);
+        if (!idleNow) tracker.delete(rule.id);
+        else {
+          const since = seen && seen.day === dayKey ? seen.at : Date.now();
+          if (!seen || seen.day !== dayKey) tracker.set(rule.id, { day: dayKey, at: since });
+          if (Date.now() - since >= KEY_IDLE_TODAY_MS) {
+            return unavailable(health("CHANNEL_KEY_IDLE_TODAY", issueText("CHANNEL_KEY_IDLE_TODAY"), { channelId: rule.channels?.[0]?.channelId ?? null }), { metadata, token }, false);
+          }
+        }
       }
       const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
       if (!await hasCurrentScope(rule.id, scopeFingerprint, generation, !!rule.archivedAt)) return STALE_SCOPE;
