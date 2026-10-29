@@ -10,6 +10,7 @@ import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
+import { keepOrder, orderUpstreams } from "../../../lib/upstream-order.js";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
 import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
@@ -220,6 +221,10 @@ export default function StationsPage() {
   const afterChannelChange = async () => { await channelOptions.reload(); void loadWorkflowActions(true, ["bills"]); };
   const [channelsOf, setChannelsOf] = useState<Upstream | null>(null);
   const [binding, setBinding] = useState(false);
+  // 打开抽屉、小窗口或某一行的「更多」菜单时，列表先不重排（免得点错行），关掉以后再按新顺序排
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const lastOrder = useRef<string[]>([]);
   const [unbinding, setUnbinding] = useState<ChannelOption | null>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
@@ -504,17 +509,31 @@ export default function StationsPage() {
   const rankOf = (v: StationView) => Math.min(LEVEL_ORDER[v.level], ...todosOf(v).map((a: any) => LEVEL_ORDER[a.level as keyof typeof LEVEL_ORDER] ?? Infinity));
   const q = query.trim().toLowerCase();
   const byStatus = filter === "archived" ? archived : filter === "attention" ? live.filter(needsWork) : filter === "ok" ? live.filter((v) => !needsWork(v)) : live;
-  const rows = byStatus
+  const matched = byStatus
     .filter((v) => !typeFilter || v.s.type === typeFilter)
-    .filter((v) => !q || [v.s.name, v.s.baseUrl, v.host, v.s.balance?.account].some((x) => String(x || "").toLowerCase().includes(q)))
-    .sort((a, b) => {
-      if (sort === "days") return compareDays(a.sortDays, b.sortDays, 1) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
-      if (sort === "-days") return compareDays(a.sortDays, b.sortDays, -1) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
-      // 默认：最严重的在前，同级按可用天数升序，再按名称
-      return rankOf(a) - rankOf(b)
-        || compareDays(a.sortDays, b.sortDays, 1)
-        || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
-    });
+    .filter((v) => !q || [v.s.name, v.s.baseUrl, v.host, v.s.balance?.account].some((x) => String(x || "").toLowerCase().includes(q)));
+  // 默认排法（lib/upstream-order.js）：要马上动手的 → 正在花钱的（照最近的花法还能撑多少小时）→ 没在花钱的（按余额）→ 自营站点和不再续费的；点表头排序和已归档标签页照旧
+  const byDays = (dir: 1 | -1) => (a: StationView, b: StationView) => compareDays(a.sortDays, b.sortDays, dir) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
+  const orderedViews = (() => {
+    if (sort === "days") return [...matched].sort(byDays(1));
+    if (sort === "-days") return [...matched].sort(byDays(-1));
+    if (filter === "archived") return [...matched].sort((a, b) => rankOf(a) - rankOf(b) || byDays(1)(a, b));
+    const byId = new Map(matched.map((v) => [v.id, v]));
+    return orderUpstreams(matched.map((v) => {
+      const b = v.s.balance, ok = !!b?.ok;
+      return {
+        id: v.id, name: String(v.s.name ?? ""), bottom: !!v.s.isOwn || !!v.s.noRenewal, red: todosOf(v).some((a: any) => a.level === "crit"),
+        empty: ok && !v.fixed && Number(b.remaining) <= 0, unreadable: !v.fixed && (!!v.issue || (!!b && !ok)),
+        remaining: ok ? Number(b.remaining) : null, burnPerDay: v.s.prediction?.burnPerDay, cny: ok ? Number(b.remaining) * v.rate : 0,
+        endAt: v.fixed && v.fx?.active && v.fx.nextEnd != null ? v.fx.nextEnd : null,
+      };
+    }), Date.now()).map((item) => byId.get(item.id)!);
+  })();
+  const holdOrder = editorOpen || menuOpen || !!channelsOf || binding || !!unbinding || !!trendStation || !!archiveTarget || !!purgeTarget;
+  const rowIds = keepOrder(lastOrder.current, orderedViews.map((v) => v.id), holdOrder);
+  lastOrder.current = rowIds;
+  const viewById = new Map(orderedViews.map((v) => [v.id, v]));
+  const rows = rowIds.map((id) => viewById.get(id)!);
   const filtered = !!q || !!typeFilter || filter !== "all";
   const clearFilters = () => {
     setQuery("");
@@ -780,7 +799,7 @@ export default function StationsPage() {
   };
 
   const moreButton = (v: StationView, mobile = false) => (
-    <Dropdown trigger={["click"]} menu={{ items: moreItems(v, mobile), onClick: ({ key }) => onMore(v, key) }}>
+    <Dropdown trigger={["click"]} onOpenChange={setMenuOpen} menu={{ items: moreItems(v, mobile), onClick: ({ key }) => onMore(v, key) }}>
       <button
         type="button"
         className="jy-icon-btn jy-icon-btn--sm"
@@ -1148,7 +1167,7 @@ export default function StationsPage() {
 
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
-      <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} />
+      <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} onOpenChange={setEditorOpen} />
       <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); }}
         onBind={() => setBinding(true)} onUnbind={setUnbinding} />
       {ownStation ? <>

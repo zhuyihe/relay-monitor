@@ -1916,6 +1916,55 @@ test("上游资源：绑定渠道（一个都对不上）：有提示、什么�
   assert.equal(posts.length, 0);
 });
 
+// 上游列表的默认排法：线上那种大数字。A 约 5 小时、B 7 小时、C 23 小时，Q 没在花钱，「不再续费」和自营在最下面
+async function openOrderPage(t, viewport) {
+  const day = 24;
+  const up = (id, name, remaining, hoursLeft, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true,
+    balance: { ok: true, remaining, checkedAt: new Date().toISOString() },
+    prediction: hoursLeft == null ? { etaDays: null, burnPerDay: 0, basis: "近 3 小时" } : { etaDays: Math.round(hoursLeft / day * 10) / 10, burnPerDay: remaining / hoursLeft * day, basis: "近 3 小时" },
+    spark: Array.from({ length: 24 }, (_, i) => [Date.now() - (24 - i) * 3600e3, remaining + (24 - i) * 6700]), todayUsed: 56124, todayIsEstimate: true, ...extra });
+  const state = { stations: [
+    { id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },
+    up("c", "C 上游", 20413, 23), up("a", "A 上游", 35101.28, 35101.28 / 161091.13 * day), up("b", "B 上游", 23585, 7), up("q", "Q 没在花钱", 80000, null), up("n", "N 不再续费", 9000, 2, { noRenewal: true }),
+  ] };
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations: state.stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: state.stations.filter((x) => !x.isOwn).map((x) => ({ id: x.id, name: x.name })), channels: [] });
+    throw new Error("unexpected API: " + path);
+  }, viewport, !viewport, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
+  return { page, state };
+}
+const orderOf = (page, mobile) => page.locator(mobile ? ".jy-stations-m li .m-top" : ".jy-stations-table tbody .jy-stations-name-line > button.link").allInnerTexts();
+
+test("上游列表默认排法：照还能撑多久排（A 5 小时、B 7 小时、C 23 小时），没在花钱的在后面，不再续费和自营在最下；开着抽屉时数据变了顺序不动，关掉以后才变", async (t) => {
+  const { page, state } = await openOrderPage(t, undefined);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(".jy-stations-table tbody tr", { hasText: "A 上游" }).first().waitFor();
+  assert.deepEqual(await orderOf(page), ["A 上游", "B 上游", "C 上游", "Q 没在花钱", "我的站", "N 不再续费"]);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/order-1440x900.png` });
+  await page.locator(".jy-stations-table tbody tr", { hasText: "C 上游" }).first().locator("td").nth(2).getByRole("button").click();
+  const drawer = page.getByRole("dialog", { name: /C 上游的渠道/ }); await drawer.waitFor();
+  // 给 A 充值：A 余额变成 ¥135,101，撑得比 B、C 都久；自动刷新来了，但抽屉开着，顺序不动
+  const a = state.stations.find((x) => x.id === "a"); a.balance.remaining = 135101.28; a.prediction = { etaDays: 0.8, burnPerDay: 161091.13, basis: "近 3 小时" };
+  const refreshed = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/stations");
+  await page.clock.fastForward(61000); await refreshed; await page.waitForTimeout(300);
+  assert.deepEqual(await orderOf(page), ["A 上游", "B 上游", "C 上游", "Q 没在花钱", "我的站", "N 不再续费"], "抽屉开着，顺序不动");
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.querySelector(".jy-stations-table tbody tr")?.textContent?.includes("B 上游"));
+  assert.deepEqual(await orderOf(page), ["B 上游", "A 上游", "C 上游", "Q 没在花钱", "我的站", "N 不再续费"], "关掉以后按新顺序：B、A、C");
+});
+
+test("上游列表默认排法：手机卡片的顺序和电脑一样", async (t) => {
+  const { page } = await openOrderPage(t, { width: 375, height: 812 });
+  await page.locator(".jy-stations-m li").first().waitFor();
+  assert.deepEqual(await orderOf(page, true), ["A 上游", "B 上游", "C 上游", "Q 没在花钱", "我的站", "N 不再续费"]);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/order-375x812.png` });
+});
+
 test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂在这个上游下面，确认后发 stop", async (t) => {
   const stops = [];
   const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },

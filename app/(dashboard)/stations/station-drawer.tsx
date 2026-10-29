@@ -172,9 +172,12 @@ export function StationDrawer({
   ref,
   types,
   onSaved,
+  onOpenChange,
 }: {
   ref?: Ref<StationDrawerHandle>;
   types: any[];
+  // 抽屉开着时列表先不重排（页面用）
+  onOpenChange?: (open: boolean) => void;
   // 保存成功后由页面重新拉列表；抛错时按保存失败提示（与旧版一致）
   onSaved: () => Promise<unknown>;
 }) {
@@ -183,6 +186,7 @@ export function StationDrawer({
   const [form] = Form.useForm();
 
   const [open, setOpen] = useState(false);
+  useEffect(() => { onOpenChange?.(open); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const [editing, setEditing] = useState<any>(null); // null = 新增
   const [ownMode, setOwnMode] = useState(false); // 设置自营站点（自营业务页打开）
   const [needUserId, setNeedUserId] = useState(false); // 认出是 New API 站点、还缺用户 ID
