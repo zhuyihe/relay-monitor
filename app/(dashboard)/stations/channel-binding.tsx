@@ -7,6 +7,7 @@ import { App, Button, Drawer, Grid, Input, Modal, Radio, Select } from "antd";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { formatDayKey } from "../../../lib/format";
+import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { bindableKeys, channelChoices, defaultChannelId } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
 import { Icon, Sym } from "../../components/icons";
@@ -31,8 +32,8 @@ export function useChannelOptions(ownStationId: string | null | undefined) {
 export type Upstream = { id: string; name: string; address?: string };
 
 // 右边抽屉：这个上游下挂着的渠道
-export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbind }: {
-  upstream: Upstream | null; channels: ChannelOption[]; tz: string; onClose: () => void; onBind: () => void; onUnbind: (channel: ChannelOption) => void;
+export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbind, onSwap }: {
+  upstream: Upstream | null; channels: ChannelOption[]; tz: string; onClose: () => void; onBind: () => void; onUnbind: (channel: ChannelOption) => void; onSwap: (channel: ChannelOption) => void;
 }) {
   const screens = Grid.useBreakpoint();
   const mine = useMemo(() => channels.filter((item) => item.upstreamStationId === upstream?.id).sort((a, b) => String(a.sinceDay).localeCompare(String(b.sinceDay)) || a.channelId - b.channelId), [channels, upstream]);
@@ -43,7 +44,21 @@ export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbi
     title={upstream ? <>{C.drawerTitle(upstream.name)} <span className="jy-caption">{mine.length}</span></> : null}
   >
     <div className="jy-channels-top"><Button size="small" onClick={onBind}>{`＋ ${C.bindButton}`}</Button></div>
-    {!mine.length ? <p className="jy-caption jy-channels-empty">{C.empty}</p> : (
+    {!mine.length ? <p className="jy-caption jy-channels-empty">{C.empty}</p> : screens.md === false ? (
+      // 手机：一个渠道一张卡片（名字和 Key 一行，绑定日期和「换 Key」「解绑」一行）；电脑上还是表
+      <ul className="jy-channels-cards">
+        {mine.map((channel) => <li key={channel.channelId}>
+          <div className="jy-channels-cards__top"><strong>{channel.name}</strong><span className="jy-caption">{channel.tokenName ? C.keyOf(channel.tokenName, channel.tokenGroup) : ""}</span></div>
+          <div className="jy-channels-cards__bottom">
+            <span className="jy-caption">{channel.sinceDay ? `${C.cols.since} ${formatDayKey(channel.sinceDay, tz)}` : ""}</span>
+            <span className="jy-channels-cards__actions">
+              <Button type="link" size="small" aria-label={`${C.swap} ${channel.name}`} onClick={() => onSwap(channel)}>{C.swap}</Button>
+              <Button type="link" size="small" aria-label={`${C.unbind} ${channel.name}`} onClick={() => onUnbind(channel)}>{C.unbind}</Button>
+            </span>
+          </div>
+        </li>)}
+      </ul>
+    ) : (
       <div className="jy-table-wrap">
         <table className="jy-data jy-channels-table">
           <thead><tr><th scope="col">{C.cols.channel}</th><th scope="col">{C.cols.key}</th><th scope="col">{C.cols.since}</th><th scope="col" className="r">{C.cols.actions}</th></tr></thead>
@@ -52,7 +67,10 @@ export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbi
               <td>{channel.name}</td>
               <td>{channel.tokenName ? C.keyOf(channel.tokenName, channel.tokenGroup) : ""}</td>
               <td>{channel.sinceDay ? formatDayKey(channel.sinceDay, tz) : ""}</td>
-              <td className="r"><Button type="link" size="small" aria-label={`${C.unbind} ${channel.name}`} onClick={() => onUnbind(channel)}>{C.unbind}</Button></td>
+              <td className="r">
+                <Button type="link" size="small" aria-label={`${C.swap} ${channel.name}`} onClick={() => onSwap(channel)}>{C.swap}</Button>
+                <Button type="link" size="small" aria-label={`${C.unbind} ${channel.name}`} onClick={() => onUnbind(channel)}>{C.unbind}</Button>
+              </td>
             </tr>)}
           </tbody>
         </table>
@@ -146,6 +164,77 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
     {hint ? <p className="jy-caption jy-bind-hint">{M.onlyOne}</p> : null}
     {failed ? <p className="jy-caption jy-bind-hint">{M.keysFailed}</p> : null}
   </Modal>;
+}
+
+// 「换 Key」：渠道已经绑着，选新的一把就换，不用先解绑。系统自己查新 Key 从哪天开始有用量（后台 select-key 返回 fromDay、recomputedDays、tooOld、noRecentUsage）；
+// 新 Key 下拉和绑定小窗口同一套（还能用、没绑别的渠道、不含现在这把）
+export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose, onDone }: {
+  channel: ChannelOption | null; upstream: Upstream | null; ownStationId: string; options: ChannelOptions | null; onClose: () => void; onDone: () => void | Promise<void>;
+}) {
+  const { message, notification } = App.useApp();
+  const channels = options?.ok ? options.channels : [];
+  const [tokenId, setTokenId] = useState<number | null>(null);
+  const [keys, setKeys] = useState<{ value: number; label: string }[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [hint, setHint] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const M = CHANNEL_BINDING.swapModal;
+  useEffect(() => {
+    if (!channel || !upstream) return;
+    let alive = true;
+    setTokenId(null); setKeys(null); setFailed(false); setHint(false); setSaving(false);
+    api(`/api/reconciliation/upstreams/${encodeURIComponent(upstream.id)}/keys`).then((metadata: any) => {
+      if (!alive) return;
+      const used = channels.filter((item) => item.upstreamStationId === upstream.id && item.tokenId != null).map((item) => Number(item.tokenId));
+      const usable = bindableKeys(metadata?.tokens, used, { platform: metadata?.platform });
+      const items = usable.map((token: any) => ({ value: token.id as number, label: CHANNEL_BINDING.keyOf(token.name, token.group) }));
+      setKeys(items);
+      if (items.length === 1) { setTokenId(items[0].value); setHint(true); }
+    }).catch(() => { if (alive) { setKeys(null); setFailed(true); } });
+    return () => { alive = false; };
+  }, [channel?.channelId, upstream?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!channel || !upstream) return null;
+  const submit = async () => {
+    setSaving(true);
+    try {
+      const result: any = await api("/api/reconciliation/channels/select-key", { body: { ownStationId, channelId: channel.channelId, upstreamStationId: upstream.id, tokenId } });
+      const next = keys?.find((item) => item.value === tokenId)?.label.split(" · ")[0] ?? "";
+      const note = swapNote(next, result);
+      if (note.persistent) notification.success({ message: note.text, duration: 0, placement: "top" }); else message.success(note.text);
+      onClose();
+      await onDone();
+    } catch (error: any) {
+      message.error(describeError({ code: error?.code, message: error?.message }).text);
+    } finally { setSaving(false); }
+  };
+  return <Modal open centered title={M.title} okText={M.ok} cancelText={M.cancel} okButtonProps={{ disabled: tokenId == null }} confirmLoading={saving} cancelButtonProps={{ disabled: saving }} onCancel={() => { if (!saving) onClose(); }} onOk={() => void submit()} width="min(520px, calc(100vw - 24px))" className="jy-swap-modal" destroyOnHidden>
+    <p className="jy-caption">{M.sub(channel.name, upstream.name)}</p>
+    <label className="jy-bind-label">{M.current}</label>
+    <div className="jy-swap-current">{channel.tokenName ? CHANNEL_BINDING.keyOf(channel.tokenName, channel.tokenGroup) : ""}</div>
+    <label className="jy-bind-label">{M.next}</label>
+    <Select
+      showSearch className="jy-bind-select" aria-label={M.next} placeholder={M.nextPlaceholder} value={tokenId ?? undefined} options={keys ?? []} loading={keys == null && !failed} disabled={saving}
+      filterOption={(input, option) => String(option?.label ?? "").toLowerCase().includes(input.trim().toLowerCase())}
+      notFoundContent={failed ? M.keysFailed : M.noKeys} onChange={(value: number) => { setTokenId(value); setHint(false); }}
+    />
+    {hint ? <p className="jy-caption jy-bind-hint">{CHANNEL_BINDING.bindModal.onlyOne}</p> : null}
+    <p className="jy-swap-note"><Sym kind="info" /><span>{M.note}</span></p>
+    {saving ? <p className="jy-caption jy-swap-working" role="status">{M.working}</p> : null}
+  </Modal>;
+}
+
+// 换好以后顶上的提示：后台返回 fromDay（新 Key 第一天有用量的那天，YYYY-MM-DD）、recomputedDays（补算的天，数或日期列表）、tooOld（31 天以前没自动重算的 { from, to }）、noRecentUsage；
+// 字段没有（后台还没带）时只写「已换成 xxx」。有没自动重算的日子时提示不自动消失
+export function swapNote(key: string, result: any): { text: string; persistent: boolean } {
+  const D = CHANNEL_BINDING.swapDone;
+  if (result?.noRecentUsage) return { text: D.noRecentUsage(key), persistent: false };
+  if (!result?.fromDay) return { text: D.plain(key), persistent: false };
+  const days = Array.isArray(result.recomputedDays) ? result.recomputedDays.length : Number(result.recomputedDays) || 0;
+  const today = dayKeyInTz(Date.now(), DEFAULT_BUSINESS_TIME_ZONE);
+  const tooOld = result.tooOld;
+  let text = days === 0 && !tooOld?.from && String(result.fromDay) === today ? D.fromToday(key) : D.from(key, formatDayKey(String(result.fromDay), DEFAULT_BUSINESS_TIME_ZONE)) + (days > 0 ? D.recomputed(days) : "");
+  if (tooOld?.from) text += `。${D.tooOld(formatDayKey(String(tooOld.from), DEFAULT_BUSINESS_TIME_ZONE), formatDayKey(String(tooOld.to ?? tooOld.from), DEFAULT_BUSINESS_TIME_ZONE))}`;
+  return { text, persistent: !!tooOld?.from };
 }
 
 // 「解绑「高速 A」？」
