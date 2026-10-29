@@ -10,6 +10,7 @@ import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { createFakeSub2Api } from "./test-support/fake-sub2api.js";
 import { createChannelProfitModule } from "./channel-profit.js";
 import { canonicalBillingKey } from "../lib/reconciliation-scope-policy.js";
+import { reconciliationIssue } from "../lib/reconciliation-contract.js";
 
 const SH = (iso) => Date.parse(`${iso}+08:00`);
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
@@ -590,3 +591,69 @@ for (const upstreamType of ["newapi"]) {
     assert.equal(cost("2026-10-11"), 0.5 * H * 1 + 23.5 * H * 3, "换 Key 当天旧、新两把各取整天：Key 9 到 0:30、Key 20 从 0:30 起");
   });
 }
+
+// ===== 今天就提醒换 Key（CHANNEL_KEY_IDLE_TODAY）=====
+// Key 9 到 12:00 才有用量（之前一点都没有），渠道每秒 2 美元收入；没装读取服务、手动选的 Key
+async function idleFixture(t, extra = {}) {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [SH("2026-10-10T12:00:00"), Infinity] }, ...extra });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  const today = (iso) => f.at(iso).then(() => f.rt.reconciliation.profitPage({ preset: "today" }));
+  return { f, today };
+}
+
+test("今天就提醒换 Key：今天有收入、绑的 Key 一点用量都没有，连着满 1 小时才亮（不到 1 小时不亮）；亮了成本、毛利写「—」，不算进今天的合计", async (t) => {
+  const { f, today } = await idleFixture(t);
+  await f.round("2026-10-10T10:30:00"); // 第一次看到这个情况
+  const early = await today("2026-10-10T11:20:00");
+  assert.equal(early.rows[0].attention, null, "不到 1 小时不亮");
+  assert.ok(early.rows[0].uncountedIncomeUsd > 0, "不到 1 小时仍是原来的「上游的用量还没到」（还在读取），收入照写");
+  const lit = await today("2026-10-10T11:31:00");
+  assert.equal(lit.rows[0].attention.code, "CHANNEL_KEY_IDLE_TODAY");
+  assert.equal(lit.rows[0].attention.title, "今天有收入，但绑的 Key 一直没用量，可能换了 Key");
+  assert.equal(lit.rows[0].attention.detail, "今天这个渠道的上游成本先不算进来。");
+  assert.equal(lit.rows[0].attention.action.kind, "open_channels");
+  assert.equal(lit.rows[0].attention.action.label, "去上游资源");
+  assert.equal(lit.rows[0].attention.action.href, `/stations?action=channels&stationId=${f.supplier.id}`);
+  assert.equal(lit.rows[0].counted, false);
+  assert.deepEqual([lit.pageTotals.incomeUsd, lit.pageTotals.actualCostUsd, lit.pageTotals.grossProfitUsd, lit.pageTotals.grossMarginRate], [null, null, null, null], "今天的合计不算这一行");
+});
+
+test("今天就提醒换 Key：Key 有了用量，下一次实时读自己消失；用户解绑再绑（规则换了）也不带着旧的计时", async (t) => {
+  const { f, today } = await idleFixture(t);
+  await f.round("2026-10-10T10:30:00");
+  assert.equal((await today("2026-10-10T11:31:00")).rows[0].attention.code, "CHANNEL_KEY_IDLE_TODAY");
+  const back = await today("2026-10-10T12:30:00"); // 12:00 起 Key 有用量了
+  assert.equal(back.rows[0].attention, null);
+  assert.ok(back.rows[0].counted && back.pageTotals.actualCostUsd > 0);
+  // 解绑再绑：新规则 id，重新计时
+  const { f: g, today: todayG } = await idleFixture(t);
+  await g.round("2026-10-10T10:30:00");
+  assert.equal((await todayG("2026-10-10T11:31:00")).rows[0].attention.code, "CHANNEL_KEY_IDLE_TODAY");
+  await g.profit.stop({ ownStationId: g.own.id, channelIds: [1] });
+  await g.at("2026-10-10T11:40:00");
+  await g.profit.selectKey({ ownStationId: g.own.id, channelId: 1, upstreamStationId: g.supplier.id, tokenId: 9 });
+  assert.equal((await todayG("2026-10-10T11:50:00")).rows[0]?.attention ?? null, null, "重新绑以后重新计时");
+});
+
+test("今天就提醒换 Key：装了读取服务的站点不判；固定成本的上游不判", async (t) => {
+  const withAgent = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 }, windows: { 9: [SH("2026-10-10T12:00:00"), Infinity] } });
+  await withAgent.at("2026-10-10T10:00:00");
+  await withAgent.profit.start({ ownStationId: withAgent.own.id, channelIds: [1] });
+  await withAgent.round("2026-10-10T10:30:00");
+  await withAgent.at("2026-10-10T11:31:00");
+  const page = await withAgent.rt.reconciliation.profitPage({ preset: "today" });
+  assert.notEqual(page.rows[0].attention?.code, "CHANNEL_KEY_IDLE_TODAY");
+  const { f, today } = await idleFixture(t);
+  f.store.get(f.supplier.id).fixedPurchases = [{ amount: 100, days: 30, startDate: null }];
+  await f.round("2026-10-10T10:30:00");
+  assert.notEqual((await today("2026-10-10T11:31:00")).rows[0].attention?.code, "CHANNEL_KEY_IDLE_TODAY");
+});
+
+test("CHANNEL_KEY_NO_USAGE：标题写是哪天、说明去掉旧说法，按钮「去上游资源」跳这个上游的渠道抽屉（lib 里同一条路由）", async () => {
+  const issue = reconciliationIssue("CHANNEL_KEY_NO_USAGE");
+  assert.equal(issue.title, "「{channel}」{day}有收入，但绑的 Key 这天一点用量都没有");
+  assert.equal(issue.detail, "可能渠道换了 Key，这天先不固定。");
+  assert.equal(issue.action, "open_channels");
+  assert.doesNotMatch(JSON.stringify(issue), /选的 Key|选 Key/);
+});
