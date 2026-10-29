@@ -2055,7 +2055,7 @@ test("上游资源：抽屉每行「换 Key」「解绑」；换 Key 小窗口�
   await modal.getByText("正在查新 Key 最近的用量，要几秒", { exact: true }).waitFor();
   for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
   assert.deepEqual(posts[0], { ownStationId: "own", channelId: 1, upstreamStationId: "up1", tokenId: 30 });
-  await page.locator(".ant-message").getByText("已换成 oai-16，从10月27日起按新 Key 算，补算了 2 天", { exact: true }).waitFor();
+  await page.locator(".ant-message").getByText("已换成 oai-16，从 10月27日起按新 Key 算，补算了 2 天", { exact: true }).waitFor();
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/swap-toast-1440x900.png` });
 });
 
@@ -2071,9 +2071,10 @@ test("上游资源：换好的提示——后台没带字段只写「已换成 x
     if (persistent) { await page.waitForTimeout(5500); assert.equal(await note.count(), 1, "5 秒以后还在"); await note.locator(".ant-notification-notice-close").click(); await note.waitFor({ state: "hidden" }); }
   };
   await run({}, "已换成 oai-16");
-  await run({ noRecentUsage: true }, "已换成 oai-16。新 Key 最近还没查到用量，从今天起按新 Key 算；等它有用量，前面的日子不用再动。");
-  await run({ fromDay: "2026-10-01", recomputedDays: 4, tooOld: { from: "2026-10-01", to: "2026-10-03" } },
-    "已换成 oai-16，从10月1日起按新 Key 算，补算了 4 天。其中 10月1日–10月3日 在 31 天以前，没自动重算；要按新的时间算，到每日利润选那天点「重新读取」。", { persistent: true });
+  await run({ noRecentUsage: true }, "已换成 oai-16。新 Key 最近 31 天都没有用量，从今天起按新 Key 算");
+  await run({ fromDay: new Date().toLocaleDateString("sv", { timeZone: "Asia/Shanghai" }), recomputedDays: 0, tooOld: null }, "已换成 oai-16，从今天起按新 Key 算");
+  await run({ fromDay: "2026-09-20", recomputedDays: 31, tooOld: { from: "2026-09-20", to: "2026-09-27" } },
+    "已换成 oai-16，从 9月20日起按新 Key 算，补算了 31 天。9月20日–9月27日 在 31 天以前，没自动补算；要按新 Key 算，到每日利润选那天点「重新读取」。", { persistent: true });
 });
 
 test("上游资源：/stations?action=swap-key&stationId=&channelId= 打开这个上游的抽屉、直接弹出这个渠道的「换 Key」小窗口，地址栏的参数去掉", async (t) => {

@@ -7,7 +7,7 @@ import { App, Button, Drawer, Grid, Input, Modal, Radio, Select } from "antd";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { formatDayKey } from "../../../lib/format";
-import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
+import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { bindableKeys, channelChoices, defaultChannelId } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
 import { Icon, Sym } from "../../components/icons";
@@ -230,8 +230,9 @@ export function swapNote(key: string, result: any): { text: string; persistent: 
   if (result?.noRecentUsage) return { text: D.noRecentUsage(key), persistent: false };
   if (!result?.fromDay) return { text: D.plain(key), persistent: false };
   const days = Array.isArray(result.recomputedDays) ? result.recomputedDays.length : Number(result.recomputedDays) || 0;
-  let text = D.from(key, formatDayKey(String(result.fromDay), DEFAULT_BUSINESS_TIME_ZONE)) + (days > 0 ? D.recomputed(days) : "");
+  const today = dayKeyInTz(Date.now(), DEFAULT_BUSINESS_TIME_ZONE);
   const tooOld = result.tooOld;
+  let text = days === 0 && !tooOld?.from && String(result.fromDay) === today ? D.fromToday(key) : D.from(key, formatDayKey(String(result.fromDay), DEFAULT_BUSINESS_TIME_ZONE)) + (days > 0 ? D.recomputed(days) : "");
   if (tooOld?.from) text += `。${D.tooOld(formatDayKey(String(tooOld.from), DEFAULT_BUSINESS_TIME_ZONE), formatDayKey(String(tooOld.to ?? tooOld.from), DEFAULT_BUSINESS_TIME_ZONE))}`;
   return { text, persistent: !!tooOld?.from };
 }
