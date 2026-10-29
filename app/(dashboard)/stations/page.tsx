@@ -220,6 +220,10 @@ export default function StationsPage() {
   // 绑定、解绑以后重读渠道，也刷新需处理（解绑的渠道那条「Key 没用量」要跟着消失）
   const afterChannelChange = async () => { await channelOptions.reload(); void loadWorkflowActions(true, ["bills"]); };
   const [channelsOf, setChannelsOf] = useState<Upstream | null>(null);
+  const openChannelsOf = (stationId: string | null) => {
+    const target = stations.find((item: any) => String(item.id) === stationId && !item.archivedAt && !item.isOwn);
+    if (target) setChannelsOf({ id: target.id, name: stationDisplayName(target), address: hostOf(target.baseUrl) });
+  };
   const [binding, setBinding] = useState(false);
   // 打开抽屉、小窗口或某一行的「更多」菜单时，列表先不重排（免得点错行），关掉以后再按新顺序排
   const [editorOpen, setEditorOpen] = useState(false);
@@ -310,6 +314,14 @@ export default function StationsPage() {
     if (target || (editParam === "new" && types.length)) openEditor(target || null, null, { focus });
     setParams({ edit: null, focus: null });
   }, [editParam, loaded, loadingMeta]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // /stations?action=channels&stationId=<id>（运营总览的「去上游资源」）：数据到齐后打开这个上游的渠道抽屉，然后把参数从地址栏去掉
+  const actionParam = params.get("action"), stationParam = params.get("stationId");
+  useEffect(() => {
+    if (actionParam !== "channels" || !loaded) return;
+    openChannelsOf(stationParam);
+    setParams({ action: null, stationId: null });
+  }, [actionParam, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefreshAll = async () => {
     setRefreshingAll(true);
@@ -568,6 +580,9 @@ export default function StationsPage() {
   // 行内的账号待办：本页能处理的直接打开对应抽屉或区块，不整页刷新
   const router = useRouter();
   const openTodo = (href: string) => {
+    // 「去上游资源」：打开这个上游的渠道抽屉，在那里解绑再绑
+    const channelsOfStation = href.startsWith("/stations") ? new URL(href, "https://workflow.invalid").searchParams : null;
+    if (channelsOfStation?.get("action") === "channels") { openChannelsOf(channelsOfStation.get("stationId")); return; }
     if (!href.startsWith("/stations")) {
       router.push(href);
       return;

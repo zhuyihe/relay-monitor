@@ -7296,6 +7296,23 @@ test("C2a 修正切换时间后重结昨天没成：10 分钟后再试，不是�
   assert.deepEqual(f.state.ledgerWrites.at(-1), { ruleId: "rr_live", billDate: "2026-10-08", revision: 2, source: "resettle" });
 });
 
+test("渠道地址改了：来源被判成没确认时昨天先不固定（记成要人处理）；来源回到已确认后，不用人点，10 分钟内自己补结", async (t) => {
+  const f = await completedDayFixture(t);
+  let status = "review_required";
+  f.rt.onboardingSource.inspectSource = () => ({ version: `v-${status}`, status, issues: status === "confirmed" ? [] : [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: "x" }] });
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  await f.module.refreshDue(now);
+  const settledDays = () => f.state.ledgerWrites.filter((write) => write.ruleId === "rr_live").map((write) => write.billDate);
+  assert.deepEqual(settledDays(), [], "来源没确认：不写账本");
+  const row = (await f.repository.listSettlementStates(["rr_live"])).find((item) => item.billDate === "2026-10-08");
+  assert.equal(row?.manualReason, "SOURCE_BINDING_UNCONFIRMED", "记成要人处理的原因");
+  status = "confirmed"; // 修好了（不再要求渠道地址没变）
+  for (let minute = 0; minute < 12 && !settledDays().length; minute += 1) { now += 60000; await f.module.refreshDue(now); }
+  assert.deepEqual(settledDays(), ["2026-10-08"], "原因没了以后自己补结昨天");
+  assert.equal((await f.repository.listSettlementStates(["rr_live"])).some((item) => item.billDate === "2026-10-08" && item.manualReason), false, "要人处理的记录也清掉了");
+});
+
 test("1b同步来源时作废正在进行的计算：查询改用重新取的 Key 目录重算", async (t) => {
   // 第一次取上游账单时停住，模拟计算进行到一半。
   let gate = null, reached, release;

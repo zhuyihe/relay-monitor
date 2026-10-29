@@ -2419,7 +2419,8 @@ test("名称分组同步不改变财务来源版本，可见地址与本站授�
   assert.deepEqual(f.module.inspectSource(rule), before);
   f.state.pages[0].baseUrl = "https://different.example";
   await f.module.sync();
-  assert.equal(f.module.inspectSource(rule).status, "review_required");
+  // 渠道地址改了：版本变（新预览要重看），但这条绑定是按渠道 ID 和选的 Key 指定的，来源仍算已确认（不写库，起算日不动）
+  assert.equal(f.module.inspectSource(rule).status, "confirmed");
   assert.notEqual(f.module.inspectSource(rule).version, before.version);
   await f.rt.store.update(f.own.id, { accessToken: "new-own-secret" });
   assert.equal(f.module.inspectSource(rule).status, "unavailable");
@@ -2570,7 +2571,8 @@ test("目录和规则提交共用来源锁，目录失败不提前发布新来�
   assert.deepEqual(f.module.inspectSource(rule), original);
   release();
   await Promise.all([commit, syncing]);
-  assert.equal(f.module.inspectSource(rule).status, "review_required");
+  assert.equal(f.module.inspectSource(rule).status, "confirmed");
+  assert.notEqual(f.module.inspectSource(rule).version, original.version);
   const current = f.module.inspectSource(rule);
   f.state.pages[0].baseUrl = "https://unsaved.example";
   f.state.catalogueGate = async () => { throw new Error("catalogue commit failed"); };
@@ -2630,7 +2632,7 @@ test("低权限账号可接监控，账单暂时失败保留关系且不宣称�
   assert.equal(JSON.stringify(partial).includes("supplier-secret"), false);
 });
 
-test("原成员来源变更使原预览失效且不静默改动既有生效时间，重新预览确认后从保存时刻生效", async () => {
+test("原成员渠道地址改了：原预览和重新预览都按已保存处理，不改既有生效时间", async () => {
   const f = await onboardingFixture();
   f.state.pages.push({ ...f.state.pages[0], id: 2 });
   await f.module.sync();
@@ -2647,13 +2649,14 @@ test("原成员来源变更使原预览失效且不静默改动既有生效时�
   // 来源变化即范围变化：生效时刻要等确认那一刻，预览里不给时间。
   assert.equal(preview.preview.scopeChanged, true);
   assert.equal(preview.preview.billingEffectiveFromMs, null); assert.equal(preview.preview.firstQueryableAtMs, null);
+  // 渠道地址改了不再算来源变化：原预览要存的和已经存着的一样，按已保存处理，什么都不改（生效时刻、范围版本照旧）
   const changed = await f.module.connect({ ...request, requestId: original.requestId, previewId: original.previewId });
-  assert.equal(changed.complete, false);
-  assert.ok(["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED"].includes(changed.code));
+  assert.equal(changed.complete, true, JSON.stringify(changed));
   assert.equal(f.state.rules[0].billingEffectiveFrom, previousEffective); assert.equal(f.state.rules[0].scopeVersion, previousVersion);
   const confirmed = await f.module.connect({ ...request, requestId: preview.requestId, previewId: preview.previewId });
   assert.equal(confirmed.complete, true, JSON.stringify(confirmed));
-  assert.equal(f.state.rules[0].billingEffectiveFrom, f.state.now); assert.equal(f.state.rules[0].scopeVersion, previousVersion + 1);
+  // 重新预览确认也一样：存着的已经是这个范围，不重置起算日
+  assert.equal(f.state.rules[0].billingEffectiveFrom, previousEffective); assert.equal(f.state.rules[0].scopeVersion, previousVersion);
   assert.equal(f.module.inspectSource(f.state.rules[0]).status, "confirmed");
 });
 
