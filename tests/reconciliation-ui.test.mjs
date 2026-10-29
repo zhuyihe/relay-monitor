@@ -2009,6 +2009,103 @@ test("上游资源：「去上游资源」的地址（/stations?action=channels&
   await page.waitForFunction(() => !location.search.includes("action="));
 });
 
+// 「换 Key」：渠道抽屉每行「换 Key」「解绑」；小窗口只剩一把新 Key 时替你选好；提交走 select-key（已绑定的渠道选新 Key）；换好的提示按后台返回的字段拼
+async function openSwapPage(t, { result = {}, viewport, path = "/stations", keys } = {}) {
+  const posts = [];
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },
+    { id: "up1", name: "云帆", type: "newapi", baseUrl: "https://up1.test", monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" } }];
+  const channels = [
+    { channelId: 1, name: "高速 A", address: "up1.test", enabled: true, ruleId: "r1", upstreamStationId: "up1", tokenId: 9, tokenName: "oai-01", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null },
+    { channelId: 2, name: "长文本 C", address: "up1.test", enabled: true, ruleId: "r2", upstreamStationId: "up1", tokenId: 10, tokenName: "oai-03", tokenGroup: "default", sinceDay: "2026-10-14", suggestedUpstreamId: null }];
+  const tokens = keys || [{ id: 9, name: "oai-01", status: 1, group: "default" }, { id: 10, name: "oai-03", status: 1, group: "default" }, { id: 30, name: "oai-16", status: 1, group: "default" }, { id: 31, name: "停用的", status: 2 }];
+  const page = await openFixturePage(t, async (route) => {
+    const p = new URL(route.request().url()).pathname;
+    if (p === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (p === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
+    if (p === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (p === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (p === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: "云帆" }], channels });
+    if (p === "/api/reconciliation/upstreams/up1/keys") return fulfill(route, { platform: "newapi", tokens });
+    if (p === "/api/reconciliation/channels/select-key") { posts.push(route.request().postDataJSON()); await new Promise((resolve) => setTimeout(resolve, 600)); return fulfill(route, { changed: true, ruleId: "r1", ...result }); }
+    throw new Error("unexpected API: " + p);
+  }, viewport, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), path);
+  return { page, posts };
+}
+const openSwapDrawer = async (page) => {
+  await page.locator(".jy-stations-table tbody tr", { hasText: "云帆" }).first().locator("td").nth(2).getByRole("button").click();
+  const drawer = page.getByRole("dialog", { name: /云帆的渠道/ }); await drawer.waitFor(); return drawer;
+};
+
+test("上游资源：抽屉每行「换 Key」「解绑」；换 Key 小窗口写现在的 Key，新 Key 只剩一把时替你选好，点「换 Key」转圈并写「正在查新 Key 最近的用量」，提交 select-key，提示写从哪天起按新 Key 算、补算了几天", async (t) => {
+  const { page, posts } = await openSwapPage(t, { result: { fromDay: "2026-10-27", recomputedDays: ["2026-10-27", "2026-10-28"], tooOld: null, noRecentUsage: false } });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const drawer = await openSwapDrawer(page);
+  assert.deepEqual(await drawer.locator("tbody tr").first().getByRole("button").allInnerTexts(), ["换 Key", "解绑"]);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/swap-drawer-1440x900.png` });
+  await drawer.getByRole("button", { name: "换 Key 高速 A", exact: true }).click();
+  const modal = page.getByRole("dialog", { name: "换 Key", exact: true }); await modal.waitFor();
+  await modal.getByText("高速 A · 云帆", { exact: true }).waitFor();
+  assert.equal(await modal.locator(".jy-swap-current").innerText(), "oai-01 · 分组 default");
+  await modal.getByText("这个上游只剩这一把 Key 没绑渠道，已经替你选好", { exact: true }).waitFor();
+  await modal.getByText("oai-16 · 分组 default", { exact: true }).waitFor();
+  await modal.getByText("不用记几点换的：系统会查新 Key 从哪天开始有用量，从那天起按新 Key 算，没算进来的日子自动补上。", { exact: true }).waitFor();
+  assert.equal(await modal.getByText(/利润/).count(), 0, "上游资源里不出现利润");
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/swap-modal-1440x900.png` }); }
+  await modal.getByRole("button", { name: "换 Key", exact: true }).click();
+  await modal.getByText("正在查新 Key 最近的用量，要几秒", { exact: true }).waitFor();
+  for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
+  assert.deepEqual(posts[0], { ownStationId: "own", channelId: 1, upstreamStationId: "up1", tokenId: 30 });
+  await page.locator(".ant-message").getByText("已换成 oai-16，从10月27日起按新 Key 算，补算了 2 天", { exact: true }).waitFor();
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/swap-toast-1440x900.png` });
+});
+
+test("上游资源：换好的提示——后台没带字段只写「已换成 xxx」；新 Key 最近没用量；有 31 天以前没自动重算的日子时提示不自动消失，点关闭才收起", async (t) => {
+  const run = async (result, expected, { persistent = false } = {}) => {
+    const { page } = await openSwapPage(t, { result });
+    const drawer = await openSwapDrawer(page);
+    await drawer.getByRole("button", { name: "换 Key 高速 A", exact: true }).click();
+    const modal = page.getByRole("dialog", { name: "换 Key", exact: true }); await modal.getByText("oai-16 · 分组 default", { exact: true }).waitFor();
+    await modal.getByRole("button", { name: "换 Key", exact: true }).click();
+    const note = persistent ? page.locator(".ant-notification-notice").filter({ hasText: expected }) : page.locator(".ant-message").getByText(expected, { exact: true });
+    await note.waitFor();
+    if (persistent) { await page.waitForTimeout(5500); assert.equal(await note.count(), 1, "5 秒以后还在"); await note.locator(".ant-notification-notice-close").click(); await note.waitFor({ state: "hidden" }); }
+  };
+  await run({}, "已换成 oai-16");
+  await run({ noRecentUsage: true }, "已换成 oai-16。新 Key 最近还没查到用量，从今天起按新 Key 算；等它有用量，前面的日子不用再动。");
+  await run({ fromDay: "2026-10-01", recomputedDays: 4, tooOld: { from: "2026-10-01", to: "2026-10-03" } },
+    "已换成 oai-16，从10月1日起按新 Key 算，补算了 4 天。其中 10月1日–10月3日 在 31 天以前，没自动重算；要按新的时间算，到每日利润选那天点「重新读取」。", { persistent: true });
+});
+
+test("上游资源：/stations?action=swap-key&stationId=&channelId= 打开这个上游的抽屉、直接弹出这个渠道的「换 Key」小窗口，地址栏的参数去掉", async (t) => {
+  const { page } = await openSwapPage(t, { path: "/stations?action=swap-key&stationId=up1&channelId=2" });
+  const modal = page.getByRole("dialog", { name: "换 Key", exact: true }); await modal.waitFor();
+  await modal.getByText("长文本 C · 云帆", { exact: true }).waitFor();
+  assert.equal(await modal.locator(".jy-swap-current").innerText(), "oai-03 · 分组 default");
+  await page.getByRole("dialog", { name: /云帆的渠道/ }).waitFor();
+  await page.waitForFunction(() => !location.search.includes("action=") && !location.search.includes("channelId="));
+});
+
+test("上游资源（手机 375）：渠道抽屉一个渠道一张卡片（名字和 Key 一行、绑定日期和「换 Key」「解绑」一行），两个按钮点得到、页面不横向滚动；换 Key 小窗口放得下", async (t) => {
+  const { page, posts } = await openSwapPage(t, { viewport: { width: 375, height: 812 } });
+  await page.locator(".jy-stations-m li", { hasText: "云帆" }).first().getByRole("button", { name: /^云帆的渠道/ }).click();
+  const drawer = page.getByRole("dialog", { name: /云帆的渠道/ }); await drawer.waitFor();
+  assert.equal(await drawer.locator(".jy-channels-table").count(), 0, "手机上不是表");
+  await page.waitForTimeout(700);
+  const cards = drawer.locator(".jy-channels-cards li"); assert.equal(await cards.count(), 2);
+  await cards.first().getByText("高速 A", { exact: true }).waitFor(); await cards.first().getByText("oai-01 · 分组 default", { exact: true }).waitFor(); await cards.first().getByText("绑定日期 10月12日", { exact: true }).waitFor();
+  for (const name of ["换 Key 高速 A", "解绑 高速 A"]) { const box = await drawer.getByRole("button", { name, exact: true }).boundingBox(); assert.ok(box.x >= 0 && box.x + box.width <= 375 && box.height >= 32, `${name} 在屏幕里、点得到`); }
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/swap-drawer-375x812.png` });
+  await drawer.getByRole("button", { name: "换 Key 高速 A", exact: true }).click();
+  const modal = page.getByRole("dialog", { name: "换 Key", exact: true }); await modal.waitFor();
+  await modal.getByText("oai-16 · 分组 default", { exact: true }).waitFor();
+  const box = await modal.boundingBox(); assert.ok(box.x >= 0 && box.x + box.width <= 375 && box.y >= 0 && box.y + box.height <= 812, "小窗口放得下");
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/swap-modal-375x812.png` }); }
+  await modal.getByRole("button", { name: "换 Key", exact: true }).click();
+  for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
+  assert.equal(posts[0].channelId, 1);
+});
+
 test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂在这个上游下面，确认后发 stop", async (t) => {
   const stops = [];
   const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },

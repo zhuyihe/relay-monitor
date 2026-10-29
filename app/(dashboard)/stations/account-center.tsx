@@ -212,7 +212,7 @@ export function useAccountCenter({
 
   useEffect(() => {
     if (!destination || destinationResolved.current || !loaded || !accountModel || loadingAccounts || loadingList || accountError || loadError) return;
-    if (["connect", "coverage", "source", "channels"].includes(destination.action) && !destination.error) return;
+    if (["connect", "coverage", "source", "channels", "swap-key"].includes(destination.action) && !destination.error) return;
     destinationResolved.current = true;
     if (destination.error) { setWorkflowError(destination.error); return; }
     const account = accountModel.accounts.find((account) => destination.accountKey

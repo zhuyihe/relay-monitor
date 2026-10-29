@@ -180,3 +180,20 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-bind-empty { margin: 0; padding: 12px; text-align: center; }
 .jy-bind-toggle { margin-top: 8px; padding: 0; border: 0; background: none; color: var(--jy-link, #2f54eb); cursor: pointer; font: inherit; font-size: 13px; }
 .jy-bind-modal .ant-modal-content { max-height: calc(100vh - 32px); overflow-y: auto; }
+
+/* 手机：渠道抽屉一个渠道一张卡片（名字和 Key 一行，绑定日期和「换 Key」「解绑」一行） */
+.jy-channels-cards { margin: 0; padding: 0; list-style: none; border: 1px solid var(--jy-rule-soft, #e5e5e5); border-radius: 8px; }
+.jy-channels-cards li { padding: 12px 16px; border-top: 1px solid var(--jy-rule-soft, #e5e5e5); }
+.jy-channels-cards li:first-child { border-top: 0; }
+.jy-channels-cards__top, .jy-channels-cards__bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.jy-channels-cards__top strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-channels-cards__top .jy-caption { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-channels-cards__bottom { margin-top: 6px; }
+.jy-channels-cards__actions { display: inline-flex; gap: 4px; flex: none; }
+.jy-channels-cards__actions .ant-btn { min-height: 44px; }
+/* 「换 Key」小窗口：现在的 Key 灰底一行、浅蓝底说明、转圈时下面一行小字 */
+.jy-swap-current { padding: 8px 12px; border-radius: 6px; background: var(--jy-sunken, #f5f5f5); }
+.jy-swap-note { display: flex; align-items: flex-start; gap: 8px; margin: 16px 0 0; padding: 10px 12px; border-radius: 6px; background: var(--jy-cobalt-tint, #eef2ff); font-size: 13px; line-height: 20px; }
+.jy-swap-note .jy-sym { width: 14px; height: 14px; flex: none; margin-top: 3px; color: var(--jy-cobalt); }
+.jy-swap-working { margin: 8px 0 0; }
+.jy-swap-modal .ant-modal-content { max-height: calc(100vh - 32px); overflow-y: auto; }

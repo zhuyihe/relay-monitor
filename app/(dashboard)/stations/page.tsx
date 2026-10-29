@@ -40,7 +40,7 @@ import { MergeNotice, useMergeUpstreams } from "../../components/merge-upstreams
 import type { MergeCounts } from "../../components/merge-upstreams";
 import { MERGE_TEXT } from "../../../lib/upstream-merge-view.js";
 import { StationDrawer } from "./station-drawer";
-import { BindChannelModal, ChannelsDrawer, UnbindModal, useChannelOptions } from "./channel-binding";
+import { BindChannelModal, ChannelsDrawer, SwapKeyModal, UnbindModal, useChannelOptions } from "./channel-binding";
 import type { ChannelOption, Upstream } from "./channel-binding";
 import { BINDABLE_UPSTREAM_TYPES } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
@@ -233,6 +233,9 @@ export default function StationsPage() {
   const [issueOpenId, setIssueOpenId] = useState<string | null>(null);
   const lastOrder = useRef<string[]>([]);
   const [unbinding, setUnbinding] = useState<ChannelOption | null>(null);
+  const [swapping, setSwapping] = useState<ChannelOption | null>(null);
+  // /stations?action=swap-key&stationId=&channelId=：先记下要换 Key 的渠道，渠道目录读到以后弹出它的「换 Key」小窗口
+  const [pendingSwap, setPendingSwap] = useState<number | null>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
   const uid = useId();
@@ -319,11 +322,23 @@ export default function StationsPage() {
   }, [editParam, loaded, loadingMeta]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // /stations?action=channels&stationId=<id>（运营总览的「去上游资源」）：数据到齐后打开这个上游的渠道抽屉，然后把参数从地址栏去掉
-  const actionParam = params.get("action"), stationParam = params.get("stationId");
+  const actionParam = params.get("action"), stationParam = params.get("stationId"), channelParam = params.get("channelId");
+  // 「去换 Key」：打开这个上游的渠道抽屉，直接弹出这个渠道的「换 Key」小窗口
+  const openSwapKey = (stationId: string | null, channelId: string | null) => {
+    openChannelsOf(stationId);
+    const id = Number(channelId);
+    if (Number.isSafeInteger(id) && id > 0) setPendingSwap(id);
+  };
   useEffect(() => {
-    if (actionParam !== "channels" || !loaded) return;
-    openChannelsOf(stationParam);
-    setParams({ action: null, stationId: null });
+    if (pendingSwap == null || !channelOptions.options?.ok) return;
+    const channel = channelOptions.options.channels.find((item) => item.channelId === pendingSwap && item.ruleId != null);
+    setPendingSwap(null);
+    if (channel) setSwapping(channel);
+  }, [pendingSwap, channelOptions.options]);
+  useEffect(() => {
+    if ((actionParam !== "channels" && actionParam !== "swap-key") || !loaded) return;
+    if (actionParam === "swap-key") openSwapKey(stationParam, channelParam); else openChannelsOf(stationParam);
+    setParams({ action: null, stationId: null, channelId: null });
   }, [actionParam, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefreshAll = async () => {
@@ -544,7 +559,7 @@ export default function StationsPage() {
       };
     }), Date.now()).map((item) => byId.get(item.id)!);
   })();
-  const holdOrder = editorOpen || menuOpen || issueOpenId != null || !!channelsOf || binding || !!unbinding || !!trendStation || !!archiveTarget || !!purgeTarget;
+  const holdOrder = editorOpen || menuOpen || issueOpenId != null || !!channelsOf || binding || !!unbinding || !!swapping || !!trendStation || !!archiveTarget || !!purgeTarget;
   const rowIds = keepOrder(lastOrder.current, orderedViews.map((v) => v.id), holdOrder);
   lastOrder.current = rowIds;
   const viewById = new Map(orderedViews.map((v) => [v.id, v]));
@@ -586,6 +601,7 @@ export default function StationsPage() {
     // 「去上游资源」：打开这个上游的渠道抽屉，在那里解绑再绑
     const channelsOfStation = href.startsWith("/stations") ? new URL(href, "https://workflow.invalid").searchParams : null;
     if (channelsOfStation?.get("action") === "channels") { openChannelsOf(channelsOfStation.get("stationId")); return; }
+    if (channelsOfStation?.get("action") === "swap-key") { openSwapKey(channelsOfStation.get("stationId"), channelsOfStation.get("channelId")); return; }
     if (!href.startsWith("/stations")) {
       router.push(href);
       return;
@@ -1190,10 +1206,11 @@ export default function StationsPage() {
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} onOpenChange={setEditorOpen} />
-      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); }}
-        onBind={() => setBinding(true)} onUnbind={setUnbinding} />
+      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); setSwapping(null); }}
+        onBind={() => setBinding(true)} onUnbind={setUnbinding} onSwap={setSwapping} />
       {ownStation ? <>
         <BindChannelModal upstream={binding ? channelsOf : null} ownStationId={ownStation.id} options={channelOptions.options} onClose={() => setBinding(false)} onDone={afterChannelChange} />
+        <SwapKeyModal channel={swapping} upstream={channelsOf} ownStationId={ownStation.id} options={channelOptions.options} onClose={() => setSwapping(null)} onDone={afterChannelChange} />
         <UnbindModal channel={unbinding} upstreamName={channelsOf?.name ?? ""} ownStationId={ownStation.id} onClose={() => setUnbinding(null)} onDone={afterChannelChange} />
       </> : null}
       {merge.overlay}
