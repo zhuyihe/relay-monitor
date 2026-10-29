@@ -605,7 +605,8 @@ test("上游列表：测试读取不写库，读成功的那一行在下次刷�
   const table = page.locator(".jy-stations-table");
   const row = table.locator("tbody tr", { hasText: "X 上游" }).first();
   // 读不到余额：下面一行说原因，带「测试读取」
-  await table.locator(".jy-stations-issue").getByRole("button", { name: TEST_READ }).click();
+  await row.getByRole("button", { name: /X 上游：读不到/ }).click();
+  await page.locator(".jy-issue-pop").getByRole("button", { name: TEST_READ }).click();
   await row.getByText("$50.00", { exact: true }).waitFor();
   assert.deepEqual(tests, [{ stationId: "st-x", type: "newapi" }]);
   // 读取时刻还是一小时前的（不拿浏览器的时刻），但显示的是刚读到的余额，这一行不标「数据截至」
@@ -615,6 +616,78 @@ test("上游列表：测试读取不写库，读成功的那一行在下次刷�
   await page.getByRole("button", { name: REFRESH, exact: true }).first().click();
   await row.getByText("$40.00", { exact: true }).waitFor();
   await row.locator("td").nth(1).getByText(/^数据截至 (\d{1,2}月\d{1,2}日 )?\d{1,2}:\d{2}$/).waitFor();
+});
+
+// 读不到余额：名字后面的红色感叹号（行高不变）；「另有 N 件」在列表下面
+async function openIssuePage(t, viewport, { code = "AUTHENTICATION_FAILED" } = {}) {
+  const now = Date.now(), tests = [];
+  const ok = (id, name) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date(now).toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" }, spark: [] });
+  const stations = [ok("a", "主力上游"), { id: "bad", name: "邮箱密码登录", type: "sub2api-password", baseUrl: "https://mail.example.io", monitorEnabled: true,
+    balance: { ok: false, code, error: 'POST /api/v1/auth/login → 401 {"code":"INVALID_CREDENTIALS"}', checkedAt: new Date(now - 60000).toISOString() }, prediction: null, spark: [] }];
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date(now).toISOString() });
+    if (path === "/api/stations/test") { tests.push(route.request().postDataJSON()); return fulfill(route, { ok: true, latencyMs: 12, account: "x", remaining: 50, currency: null }); }
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "sub2api-password", label: "Sub2API 账号（邮箱密码）", needs: ["email", "password"] }, { value: "newapi", label: "New API 账号", needs: ["accessToken", "userId"] }], rules: {}, settings: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [{ id: "c1", kind: "review_conflict", label: "处理重复", stationId: null, ruleId: "r", channelIds: [], href: "/stations?action=conflict&ruleId=r" }] });
+    throw new Error("unexpected API: " + path);
+  }, viewport, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: new Date(now).toISOString() }), "/stations");
+  return { page, tests };
+}
+
+test("上游列表：读不到余额的问题收进名字后面的感叹号——行高不变、悬停一句、点开气泡（原因、数据截至、详细原因、测试读取、更新登录信息）", async (t) => {
+  const { page, tests } = await openIssuePage(t, undefined);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const table = page.locator(".jy-stations-table");
+  const row = table.locator("tbody tr", { hasText: "邮箱密码登录" }).first(), other = table.locator("tbody tr", { hasText: "主力上游" }).first();
+  await row.waitFor();
+  assert.equal(await table.locator(".jy-stations-issue").count(), 0, "不再另起一行写原因");
+  assert.equal(await table.locator("tbody tr").count(), 2, "没有多出来的说明行");
+  const bang = row.getByRole("button", { name: /邮箱密码登录：读不到/ });
+  assert.ok(Math.abs((await row.boundingBox()).height - (await other.boundingBox()).height) < 4, "行高不变");
+  await bang.hover();
+  const tip = page.getByRole("tooltip").getByText(/^读不到：登录信息不对或过期了 · 数据截至/); await tip.waitFor();
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/issue-hover-1440x900.png` });
+  await bang.click();
+  const pop = page.locator(".jy-issue-pop"); await pop.waitFor();
+  assert.match(await pop.locator("b").innerText(), /^读不到：登录信息不对或过期了$/);
+  await pop.getByText(/^数据截至/).waitFor(); await pop.getByText("查看详细原因").waitFor();
+  assert.equal(await pop.getByRole("button", { name: "测试读取" }).isVisible(), true);
+  if (process.env.UI_SHOT_DIR) { await page.mouse.move(700, 600); await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/issue-pop-1440x900.png` }); }
+  await pop.getByRole("button", { name: "测试读取" }).click();
+  await page.waitForFunction(() => !document.querySelector(".jy-issue-pop"), null, { timeout: 5000 }).catch(() => {});
+  assert.deepEqual(tests, [{ stationId: "bad", type: "sub2api-password" }]);
+});
+
+test("上游列表：登录信息、权限、人机验证这类问题的气泡多一个「更新登录信息」，打开编辑抽屉、停在登录那一栏；别的问题没有这个按钮", async (t) => {
+  const { page } = await openIssuePage(t, undefined);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const row = page.locator(".jy-stations-table tbody tr", { hasText: "邮箱密码登录" }).first();
+  await row.getByRole("button", { name: /邮箱密码登录：读不到/ }).click();
+  await page.locator(".jy-issue-pop").getByRole("button", { name: "更新登录信息" }).click();
+  const drawer = page.getByRole("dialog"); await drawer.waitFor();
+  await page.waitForFunction(() => document.activeElement?.id === "password" || document.activeElement?.getAttribute("id")?.endsWith("password"), null, { timeout: 5000 });
+});
+
+test("上游列表：不是登录问题（连不上）的气泡没有「更新登录信息」；「另有 N 件」在列表下面、手机卡片的感叹号也在名字后面", async (t) => {
+  const { page } = await openIssuePage(t, undefined, { code: "UPSTREAM_REQUEST_FAILED" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(".jy-stations-table tbody tr", { hasText: "邮箱密码登录" }).first().getByRole("button", { name: /邮箱密码登录：读不到/ }).click();
+  await page.locator(".jy-issue-pop").waitFor();
+  assert.equal(await page.locator(".jy-issue-pop").getByRole("button", { name: "更新登录信息" }).count(), 0);
+  await page.keyboard.press("Escape");
+  await page.goto(page.url().split("?")[0] + "?filter=attention");
+  const note = page.getByText(/另有 \d+ 件需处理的事不在某一个上游上/);
+  await note.waitFor();
+  const table = await page.locator(".jy-stations-table").boundingBox(), noteBox = await note.boundingBox();
+  assert.ok(noteBox.y >= table.y + table.height - 1, "「另有 N 件」在列表下面");
+  const mobile = await openIssuePage(t, { width: 375, height: 812 });
+  const card = mobile.page.locator(".jy-stations-m li", { hasText: "邮箱密码登录" }).first();
+  await card.getByRole("button", { name: /邮箱密码登录：读不到/ }).click();
+  await mobile.page.locator(".jy-issue-pop").waitFor();
+  assert.equal(await mobile.page.locator(".jy-stations-issue").count(), 0);
+  if (process.env.UI_SHOT_DIR) { await mobile.page.waitForTimeout(500); await mobile.page.screenshot({ path: `${process.env.UI_SHOT_DIR}/issue-pop-375x812.png` }); }
 });
 
 test("上游列表手机卡片：没设置汇率时余额照写「（没设置汇率）」，不让人当成人民币；设了汇率只写金额", async (t) => {

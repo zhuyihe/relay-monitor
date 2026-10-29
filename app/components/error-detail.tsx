@@ -6,14 +6,14 @@ import { Button } from "antd";
 import { describeError } from "../../lib/error-copy.js";
 
 // 界面上的一条报错：text 是归类后的那一句，raw 是原文，只进「查看详细原因」；notice 表示是页面自己的提示，不是接口报错
-export type ErrorNote = { text: string; raw?: unknown; notice?: boolean };
+export type ErrorNote = { text: string; raw?: unknown; notice?: boolean; category?: string };
 // 页面自己的提示也用 throw 传出去：带 notice 的原样显示，不再归类
 export const notice = (text: string) => Object.assign(new Error(text), { notice: true });
 export const noteOf = (err: any): ErrorNote => {
   if (err?.notice) return { text: err.message, notice: true };
-  const { text, raw } = describeError(err);
+  const { text, raw, category } = describeError(err);
   // 原文和归类后的那句一样时（服务端已给出界面上的话），不再放「查看详细原因」
-  return { text, raw: raw && raw !== text ? raw : undefined };
+  return { text, raw: raw && raw !== text ? raw : undefined, category };
 };
 
 export function ErrorDetail({ raw }: { raw?: unknown }) {

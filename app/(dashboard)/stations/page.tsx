@@ -7,7 +7,7 @@ import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } fr
 import type { MouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { App, Button, Dropdown, Grid, Input, Modal, Select, Tooltip } from "antd";
+import { App, Button, Dropdown, Grid, Input, Modal, Popover, Select, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { keepOrder, orderUpstreams } from "../../../lib/upstream-order.js";
@@ -55,6 +55,7 @@ const COLS = 7;
 const REFRESH = workflowActionMeta("refresh").label;
 const DELETE = workflowActionMeta("delete_upstream");
 const TEST_READ = workflowActionMeta("verify_identity").label;
+const UPDATE_LOGIN = workflowActionMeta("update_authorization").label;
 const FIXED_TYPE = UPSTREAM_TYPES.find((t) => t.value === "fixed")?.label || "";
 
 // 状态格里「需处理」和页顶筛选同一个词（ui-copy-spec §5.2）
@@ -224,6 +225,8 @@ export default function StationsPage() {
   // 打开抽屉、小窗口或某一行的「更多」菜单时，列表先不重排（免得点错行），关掉以后再按新顺序排
   const [editorOpen, setEditorOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [issueOpenId, setIssueOpenId] = useState<string | null>(null);
+  const [bangX, setBangX] = useState(0); // 感叹号的横向中心：手机上气泡占满屏宽，箭头要对着它
   const lastOrder = useRef<string[]>([]);
   const [unbinding, setUnbinding] = useState<ChannelOption | null>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
@@ -299,7 +302,7 @@ export default function StationsPage() {
     tz,
   });
 
-  const openEditor = (s: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" }) => drawerRef.current?.open(s, trigger, options);
+  const openEditor = (s: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" | "accessToken" | "apiKey" | "password" }) => drawerRef.current?.open(s, trigger, options);
 
   // /stations?edit=<id>：数据和类型都到齐后打开对应上游的抽屉，然后把参数从地址栏去掉；找不到就静默忽略。
   // edit=new 打开「新增上游」（运营总览的空状态用）
@@ -529,7 +532,7 @@ export default function StationsPage() {
       };
     }), Date.now()).map((item) => byId.get(item.id)!);
   })();
-  const holdOrder = editorOpen || menuOpen || !!channelsOf || binding || !!unbinding || !!trendStation || !!archiveTarget || !!purgeTarget;
+  const holdOrder = editorOpen || menuOpen || issueOpenId != null || !!channelsOf || binding || !!unbinding || !!trendStation || !!archiveTarget || !!purgeTarget;
   const rowIds = keepOrder(lastOrder.current, orderedViews.map((v) => v.id), holdOrder);
   lastOrder.current = rowIds;
   const viewById = new Map(orderedViews.map((v) => [v.id, v]));
@@ -591,6 +594,39 @@ export default function StationsPage() {
   };
 
   // ---- 单元格 --------------------------------------------------------------
+  // 读不到余额的问题收进名字后面的红色感叹号：悬停一句，点开小气泡（第一句是原因或测试读取的结果、数据截至、详细原因、测试读取；
+  // 登录信息、权限、人机验证这三类多一个「更新登录信息」，打开编辑抽屉、停在登录那一栏）。行高不变
+  const loginFieldOf = (type: string) => (type === "sub2api-password" ? "password" : type === "newapi-key" ? "apiKey" : "accessToken") as "password" | "apiKey" | "accessToken";
+  const issueBang = (v: StationView, mobile = false) => {
+    const popKey = `${mobile ? "m" : "t"}:${v.id}`; // 表格和手机卡片各一个，只开被点的那个
+    const issue = v.issue;
+    if (!issue || v.archived) return null;
+    const first = testReadText({ ok: false, reason: issue.text });
+    const asOf = v.checkedAt ? formatAsOf(v.checkedAt, tz) : null;
+    const tip = [first, asOf].filter(Boolean).join(" · ");
+    const needsLogin = ["auth", "permission", "captcha"].includes(String(issue.category));
+    const content = (
+      <div className="jy-issue-pop">
+        <b>{first}</b>
+        {asOf ? <span className="jy-issue-pop-asof">{asOf}</span> : null}
+        <ErrorDetail raw={issue.raw} />
+        <div className="jy-issue-pop-actions">
+          <Button size="small" loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>{TEST_READ}</Button>
+          {needsLogin ? <Button size="small" type="primary" onClick={(e) => { setIssueOpenId(null); openEditor(v.s, e.currentTarget, { focus: loginFieldOf(v.s.type) }); }}>{UPDATE_LOGIN}</Button> : null}
+        </div>
+      </div>
+    );
+    return (
+      <Tooltip title={tip} {...(issueOpenId === popKey ? { open: false } : {})}>
+        <Popover trigger="click" placement="bottomLeft" rootClassName="jy-issue-popover" styles={{ root: { "--jy-bang-x": `${Math.max(12, bangX - 12 - 6)}px` } as React.CSSProperties }} content={content} open={issueOpenId === popKey} onOpenChange={(open) => setIssueOpenId(open ? popKey : null)} arrow>
+          <button type="button" className="jy-issue-bang" aria-label={`${stationDisplayName(v.s)}：${tip}`} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setBangX(r.left + r.width / 2); }}>
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7.2" fill="currentColor" /><rect x="7.1" y="3.6" width="1.8" height="5.8" rx=".9" fill="#fff" /><circle cx="8" cy="11.8" r="1.05" fill="#fff" /></svg>
+          </button>
+        </Popover>
+      </Tooltip>
+    );
+  };
+
   const resourceCell = (v: StationView) => {
     const s = v.s;
     const b = s.balance;
@@ -604,6 +640,7 @@ export default function StationsPage() {
           {!s.isOwn && s.includeInProfit === false ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.notInProfit}</em> : null}
           {s.noRenewal ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.noRenewal}</em> : null}
           {s.demo ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.demo}</em> : null}
+          {issueBang(v)}
         </div>
         {/* 下面一行写地址 · 账号名，放不下的省略、悬停看全；类型名在编辑页和「按类型筛选」里看 */}
         <span title={[s.baseUrl, account].filter(Boolean).join(" · ") || undefined}>
@@ -859,24 +896,6 @@ export default function StationsPage() {
     </Button>
   ));
 
-  const issueBox = (v: StationView) => {
-    const issue = v.issue;
-    if (!issue) return null;
-    return (
-      <div className="jy-stations-issue">
-        <Sym kind="crit" />
-        <div className="jy-stations-issue-body">
-          <b>{testReadText({ ok: false, reason: issue.text })}</b>
-          {v.checkedAt ? <span>{formatAsOf(v.checkedAt, tz)}</span> : null}
-          <ErrorDetail raw={issue.raw} />
-        </div>
-        <Button size="small" icon={<Icon name="test" />} loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>
-          {TEST_READ}
-        </Button>
-      </div>
-    );
-  };
-
   // ---- 列表主体 -------------------------------------------------------------
   const addButton = (
     <Button type="primary" icon={<Icon name="plus" />} disabled={!canAdd} onClick={(e) => openEditor(null, e.currentTarget)}>
@@ -943,10 +962,9 @@ export default function StationsPage() {
             </thead>
             <tbody>
               {rows.map((v) => {
-                const issue = !v.archived && v.issue;
                 return (
                   <Fragment key={v.id}>
-                    <tr className={issue ? "has-issue" : undefined}>
+                    <tr>
                       <td className="jy-stations-pin-l">{resourceCell(v)}</td>
                       <td>{statusCell(v)}</td>
                       <td className="jy-stations-ch">{channelCell(v)}</td>
@@ -960,11 +978,6 @@ export default function StationsPage() {
                         </div>
                       </td>
                     </tr>
-                    {issue ? (
-                      <tr className="jy-stations-issue-row">
-                        <td colSpan={COLS}>{issueBox(v)}</td>
-                      </tr>
-                    ) : null}
                   </Fragment>
                 );
               })}
@@ -992,7 +1005,10 @@ export default function StationsPage() {
             // 不让人当成人民币。小图、刷新、编辑、余额趋势都在「⋯」里，点名称也能编辑
             return (
               <li key={v.id}>
-                <button type="button" className="m-top link" title={name} aria-describedby={EDIT_HINT_ID} onClick={(e) => openEditor(v.s, e.currentTarget)}>{name}</button>
+                <span className="m-name">
+                  <button type="button" className="m-top link" title={name} aria-describedby={EDIT_HINT_ID} onClick={(e) => openEditor(v.s, e.currentTarget)}>{name}</button>
+                  {issueBang(v, true)}
+                </span>
                 <span className="m-end">
                   {label ? <StatusText level={level}>{label}</StatusText> : null}
                   {v.archived ? null : moreButton(v, true)}
@@ -1013,7 +1029,6 @@ export default function StationsPage() {
                     <span className="m-todo">{todo}</span>
                   </div>
                 ) : null}
-                {!v.archived && v.issue ? <div className="jy-stations-m-issue">{issueBox(v)}</div> : null}
                 {v.archived ? (
                   <div className="m-actions">
                     {primaryAction(v)}
@@ -1090,12 +1105,13 @@ export default function StationsPage() {
             {addButton}
           </div>
 
+          <Panel body={false} label={STATION_TABS.list}>{body}</Panel>
+          {/* 「另有 N 件」放在列表下面，当小字，不挤在列表上面 */}
           {filter === "attention" && unowned > 0 ? (
             <p className="jy-caption jy-stations-unowned">
               {COPY.unownedBefore(unowned)}<Link className="jy-link" href="/">{NAV_LABELS.home}</Link>{COPY.unownedAfter}
             </p>
           ) : null}
-          <Panel body={false} label={STATION_TABS.list}>{body}</Panel>
         </div>
       </div>
 
