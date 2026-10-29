@@ -49,7 +49,7 @@ import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBill
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -1048,11 +1048,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function fillMissingDayKeys(rule, today) {
     const segments = await repository.listSegments(rule.id).catch(() => null);
     if (!segments) return false;
-    // 开始日：新策略的绑定取核算起点；老绑定（legacy-v3）没有核算起点，取第一个分段的起点，没有就是建绑定那天
-    const started = reconciliationAccountingStart(rule), firstSegment = segments.reduce((min, segment) => (min == null || segment.effectiveFrom < min ? segment.effectiveFrom : min), null);
-    const createdAt = Date.parse(rule.createdAt);
-    const from = Number.isFinite(started) ? started : Number.isFinite(firstSegment) && firstSegment > 0 ? firstSegment : createdAt;
-    const startDay = Number.isFinite(from) ? dayKeyInTz(from, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
+    // 开始日：新策略的绑定取核算起点；老绑定（legacy-v3）没有核算起点，取第一个分段的起点，没有就是建绑定那天（ruleStartDay）
+    const startDay = await ruleStartDay(rule, today), yesterday = shiftDayLabel(today, -1);
     if (startDay > yesterday) return true;
     const have = await repository.listDayKeys([rule.id], startDay, yesterday).then((all) => all[rule.id] || {}, () => null);
     if (!have) return false;
@@ -1073,8 +1070,32 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return repository.recordDayKeys(rule.id, rows).then(() => true, () => false);
   }
 
-  // 手动选 Key（每日利润页的下拉框）：同一个上游里换一把 Key。和读取服务认出换 Key 同一个算法（applyKeyChange）：换的那天旧、新两把都记，第二天起只用新的；
-  // 换之前先把过去没记录的天补成旧 Key（不然它们会按新 Key 读）。被「Key 没有用量」（CHANNEL_KEY_NO_USAGE）挡住的那几天改按新 Key 算，重新排队结账
+  // 换 Key 时找新 Key 哪天开始用的（D）：从今天往前一天一天查新 Key 在上游的用量，碰到第一个没用量的天就停，最多查 31 天，也不早于这条绑定的开始日；
+  // 查到的最早有用量的那天是 D，一天都没有就是今天。今天本身没用量不算断（可能刚过零点、或上游账单还没到），从昨天接着查。只读上游，一天一个请求
+  const SWAP_LOOKBACK_DAYS = 31;
+  async function findKeyFirstUseDay(rule, upstream, metadata, token, today, startDay) {
+    const used = (stat) => [stat?.amountUsd, stat?.knownAmountUsd, stat?.quotaUnits].some((value) => Number(value) > 0);
+    const readDay = async (day) => {
+      const startMs = dayStartInTz(day, rule.timezone), endMs = Math.min(dayStartInTz(shiftDayLabel(day, 1), rule.timezone), Date.now());
+      if (endMs <= startMs) return false;
+      try { return used(await upstreamWindowFor(upstream, metadata, token, { startMs, endMs, timezone: rule.timezone }, { readOnly: true })); }
+      catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); }
+    };
+    const usedToday = await readDay(today);
+    let first = usedToday ? today : null, checked = 1;
+    for (let day = shiftDayLabel(today, -1); day >= startDay && checked < SWAP_LOOKBACK_DAYS; day = shiftDayLabel(day, -1), checked += 1) {
+      if (!await readDay(day)) break;
+      first = day;
+    }
+    return { fromDay: first ?? today, noRecentUsage: first == null };
+  }
+
+  // 换 Key（每日利润页、上游资源的渠道抽屉）：同一个上游里换一把 Key，一步完成，用户不用知道几点换的。
+  // 和读取服务认出换 Key 同一个算法（applyKeyChange），再加两件事：
+  //   1. 去上游查新 Key 哪天开始有用量（D）；D 那天新旧两把都算，D 之后只算新的（今天也是）；
+  //   2. D 到昨天里已经固定的天，写重结请求重算（和改时间、换 Key 时刻同一套，最远 31 天，更早的不动、返回 tooOld）；
+  //      被 CHANNEL_KEY_NO_USAGE 挡住的天改按新 Key 重新排队结账（新 Key 那天也没用量的，结账时兜底照样会挡，不会把 0 成本固定进账本）。
+  // 换之前先把过去没记录的天补成旧 Key（不然它们会按新 Key 读）。只读上游，不读用户的 New API；只在点的这一下读
   async function changeRuleKeyManual(ruleId, tokenId) {
     const rule = await repository.getRule(ruleId);
     if (!rule || !rule.enabled || rule.archivedAt) throw ruleNotFound();
@@ -1087,22 +1108,50 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!token || token.status !== 1 || !tokenNameIsUnique(metadata, token)) throw codedError("INVALID_REQUEST", "请选一把名字不重复的 Key");
     const identity = { provider: metadata.platform, baseUrl: onboardingBaseUrl(upstream.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) };
     const ref = { upstreamStationId: rule.upstreamStationId, tokenId: token.id, tokenName: token.name };
-    const now = Date.now(), today = dayKeyInTz(now, rule.timezone);
+    const old = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+    const now = Date.now(), today = dayKeyInTz(now, rule.timezone), yesterday = shiftDayLabel(today, -1);
     if (!await fillMissingDayKeys(rule, today)) throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试");
+    const startDay = await ruleStartDay(rule, today);
+    const { fromDay, noRecentUsage } = await findKeyFirstUseDay(rule, upstream, metadata, token, today, startDay);
     const result = await applyKeyChange(rule, ref, { observedAt: now, stationLastSuccessAtMs: now, resources: new Map([[rule.upstreamStationId, { identity, metadata }]]), today });
     if (result.conflict) throw codedError("KEY_ALREADY_BOUND", "这把 Key 已经在别的渠道算利润了");
     if (!result.done) throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试");
-    // 被挡住的几天：Key 集合换成新的一把，状态行标成「原因没了」，下一轮轮询按新 Key 结账固定
-    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
-    if (blocked.length) {
-      await repository.replaceDayKeys(rule.id, blocked.map((state) => state.billDate), blocked.map((state) => ({ billDate: state.billDate, ...ref })));
-      for (const state of blocked) {
-        const window = { preset: "custom", startMs: dayStartInTz(state.billDate, rule.timezone), endMs: dayStartInTz(shiftDayLabel(state.billDate, 1), rule.timezone), timezone: rule.timezone };
-        await repository.recordSettlementState(rule.id, state.billDate, settlementRecheck({ window, state, blocker: null, now }), now).catch(() => {});
+    // D 那天新旧两把都算，D 之后只算新的
+    const days = [];
+    for (let day = fromDay; day <= today; day = shiftDayLabel(day, 1)) days.push(day);
+    await repository.replaceDayKeys(rule.id, days, days.flatMap((billDate) => (billDate === fromDay ? [old, ref] : [ref]).map((key) => ({ billDate, ...key }))));
+    const range = fromDay < today ? { from: fromDay, to: yesterday } : null;
+    // D 到昨天里已经固定（账本里有）的天：写重结请求重算；超过 31 天的不动
+    const recomputed = new Set(), tooOldDays = [];
+    if (range) {
+      const fixed = await repository.listLedgerDayFacts([rule.id], range.from, range.to).catch(() => []);
+      const recent = [];
+      for (const fact of fixed) {
+        const endMs = dayStartInTz(shiftDayLabel(fact.billDate, 1), rule.timezone);
+        if (now - endMs > RESETTLE_MAX_AGE_MS) tooOldDays.push(fact.billDate); else recent.push(fact.billDate);
       }
+      if (recent.length) { await repository.requestResettle(rule.id, recent, { now }); for (const day of recent) recomputed.add(day); }
+    }
+    // 被挡住的几天：Key 集合换成新的一把（D 以后的已经换好），状态行标成「原因没了」，下一轮轮询按新 Key 结账固定
+    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
+    const before = blocked.filter((state) => state.billDate < fromDay);
+    if (before.length) await repository.replaceDayKeys(rule.id, before.map((state) => state.billDate), before.map((state) => ({ billDate: state.billDate, ...ref })));
+    for (const state of blocked) {
+      const window = { preset: "custom", startMs: dayStartInTz(state.billDate, rule.timezone), endMs: dayStartInTz(shiftDayLabel(state.billDate, 1), rule.timezone), timezone: rule.timezone };
+      await repository.recordSettlementState(rule.id, state.billDate, settlementRecheck({ window, state, blocker: null, now }), now).catch(() => {});
+      recomputed.add(state.billDate);
     }
     clearRuleResults(rule.id);
-    return { rekeyedDays: blocked.map((state) => state.billDate).sort() };
+    const tooOld = tooOldDays.length ? { from: tooOldDays.sort()[0], to: tooOldDays.sort().at(-1) } : null;
+    return { rekeyedDays: blocked.map((state) => state.billDate).sort(), fromDay, recomputedDays: recomputed.size, tooOld, noRecentUsage };
+  }
+
+  // 这条绑定从哪天开始算（补每天 Key、找新 Key 第一天有用量都不早于它）：新策略取核算起点，老绑定取第一个分段的起点，没有就是建绑定那天
+  async function ruleStartDay(rule, today) {
+    const segments = await repository.listSegments(rule.id).catch(() => []);
+    const started = reconciliationAccountingStart(rule), firstSegment = segments.reduce((min, segment) => (min == null || segment.effectiveFrom < min ? segment.effectiveFrom : min), null);
+    const from = Number.isFinite(started) ? started : Number.isFinite(firstSegment) && firstSegment > 0 ? firstSegment : Date.parse(rule.createdAt);
+    return Number.isFinite(from) ? dayKeyInTz(from, rule.timezone) : today;
   }
 
   // 渠道换成了同一个上游的另一把 Key：绑定的 Key 改成新的；这几天（上一次读成功那天到今天）Key 集合两把都记上。

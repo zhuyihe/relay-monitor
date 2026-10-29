@@ -616,9 +616,9 @@ test("今天照读到的数算：有收入、Key 零用量，不到 1 小时照�
   assert.equal(litRow.notice.code, "CHANNEL_KEY_IDLE_TODAY");
   assert.equal(litRow.notice.text, "今天有收入，但绑的 Key 一直没用量，可能换了 Key");
   assert.equal(litRow.notice.detail, "今天这个渠道的成本可能少算了。");
-  assert.equal(litRow.notice.action.kind, "open_channels");
-  assert.equal(litRow.notice.action.label, "去上游资源");
-  assert.equal(litRow.notice.action.href, `/stations?action=channels&stationId=${f.supplier.id}`);
+  assert.equal(litRow.notice.action.kind, "go_swap_key");
+  assert.equal(litRow.notice.action.label, "去换 Key");
+  assert.equal(litRow.notice.action.href, `/stations?action=swap-key&stationId=${f.supplier.id}&channelId=1`);
   assert.deepEqual([litRow.counted, litRow.actualCostUsd, lit.pageTotals.actualCostUsd, lit.pageTotals.grossProfitUsd], [true, 0, 0, litRow.incomeUsd], "仍照读到的数算、进合计，今天合计和这一行对得上");
   assert.equal(lit.counts.attentionChannels, 0, "不算进需处理的渠道数");
   const status = lit.rows.length && (await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "evaluate", force: true, origin: "manual" })).results[0].displayStatus;
@@ -661,7 +661,7 @@ test("CHANNEL_KEY_NO_USAGE：标题写是哪天、说明去掉旧说法，按钮
   const issue = reconciliationIssue("CHANNEL_KEY_NO_USAGE");
   assert.equal(issue.title, "「{channel}」{day}有收入，但绑的 Key 这天一点用量都没有");
   assert.equal(issue.detail, "可能渠道换了 Key，这天先不固定。");
-  assert.equal(issue.action, "open_channels");
+  assert.equal(issue.action, "go_swap_key");
   assert.doesNotMatch(JSON.stringify(issue), /选的 Key|选 Key/);
 });
 
@@ -684,9 +684,89 @@ test("多天范围：中间一天 Key 没用量被挡（CHANNEL_KEY_NO_USAGE，�
   assert.equal(row.counted, true, "有算进来的天，这一行就算进来");
   assert.equal(row.excludedDays, 1);
   assert.equal(row.attention.code, "CHANNEL_KEY_NO_USAGE");
-  assert.equal(row.attention.action.kind, "open_channels");
+  assert.equal(row.attention.action.kind, "go_swap_key");
+  assert.equal(row.attention.action.href, `/stations?action=swap-key&stationId=${row.upstream.stationId}&channelId=${row.channels[0].channelId}`);
   const sum = (field) => row.daily.reduce((total, cell) => total + (cell[field] ?? 0), 0);
   assert.ok(Math.abs(sum("incomeUsd") - row.incomeUsd) < 1e-6 && Math.abs(sum("actualCostUsd") - row.actualCostUsd) < 1e-6, "每天加起来 = 这一行；被挡的 10-10 不在里面");
   assert.deepEqual([page.pageTotals.incomeUsd, page.pageTotals.actualCostUsd], [row.incomeUsd, row.actualCostUsd], "整页的数 = 这一行");
   assert.deepEqual([page.counts.countedChannels, page.counts.attentionChannels], [1, 1]);
+});
+
+// ===== 换 Key 一步完成：找新 Key 哪天开始用的（D）=====
+// New API：Key 9 每秒 1 美元、Key 20 每秒 3 美元；收入每个渠道每秒 2 美元
+const swapStatCalls = (token) => globalThis.fetch.mock.calls.map((call) => new URL(String(call.arguments[0])))
+  .filter((url) => url.host === "up.test" && url.pathname === "/api/log/self/stat" && url.searchParams.get("token_name") === token);
+
+test("换 Key 找 D：新 Key 从 10-12 15 点起有用量，查到 10-11 没用量就停；D 那天新旧两把都算、之后只算新的；D 那天已经固定的被重算，更早的不动", async (t) => {
+  const SWITCH = SH("2026-10-12T15:00:00");
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+  const H = 3600, cost = (day) => Number(f.costOn(day).at(-1)?.cost_usd ?? NaN); // 最新一版（重算会写新版）
+  assert.equal(cost("2026-10-12"), 15 * H * 1, "换 Key 当天按旧 Key 固定了，少算了新 Key 那 9 小时");
+  await f.at("2026-10-13T10:00:00");
+  const before = swapStatCalls("Key 20").length;
+  const result = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+  assert.deepEqual([result.fromDay, result.recomputedDays, result.tooOld, result.noRecentUsage], ["2026-10-12", 1, null, false]);
+  assert.equal(swapStatCalls("Key 20").length - before, 3, "今天、昨天有用量，10-11 没用量就停：3 个请求");
+  const rule = (await f.rt.reconciliation.listRules())[0];
+  const keys = (await f.repository.listDayKeys([rule.id], "2026-10-10", "2026-10-13"))[rule.id];
+  assert.deepEqual(Object.fromEntries(Object.entries(keys).map(([day, list]) => [day, list.map((key) => key.tokenId)])), { "2026-10-10": [9], "2026-10-11": [9], "2026-10-12": [9, 20], "2026-10-13": [20] });
+  for (const iso of ["2026-10-13T11:00:00", "2026-10-13T12:00:00", "2026-10-13T23:00:00", "2026-10-14T01:00:00"]) await f.round(iso);
+  assert.equal(cost("2026-10-12"), 15 * H * 1 + 9 * H * 3, "D 那天已经固定的被重算：旧、新两把各整天");
+  assert.equal(cost("2026-10-11"), 24 * H * 1, "D 以前的不动");
+  assert.equal(cost("2026-10-13"), 24 * H * 3, "D 之后只算新的");
+});
+
+test("换 Key 找 D：不早于这条绑定的开始日；最多查 31 天（请求次数有上限）", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity] }, rates: { 9: 1, 20: 3 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.at("2026-10-13T10:00:00");
+  let before = swapStatCalls("Key 20").length;
+  const result = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+  assert.equal(result.fromDay, "2026-10-10", "新 Key 一直有用量，也只查到绑定的开始日");
+  assert.equal(swapStatCalls("Key 20").length - before, 4, "10-13、12、11、10 四天");
+  // 绑得很早：只查 31 天
+  const g = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity] } });
+  await g.at("2026-08-01T10:00:00");
+  await g.profit.selectKey({ ownStationId: g.own.id, channelId: 1, upstreamStationId: g.supplier.id, tokenId: 9 });
+  await g.at("2026-10-13T10:00:00");
+  before = swapStatCalls("Key 20").length;
+  const far = await g.profit.selectKey({ ownStationId: g.own.id, channelId: 1, tokenId: 20 });
+  assert.equal(swapStatCalls("Key 20").length - before, 31, "最多查 31 天");
+  assert.equal(far.fromDay, "2026-09-13");
+});
+
+test("换 Key：被 CHANNEL_KEY_NO_USAGE 挡住的天按新 Key 补上并固定，一起数进 recomputedDays", async (t) => {
+  const SWITCH = SH("2026-10-12T10:00:00");
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SH("2026-10-12T00:00:00")], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+  const rule = (await f.rt.reconciliation.listRules())[0];
+  assert.equal(f.costOn("2026-10-12").length, 0, "10-12 旧 Key 一点用量都没有：被挡住");
+  assert.equal((await f.repository.listSettlementStates([rule.id], { billDates: ["2026-10-12"] }))[0]?.manualReason, "CHANNEL_KEY_NO_USAGE");
+  await f.at("2026-10-13T10:00:00");
+  const result = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+  assert.deepEqual([result.fromDay, result.recomputedDays, result.rekeyedDays], ["2026-10-12", 1, ["2026-10-12"]]);
+  for (const iso of ["2026-10-13T11:00:00", "2026-10-13T12:00:00", "2026-10-13T14:00:00"]) await f.round(iso);
+  assert.equal(Number(f.costOn("2026-10-12")[0]?.cost_usd), 14 * 3600 * 3, "被挡的 10-12 按新 Key 补上、固定");
+});
+
+test("换 Key：新 Key 最近也没用量——从今天算（noRecentUsage），被挡住的天结账时兜底照样会挡，不会把 0 成本固定进账本", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SH("2026-10-12T00:00:00")], 20: [Infinity, Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+  const rule = (await f.rt.reconciliation.listRules())[0];
+  await f.at("2026-10-13T10:00:00");
+  const before = swapStatCalls("Key 20").length;
+  const result = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+  assert.deepEqual([result.fromDay, result.noRecentUsage, result.tooOld], ["2026-10-13", true, null]);
+  assert.equal(swapStatCalls("Key 20").length - before, 2, "今天、昨天都没用量：2 个请求");
+  for (const iso of ["2026-10-13T11:00:00", "2026-10-13T12:00:00", "2026-10-13T14:00:00", "2026-10-13T23:00:00"]) await f.round(iso);
+  assert.equal(f.costOn("2026-10-12").length, 0, "新 Key 那天也没用量：兜底照样挡，账本里没有 0 成本的一行");
+  assert.equal((await f.repository.listSettlementStates([rule.id], { billDates: ["2026-10-12"] }))[0]?.manualReason, "CHANNEL_KEY_NO_USAGE");
 });

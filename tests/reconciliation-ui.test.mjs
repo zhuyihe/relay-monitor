@@ -397,7 +397,7 @@ test("workflow retry destination opens the linked day, expands that row with its
 });
 
 test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感叹号，这一行的数照常算进合计；点开写这句话、说明、按钮「去上游资源」", async (t) => {
-  const notice = { code: "CHANNEL_KEY_IDLE_TODAY", text: "今天有收入，但绑的 Key 一直没用量，可能换了 Key", detail: "今天这个渠道的成本可能少算了。", action: workflowAction("open_channels", { stationId: "upstream-1" }) };
+  const notice = { code: "CHANNEL_KEY_IDLE_TODAY", text: "今天有收入，但绑的 Key 一直没用量，可能换了 Key", detail: "今天这个渠道的成本可能少算了。", action: workflowAction("go_swap_key", { stationId: "upstream-1", channelIds: [1] }) };
   const rows = [{ ...profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), notice }, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
   const { page } = await openDailyPage(t, { rows });
   const rowA = rowOf(page, "Rule A");
@@ -412,7 +412,7 @@ test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感�
 });
 
 test("按天挡：一个渠道中间一天需处理时，这一行照样写算进来那几天的数、名字后面亮感叹号，点开那天写「—」和「需处理」，页顶写几个渠道有几天需处理", async (t) => {
-  const attention = { code: "CHANNEL_KEY_NO_USAGE", title: "「Rule A」10月5日有收入，但绑的 Key 这天一点用量都没有", detail: "可能渠道换了 Key，这天先不固定。", action: workflowAction("open_channels", { stationId: "upstream-1" }), fromDay: "2026-10-05", moreCount: 0 };
+  const attention = { code: "CHANNEL_KEY_NO_USAGE", title: "「Rule A」10月5日有收入，但绑的 Key 这天一点用量都没有", detail: "可能渠道换了 Key，这天先不固定。", action: workflowAction("go_swap_key", { stationId: "upstream-1", channelIds: [1] }), fromDay: "2026-10-05", moreCount: 0 };
   const base = profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 });
   const row = { ...base, attention, excludedDays: 1, daily: base.daily.map((cell) => cell.day === "2026-10-05" ? { ...cell, state: "attention", reason: "CHANNEL_KEY_NO_USAGE", incomeUsd: null, actualCostUsd: null, grossUsd: null } : cell) };
   const { page } = await openDailyPage(t, { rows: [row, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })], pageOf: (body) => profitPage([row, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })], { preset: "7d", customPreset: body.preset }) });
