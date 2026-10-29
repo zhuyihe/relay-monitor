@@ -322,12 +322,14 @@ export default function StationsPage() {
   }, [editParam, loaded, loadingMeta]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // /stations?action=channels&stationId=<id>（运营总览的「去上游资源」）：数据到齐后打开这个上游的渠道抽屉，然后把参数从地址栏去掉
-  const actionParam = params.get("action"), stationParam = params.get("stationId"), channelParam = params.get("channelId");
+  const actionParam = params.get("action");
   // 「去换 Key」：打开这个上游的渠道抽屉，直接弹出这个渠道的「换 Key」小窗口
-  const openSwapKey = (stationId: string | null, channelId: string | null) => {
-    openChannelsOf(stationId);
-    const id = Number(channelId);
-    if (Number.isSafeInteger(id) && id > 0) setPendingSwap(id);
+  // 地址怎么读只有 lib/client.ts 的 readWorkflowDestination 一处（channelId 读成 channelIds:[id]）
+  const openSwapKey = (search: string) => {
+    const destination = readWorkflowDestination(search, "stations");
+    if (!destination || destination.error) return;
+    openChannelsOf(destination.stationId);
+    if (destination.channelIds.length === 1) setPendingSwap(destination.channelIds[0]);
   };
   useEffect(() => {
     if (pendingSwap == null || !channelOptions.options?.ok) return;
@@ -337,7 +339,7 @@ export default function StationsPage() {
   }, [pendingSwap, channelOptions.options]);
   useEffect(() => {
     if ((actionParam !== "channels" && actionParam !== "swap-key") || !loaded) return;
-    if (actionParam === "swap-key") openSwapKey(stationParam, channelParam); else openChannelsOf(stationParam);
+    if (actionParam === "swap-key") openSwapKey(window.location.search); else openChannelsOf(params.get("stationId"));
     setParams({ action: null, stationId: null, channelId: null });
   }, [actionParam, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -601,7 +603,7 @@ export default function StationsPage() {
     // 「去上游资源」：打开这个上游的渠道抽屉，在那里解绑再绑
     const channelsOfStation = href.startsWith("/stations") ? new URL(href, "https://workflow.invalid").searchParams : null;
     if (channelsOfStation?.get("action") === "channels") { openChannelsOf(channelsOfStation.get("stationId")); return; }
-    if (channelsOfStation?.get("action") === "swap-key") { openSwapKey(channelsOfStation.get("stationId"), channelsOfStation.get("channelId")); return; }
+    if (channelsOfStation?.get("action") === "swap-key") { openSwapKey(channelsOfStation.toString()); return; }
     if (!href.startsWith("/stations")) {
       router.push(href);
       return;

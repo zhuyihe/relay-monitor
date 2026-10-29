@@ -2078,7 +2078,10 @@ test("上游资源：换好的提示——后台没带字段只写「已换成 x
 });
 
 test("上游资源：/stations?action=swap-key&stationId=&channelId= 打开这个上游的抽屉、直接弹出这个渠道的「换 Key」小窗口，地址栏的参数去掉", async (t) => {
-  const { page } = await openSwapPage(t, { path: "/stations?action=swap-key&stationId=up1&channelId=2" });
+  // 地址就是每日利润感叹号和需处理里「去换 Key」（go_swap_key）按钮的地址
+  const href = workflowAction("go_swap_key", { stationId: "up1", channelIds: [2] }).href;
+  assert.equal(href, "/stations?action=swap-key&stationId=up1&channelId=2");
+  const { page } = await openSwapPage(t, { path: href });
   const modal = page.getByRole("dialog", { name: "换 Key", exact: true }); await modal.waitFor();
   await modal.getByText("长文本 C · 云帆", { exact: true }).waitFor();
   assert.equal(await modal.locator(".jy-swap-current").innerText(), "oai-03 · 分组 default");
