@@ -54,9 +54,11 @@ function RowBang({ row, popKey, open, onOpenChange, ...props }: { row: ProfitRow
   const note = attention ? [attention.detail, attention.moreCount > 0 ? COPY.attention.more(attention.moreCount) : ""].filter(Boolean).join("。") : notice!.detail;
   const action = attention ? attention.action : notice!.action;
   const retryError = props.retryErrors[row.rowKey];
+  // 需处理（这天不算进来）橙色，提示（照常算进来、只是提醒）蓝色：看问题码是哪一种，不是「有感叹号就不算」
+  const tone = attention ? "warn" : "info";
   return <span className="jy-profit-bang" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-    <IssueBang tone="warn" tip={COPY.table.issueTip(rowName(row), title)} open={open === popKey} onOpenChange={(next) => onOpenChange(next ? popKey : null)}>
-      <IssuePop tone="warn" title={title} note={note} actions={<ActionButton action={action} row={row} onRetry={props.onRetry} onRefresh={props.onRefresh} retrying={props.retryingKeys.has(row.rowKey)} />}>
+    <IssueBang tone={tone} tip={COPY.table.issueTip(rowName(row), title)} open={open === popKey} onOpenChange={(next) => onOpenChange(next ? popKey : null)}>
+      <IssuePop tone={tone} title={title} note={note} actions={<ActionButton action={action} row={row} onRetry={props.onRetry} onRefresh={props.onRefresh} retrying={props.retryingKeys.has(row.rowKey)} />}>
         {retryError ? <Alert type="error" showIcon title={COPY.attention.retryFailed} description={<ErrorDetail raw={noteOf(retryError).raw} />} /> : null}
       </IssuePop>
     </IssueBang>

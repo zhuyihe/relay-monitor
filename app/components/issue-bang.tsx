@@ -6,7 +6,8 @@ import { useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Popover, Tooltip } from "antd";
 
-export type IssueTone = "crit" | "warn";
+// crit 红：读不到余额；warn 橙：需处理（这天不算进来）；info 蓝：提示（照常算进来，只是提醒）
+export type IssueTone = "crit" | "warn" | "info";
 
 export function IssuePop({ tone = "crit", title, note, children, actions }: { tone?: IssueTone; title: string; note?: ReactNode; children?: ReactNode; actions?: ReactNode }) {
   return (

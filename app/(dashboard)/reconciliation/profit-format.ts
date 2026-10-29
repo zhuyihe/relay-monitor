@@ -78,12 +78,13 @@ export function rangeText(page: ProfitPageResponse, ctx: Ctx) {
   return first === last ? day(first) : `${day(first)}–${day(last)}`;
 }
 export const channelCount = (rows: ProfitRow[]) => sum(rows.map((row) => row.channels?.length || 0));
-// 页顶一句后面接的：需处理、没算进来的渠道有几个（多天时写有几天，取这几个渠道里最多的）；没有是空字符串（用语规范 §4）
+// 页顶一句后面接的：需处理、没算进来的渠道有几个（多天时写一共几天，把这些渠道没算进来的天数加起来）；有提示类的（照常算进来、只是成本可能少算了）再接一句，中间用「 · 」隔开；都没有是空字符串（用语规范 §4）
 export function attentionSuffix(page: ProfitPageResponse) {
-  const rows = page.rows.filter((row) => !row.counted && row.attention);
-  if (!rows.length) return "";
-  const channels = channelCount(rows);
-  return isSingleDay(page) ? COPY.caption.attention(channels) : COPY.caption.attentionDays(channels, Math.max(1, ...rows.map((row) => row.excludedDays || 0)));
+  const out = page.rows.filter((row) => !row.counted && row.attention), notices = page.rows.filter((row) => row.notice && !(row.attention && !row.counted));
+  const parts: string[] = [];
+  if (out.length) parts.push(isSingleDay(page) ? COPY.caption.attention(channelCount(out)) : COPY.caption.attentionDays(channelCount(out), Math.max(1, sum(out.map((row) => row.excludedDays || 0)))));
+  if (notices.length) parts.push(COPY.caption.notice(channelCount(notices)));
+  return parts.join(" · ");
 }
 // 页顶一句（设计稿 §2）
 export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {

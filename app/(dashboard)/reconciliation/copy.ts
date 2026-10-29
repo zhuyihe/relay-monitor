@@ -20,7 +20,9 @@ export const COPY = Object.freeze({
   // 页顶一句后面接的：需处理的渠道没算进来（用语规范 §4）；多天时写有几天
   caption: Object.freeze({
     attention: (channels: number) => `其中 ${channels} 个渠道需处理，没算进来`,
-    attentionDays: (channels: number, days: number) => `其中 ${channels} 个渠道有 ${days} 天需处理，没算进来`,
+    attentionDays: (channels: number, days: number) => channels === 1 ? `其中 1 个渠道有 ${days} 天需处理，没算进来` : `其中 ${channels} 个渠道共 ${days} 天需处理，没算进来`,
+    // 提示类的（今天提醒换 Key）：这一行照常算进来，只提醒
+    notice: (channels: number) => `其中 ${channels} 个渠道成本可能少算了`,
   }),
   // 顶上四个数
   summary: Object.freeze({ income: "收入", actual: "上游成本", gross: "毛利", margin: "毛利率" }),

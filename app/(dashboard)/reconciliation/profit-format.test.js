@@ -221,7 +221,14 @@ test("页顶一句：需处理没算进来的渠道接在后面——单天「�
     attention: { code: "OWN_BILLING_UNAVAILABLE", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null } });
   assert.equal(attentionSuffix(page()), "");
   assert.equal(rangeCaption(page({ rows: [out] }), ctx).endsWith(" · 其中 2 个渠道需处理，没算进来"), true, "按渠道数，同一把 Key 的两个渠道算 2 个");
-  assert.equal(rangeCaption(weekPage({ rows: [out] }), ctx), "10月20日–10月26日 · 6 天已固定，今天实时 · 其中 2 个渠道有 3 天需处理，没算进来");
+  assert.equal(rangeCaption(weekPage({ rows: [out] }), ctx), "10月20日–10月26日 · 6 天已固定，今天实时 · 其中 2 个渠道共 3 天需处理，没算进来", "多天：几个渠道写共几天，天数加起来");
+  const one = chan("戊", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, excludedDays: 2, attention: out.attention });
+  assert.equal(attentionSuffix(weekPage({ rows: [one] })), "其中 1 个渠道有 2 天需处理，没算进来");
+  assert.equal(attentionSuffix(weekPage({ rows: [one, { ...one, excludedDays: 3 }] })), "其中 2 个渠道共 5 天需处理，没算进来");
+  // 提示类的（今天提醒换 Key，照常算进来）：再接一句，和需处理的那句用「 · 」隔开
+  const hint = row({ notice: { code: "CHANNEL_KEY_IDLE_TODAY", text: "t", detail: null, action: null } });
+  assert.equal(attentionSuffix(page({ rows: [hint] })), "其中 1 个渠道成本可能少算了");
+  assert.equal(attentionSuffix(page({ rows: [hint, out] })), "其中 2 个渠道需处理，没算进来 · 其中 1 个渠道成本可能少算了");
   assert.equal(rangeCaption(todayPage({ rows: [out] }), ctx), "10月26日 0:00–14:30 · 今天的数还会变，过了零点自动固定 · 其中 2 个渠道需处理，没算进来");
   assert.equal(attentionSuffix(page({ rows: [row({ attention: out.attention })] })), "", "算进来的行（已固定又需处理）不算没算进来");
 });

@@ -407,6 +407,8 @@ test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感�
   const pop = page.locator(".jy-issue-pop"); assert.equal(await pop.locator("b").innerText(), notice.text); await pop.getByText(notice.detail, { exact: true }).waitFor();
   assert.equal(await pop.getByRole("link", { name: /^去上游资源/ }).getAttribute("href"), notice.action.href);
   assert.equal(await page.locator(".jy-profit-caption").getByText(/需处理/).count(), 0, "不是需处理：页顶那句不接「需处理，没算进来」");
+  await page.locator(".jy-profit-caption").getByText(new RegExp(PROFIT_COPY.caption.notice(1) + "$")).waitFor();
+  assert.ok((await bangOf(rowA, "Rule A").getAttribute("class")).includes("is-info"), "提示（照常算进来）是蓝色，需处理（这天不算）是橙色");
 });
 
 test("计算明细：上面收入、上游成本、毛利三节；下面「核对上游扣费」可收起，右边一句结论；对不上的那天默认展开，对得上的收起；没有「改时间」", async (t) => {

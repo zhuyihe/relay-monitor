@@ -749,10 +749,12 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 /* 名字后面的感叹号（app/components/issue-bang.tsx）：行高不变，悬停一句，点开小气泡；上游列表读不到余额用红色，每日利润需处理的渠道用橙色 */
 .jy-issue-bang { flex: none; display: inline-flex; align-items: center; margin-left: 6px; padding: 0; border: 0; background: none; color: var(--jy-crit); cursor: pointer; }
 .jy-issue-bang.is-warn { color: var(--jy-warn-ink); }
+.jy-issue-bang.is-info { color: var(--jy-cobalt); }
 .jy-issue-bang svg { display: block; }
 .jy-issue-pop { display: flex; flex-direction: column; gap: 2px; width: 340px; max-width: calc(100vw - 48px); font-size: 12px; line-height: 20px; color: var(--jy-ink-2); }
 .jy-issue-pop b { font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-crit-ink); }
 .jy-issue-pop.is-warn b { color: var(--jy-warn-ink); }
+.jy-issue-pop.is-info b { color: var(--jy-ink); }
 .jy-issue-pop-asof { color: var(--jy-ink-3); }
 .jy-issue-pop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 /* 手机：气泡占满屏宽（左右各留 12），箭头对着感叹号 */
