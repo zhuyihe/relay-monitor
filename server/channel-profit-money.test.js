@@ -664,3 +664,29 @@ test("CHANNEL_KEY_NO_USAGE：标题写是哪天、说明去掉旧说法，按钮
   assert.equal(issue.action, "open_channels");
   assert.doesNotMatch(JSON.stringify(issue), /选的 Key|选 Key/);
 });
+
+// ===== 多天范围按天算：中间一天被挡，不整行丢掉 =====
+test("多天范围：中间一天 Key 没用量被挡（CHANNEL_KEY_NO_USAGE，状态表里要人处理）——这天不进合计、这天小格写需处理、行上亮需处理，其余已固定的天和今天照算", async (t) => {
+  // Key 9 从 10-11 0 点才有用量：10-10 整天一点用量都没有，收入照有，结账时被挡
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [SH("2026-10-11T00:00:00"), Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-11T01:00:00", "2026-10-12T01:00:00"]) await f.round(iso);
+  assert.equal(f.costOn("2026-10-10").length, 0, "10-10 没结成（被挡）");
+  assert.equal(f.costOn("2026-10-11").length, 1, "10-11 照常固定");
+  await f.at("2026-10-12T09:00:00");
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-12T09:00:00") });
+  const row = page.rows[0];
+  assert.deepEqual(row.daily.map((cell) => [cell.day, cell.state]), [["2026-10-10", "attention"], ["2026-10-11", "fixed"], ["2026-10-12", "today"]]);
+  assert.deepEqual([row.daily[0].incomeUsd, row.daily[0].actualCostUsd, row.daily[0].grossUsd], [null, null, null], "被挡的天写「—」，不当 0");
+  const booked = f.costOn("2026-10-11")[0];
+  assert.equal(row.daily[1].incomeUsd, Number(booked.revenue_usd)); assert.equal(row.daily[1].actualCostUsd, Number(booked.cost_usd));
+  assert.equal(row.counted, true, "有算进来的天，这一行就算进来");
+  assert.equal(row.excludedDays, 1);
+  assert.equal(row.attention.code, "CHANNEL_KEY_NO_USAGE");
+  assert.equal(row.attention.action.kind, "open_channels");
+  const sum = (field) => row.daily.reduce((total, cell) => total + (cell[field] ?? 0), 0);
+  assert.ok(Math.abs(sum("incomeUsd") - row.incomeUsd) < 1e-6 && Math.abs(sum("actualCostUsd") - row.actualCostUsd) < 1e-6, "每天加起来 = 这一行；被挡的 10-10 不在里面");
+  assert.deepEqual([page.pageTotals.incomeUsd, page.pageTotals.actualCostUsd], [row.incomeUsd, row.actualCostUsd], "整页的数 = 这一行");
+  assert.deepEqual([page.counts.countedChannels, page.counts.attentionChannels], [1, 1]);
+});
