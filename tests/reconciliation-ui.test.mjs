@@ -396,8 +396,8 @@ test("workflow retry destination opens the linked day, expands that row with its
   assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"], observe: true }]); assert.equal(profitReads.length, 2);
 });
 
-test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感叹号，这一行的数照常算进合计；点开写这句话、说明、按钮「去上游资源」", async (t) => {
-  const notice = { code: "CHANNEL_KEY_IDLE_TODAY", text: "今天有收入，但绑的 Key 一直没用量，可能换了 Key", detail: "今天这个渠道的成本可能少算了。", action: workflowAction("open_channels", { stationId: "upstream-1" }) };
+test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感叹号，这一行的数照常算进合计；点开写这句话、说明、按钮「去换 Key」", async (t) => {
+  const notice = { code: "CHANNEL_KEY_IDLE_TODAY", text: "今天有收入，但绑的 Key 一直没用量，可能换了 Key", detail: "今天这个渠道的成本可能少算了。", action: workflowAction("go_swap_key", { stationId: "upstream-1", channelIds: [1] }) };
   const rows = [{ ...profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), notice }, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
   const { page } = await openDailyPage(t, { rows });
   const rowA = rowOf(page, "Rule A");
@@ -405,14 +405,14 @@ test("提示类的感叹号（今天提醒换 Key）：渠道名后面一个感�
   assert.equal(await bangOf(rowOf(page, "Rule B"), "Rule B").count(), 0);
   await bangOf(rowA, "Rule A").click();
   const pop = page.locator(".jy-issue-pop"); assert.equal(await pop.locator("b").innerText(), notice.text); await pop.getByText(notice.detail, { exact: true }).waitFor();
-  assert.equal(await pop.getByRole("link", { name: /^去上游资源/ }).getAttribute("href"), notice.action.href);
+  assert.equal(await pop.getByRole("link", { name: /^去换 Key/ }).getAttribute("href"), notice.action.href);
   assert.equal(await page.locator(".jy-profit-caption").getByText(/需处理/).count(), 0, "不是需处理：页顶那句不接「需处理，没算进来」");
   await page.locator(".jy-profit-caption").getByText(new RegExp(PROFIT_COPY.caption.notice(1) + "$")).waitFor();
   assert.ok((await bangOf(rowA, "Rule A").getAttribute("class")).includes("is-info"), "提示（照常算进来）是蓝色，需处理（这天不算）是橙色");
 });
 
 test("按天挡：一个渠道中间一天需处理时，这一行照样写算进来那几天的数、名字后面亮感叹号，点开那天写「—」和「需处理」，页顶写几个渠道有几天需处理", async (t) => {
-  const attention = { code: "CHANNEL_KEY_NO_USAGE", title: "「Rule A」10月5日有收入，但绑的 Key 这天一点用量都没有", detail: "可能渠道换了 Key，这天先不固定。", action: workflowAction("open_channels", { stationId: "upstream-1" }), fromDay: "2026-10-05", moreCount: 0 };
+  const attention = { code: "CHANNEL_KEY_NO_USAGE", title: "「Rule A」10月5日有收入，但绑的 Key 这天一点用量都没有", detail: "可能渠道换了 Key，这天先不固定。", action: workflowAction("go_swap_key", { stationId: "upstream-1", channelIds: [1] }), fromDay: "2026-10-05", moreCount: 0 };
   const base = profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 });
   const row = { ...base, attention, excludedDays: 1, daily: base.daily.map((cell) => cell.day === "2026-10-05" ? { ...cell, state: "attention", reason: "CHANNEL_KEY_NO_USAGE", incomeUsd: null, actualCostUsd: null, grossUsd: null } : cell) };
   const { page } = await openDailyPage(t, { rows: [row, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })], pageOf: (body) => profitPage([row, profitRow("rule-2", "Rule B", { income: 5, cost: 1 })], { preset: "7d", customPreset: body.preset }) });
@@ -421,7 +421,7 @@ test("按天挡：一个渠道中间一天需处理时，这一行照样写算�
   await page.locator(".jy-profit-caption").getByText(PROFIT_COPY.caption.attentionDays(1, 1), { exact: false }).waitFor();
   const rowA = rowOf(page, "Rule A");
   await rowA.getByText("$1.50", { exact: true }).waitFor(); assert.equal(await rowA.locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 0, "这一行有算进来的数，不写「—」");
-  await bangOf(rowA, "Rule A").click(); await page.locator(".jy-issue-pop").getByRole("link", { name: /^去上游资源/ }).waitFor(); await page.locator(".jy-profit-caption").click(); await page.locator(".jy-issue-pop").waitFor({ state: "hidden" }); await page.waitForTimeout(400);
+  await bangOf(rowA, "Rule A").click(); await page.locator(".jy-issue-pop").getByRole("link", { name: /^去换 Key/ }).waitFor(); await page.locator(".jy-profit-caption").click(); await page.locator(".jy-issue-pop").waitFor({ state: "hidden" }); await page.waitForTimeout(400);
   await rowA.locator(".jy-profit-row__toggle").click();
   const blocked = page.locator('.jy-profit-days tr[data-day="2026-10-05"]');
   assert.deepEqual((await blocked.locator("td").allInnerTexts()).map((text) => text.trim()).slice(0, 6), ["10月5日 周一", EMPTY, EMPTY, EMPTY, EMPTY, "需处理"]);
