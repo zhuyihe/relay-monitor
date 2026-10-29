@@ -225,6 +225,10 @@ test("页顶一句：需处理没算进来的渠道接在后面——单天「�
   const one = chan("戊", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, excludedDays: 2, attention: out.attention });
   assert.equal(attentionSuffix(weekPage({ rows: [one] })), "其中 1 个渠道有 2 天需处理，没算进来");
   assert.equal(attentionSuffix(weekPage({ rows: [one, { ...one, excludedDays: 3 }] })), "其中 2 个渠道共 5 天需处理，没算进来");
+  // 算进来的行里有几天被挡（按天挡）：照样数这几天；没被挡的（已固定又需处理那类）不数
+  const partial = chan("己", 10, 4, { excludedDays: 1, attention: out.attention });
+  assert.equal(attentionSuffix(weekPage({ rows: [partial] })), "其中 1 个渠道有 1 天需处理，没算进来");
+  assert.equal(attentionSuffix(weekPage({ rows: [chan("庚", 10, 4, { excludedDays: 0, attention: out.attention })] })), "", "算进来、没有天被挡：不数");
   // 提示类的（今天提醒换 Key，照常算进来）：再接一句，和需处理的那句用「 · 」隔开
   const hint = row({ notice: { code: "CHANNEL_KEY_IDLE_TODAY", text: "t", detail: null, action: null } });
   assert.equal(attentionSuffix(page({ rows: [hint] })), "其中 1 个渠道成本可能少算了");

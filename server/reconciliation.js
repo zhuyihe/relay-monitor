@@ -653,6 +653,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //     RESETTLE_SHRUNK、RESETTLE_TOO_OLD 的天账本里有固定的数，多天合计照取账本（和单天一致）；
   //   后台结账（refreshDue）照旧读上游，那是固定账本用的，不算实时。
   // 每条绑定的结果以最后一天的现读结果为底（状态、倍率、分组），数换成逐天相加的和；窗口换成这条绑定整个范围的窗口，同一页各行的窗口一致。
+  // 这一天算不了、要么永远不固定、要么在等人处理（状态表的原因码）：这天不进合计，页面按天标「需处理」。
+  // 已固定、又因为重算的事需处理的三个码照算（账本里有这天的数），不在这里
+  const HELD_RESETTLE_REASONS = new Set(["RESETTLE_SHRUNK", "RESETTLE_TOO_OLD", "RESETTLE_NOT_DONE"]);
+  const dayBlocked = (state) => state?.manualReason != null && (reasonKindOf(state.manualReason) === "sticky" || (reasonKindOf(state.manualReason) === "manual" && !HELD_RESETTLE_REASONS.has(state.manualReason)));
   const moneyOfResult = (result) => {
     const income = Number(result.downstream?.knownAmountUsd ?? result.downstream?.amountUsd);
     const upstream = result.upstream || {};
@@ -675,7 +679,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     const sticky = new Map();
     for (const state of await repository.listSettlementStates(ruleIds, { billDates: per.flatMap((item) => item.labels) }).catch(() => [])) {
-      if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
+      if (dayBlocked(state)) {
         if (!sticky.has(state.ruleId)) sticky.set(state.ruleId, new Map());
         sticky.get(state.ruleId).set(state.billDate, state.manualReason);
       }
@@ -754,9 +758,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         income += money.income; cost += money.cost; counted += 1;
       }
       const addKeys = (object, keys, value) => { const next = { ...object }; for (const key of keys) if (key in next) next[key] = value; return next; };
-      const merged = !countsInSummary(skeleton) ? { ...skeleton, window: w }
-        : { ...skeleton, window: w, downstream: addKeys(skeleton.downstream, ["amountUsd", "knownAmountUsd"], income), upstream: addKeys(skeleton.upstream, ["amountUsd", "knownAmountUsd", "countedAmountUsd"], cost),
-            calculation: addKeys(skeleton.calculation, ["profitUsd"], income - cost) };
+      // 底（今天的现读，没有今天就是最后一个已固定的日子）需处理时，这一行不整行丢掉：已固定那几天的和照样返回，带上算进来的天数（countedDays），
+      // 页面按天算（底的需处理留在 displayStatus 里，亮感叹号）；一天都没算进来时还是底本身
+      const merged = countsInSummary(skeleton)
+        ? { ...skeleton, window: w, downstream: addKeys(skeleton.downstream, ["amountUsd", "knownAmountUsd"], income), upstream: addKeys(skeleton.upstream, ["amountUsd", "knownAmountUsd", "countedAmountUsd"], cost),
+            calculation: addKeys(skeleton.calculation, ["profitUsd"], income - cost) }
+        : counted > 0
+          ? { ...skeleton, window: w, countedDays: counted, downstream: { ...skeleton.downstream, amountUsd: income, knownAmountUsd: income }, upstream: { ...skeleton.upstream, amountUsd: cost, knownAmountUsd: cost, countedAmountUsd: cost },
+              calculation: { ...skeleton.calculation, profitUsd: income - cost } }
+          : { ...skeleton, window: w };
       rows.push(merged);
     }
     return { response, results: rows, stickyDays: sticky, notCounted };
@@ -3787,7 +3797,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const stickyDays = new Map();
       if (labels.length && results.length) {
         const states = await repository.listSettlementStates(results.map((row) => row.rule.id), { billDates: labels }).catch(() => []);
-        for (const state of states) if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
+        for (const state of states) if (dayBlocked(state)) {
           if (!stickyDays.has(state.ruleId)) stickyDays.set(state.ruleId, new Map());
           stickyDays.get(state.ruleId).set(state.billDate, state.manualReason);
         }
