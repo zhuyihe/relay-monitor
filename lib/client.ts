@@ -123,6 +123,8 @@ export type ProfitRow = {
   startedOn: string | null; startedAt: number | null; counted: boolean;
   incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
   gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };
+  // 提示类的感叹号（今天提醒换 Key）：这一行照读到的数算、进合计，不是需处理
+  notice: { code: string; text: string; detail: string | null; action: WorkflowAction | null } | null;
   attention: { code: string | null; title: string | null; detail: string | null; action: WorkflowAction | null; fromDay: string | null; moreCount: number;
     // 这天重算的数比原来少了一半多、没换掉（RESETTLE_SHRUNK）：点「重新读取」先弹确认框用这几个数，没有就是 null（C3，resettleShrunkConfirm）
     shrunk: { side: "revenue" | "cost" | "both"; before: { revenueUsd: number | null; costUsd: number | null }; after: { revenueUsd: number | null; costUsd: number | null } } | null } | null;
@@ -161,7 +163,7 @@ export type ProfitDetailResponse = {
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）
   id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict"
-    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "fix_agent_url" | "fix_agent_token" | "choose_key" | "add_upstream" | "recheck_consume_log";
+    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "fix_agent_url" | "fix_agent_token" | "open_channels" | "add_upstream" | "recheck_consume_log";
   label: string; title?: string; detail?: string; code?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string | null;
 };
@@ -186,7 +188,7 @@ export function readWorkflowDestination(search: string, page: "stations" | "reco
   const params = new URLSearchParams(search), action = params.get("action") || "inspect";
   if (!params.has("action") && !params.has("stationId") && !params.has("accountKey")) return null;
   const result: WorkflowDestination = { action, ruleId: params.get("ruleId"), stationId: params.get("stationId"), accountKey: params.get("accountKey"), ownStationId: params.get("ownStationId"), channelIds: [], window: null, error: "" };
-  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "channels", "inspect", "scope", "conflict"] : ["retry", "choose-key", "conflict", "scope"];
+  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "channels", "inspect", "scope", "conflict"] : ["retry", "conflict", "scope"];
   if (!allowed.includes(action)) result.error = DESTINATION_EXPIRED;
   else if (page === "stations" && ["scope", "conflict"].includes(action) && !result.ruleId) result.error = DESTINATION_EXPIRED;
   const channelIds = params.get("channelIds");

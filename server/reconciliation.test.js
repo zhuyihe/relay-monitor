@@ -5595,7 +5595,7 @@ test("已固定的那天按固定时的结论：之后把 Key 用途改成「不
   assert.equal(page.coverage.channels.find((channel) => channel.channelId === 2).status, "accounted", "渠道也算已算进利润");
 });
 
-test("汇总和渠道那句同一个判断：今天有收入、上游用量还是 0 的绑定，汇总不加，渠道也不算已算进利润，旁边那句说它还在读取", async (t) => {
+test("汇总和渠道那句同一个判断：今天照读到的数算——有收入、上游用量还是 0 的绑定，今天也算进汇总，渠道也算已算进利润，没有「还在读取」", async (t) => {
   const f = await completedDayFixture(t, { now: "2026-10-09T02:00:00Z" }); // 上海 10:00
   const prev = globalThis.fetch; // fixture 已经替换过的 fetch：没拦下的请求都交回去
   t.mock.method(globalThis, "fetch", async (input, init) => {
@@ -5608,11 +5608,10 @@ test("汇总和渠道那句同一个判断：今天有收入、上游用量还�
   const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: accountUsageStub({ upstream: 5 }).stationUsageCost });
   const r = await module.queryRules({ preset: "today" }, { accountUsage: true });
   const two = r.results.find((row) => row.rule.id === "rr_two");
-  assert.deepEqual([two.displayStatus.state, two.health.code, two.billingTimezone.state, two.calculation.profitUsd], ["live", "UPSTREAM_EMPTY_WITH_SALES", "verified", null], "前提：还在读取，毛利算不出来");
+  assert.deepEqual([two.displayStatus.state, two.health.code, two.calculation.profitUsd, two.calculation.marginRate], ["live", "READY", 2.5, 1], "今天读到什么算什么：成本 0，毛利 = 收入");
   const { display, attentionRuleIds, readingRuleIds } = r.commonSummary.totals;
-  assert.deepEqual([display.knownIncome, display.knownCost, display.confirmedProfit, attentionRuleIds, readingRuleIds], [5, 2, 3, [], ["rr_two"]]);
-  assert.equal(reconciliationCoverageText(r.commonSummary.coverage), "10 个渠道里 2 个已算进利润", "汇总没加的，渠道也不算已算进利润");
-  assert.equal(reconciliationNotCountedText(r.commonSummary.totals, r.results[0].requestedWindow, Date.now()), "其中 10月9日 有 1 条绑定还在读取，没算进来。");
+  assert.deepEqual([display.knownIncome, display.knownCost, display.confirmedProfit, attentionRuleIds, readingRuleIds], [7.5, 2, 5.5, [], []]);
+  assert.equal(reconciliationCoverageText(r.commonSummary.coverage), "10 个渠道里 3 个已算进利润");
   // 没算进利润的上游成本：扣费 $5，其中算进利润 $2，没算进 $3
   assert.deepEqual([r.unaccountedUpstream.accounts[0].accountedUsd, r.unaccountedUpstream.accounts[0].unaccountedUsd], [2, 3]);
 });

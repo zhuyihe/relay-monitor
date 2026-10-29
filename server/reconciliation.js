@@ -1030,6 +1030,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { keyIssues, keyAgentDown, rules: applied ? await repository.listRules().catch(() => rules) : rules };
   }
 
+  // 今天「有收入、Key 一点用量都没有」要连着多久才提醒换 Key（防上游账单晚到误报）
+  const KEY_IDLE_TODAY_MS = 60 * 60 * 1000;
+
   // 每天都有 Key 记录：从开始算那天到昨天，还没记录的天补一行，用这条绑定现在配的那把 Key（装读取服务之前、手动选 Key 之前结账用的就是它）；
   // 最多补最近 800 天（超出的丢最老的）。前提：过去的天用的都是绑定现在配的这把 Key。返回 false 是没写成
   async function fillMissingDayKeys(rule, today) {
@@ -2694,7 +2697,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;
         if (!upstreamUnavailable && !downstreamUnavailable && upstreamUsd <= 0 && downstreamUsd > 0) {
-          segmentIssues.push(upstreamSide({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: issueText("UPSTREAM_EMPTY_WITH_SALES"), observedAt: Date.now() }));
+          // 今天（实时）照读到的数算、不加提醒（上游账单晚到几分钟很常见；满 1 小时才提示「可能换了 Key」，见下面 CHANNEL_KEY_IDLE_TODAY）；
+          // 过去的天、别的窗口照旧：这是「用量还没到」的读取类问题，不算毛利
+          if (window.preset !== "today") segmentIssues.push(upstreamSide({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: issueText("UPSTREAM_EMPTY_WITH_SALES"), observedAt: Date.now() }));
           // 渠道有收入而 Key 用量为 0：多半是换了 Key，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
@@ -2774,6 +2779,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           share: completeDownstream && complete ? (downstreamUnits > 0 ? quotaUnits / downstreamUnits : 0) : null,
         };
       });
+      // 今天就提醒换 Key（CHANNEL_KEY_IDLE_TODAY，提示类，只亮感叹号：这一行照读到的数算、进今天的合计，不藏）。条件和结账时的 CHANNEL_KEY_NO_USAGE 一样，
+      // 只看今天、用今天已经读到的收入和 Key 用量，不另读：没装读取服务、不是固定成本、今天渠道有收入、绑的 Key 今天上游成本是 0。
+      // 上游账单可能晚到几分钟，所以要这个情况连着满 1 小时才提示（从这个进程第一次看到起算，重启重新计时）；Key 有了用量、收入没了、
+      // 解绑再绑（规则换了），下一次实时读自己消失
+      if (window.preset === "today" && !settle && !probe) {
+        const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own);
+        const tracker = (rt._keyIdleSince ||= new Map()), seen = tracker.get(rule.id), dayKey = dayKeyInTz(Date.now(), rule.timezone);
+        if (!idleNow) tracker.delete(rule.id);
+        else {
+          if (!seen || seen.day !== dayKey) tracker.set(rule.id, { day: dayKey, at: Date.now() });
+          if (Date.now() - (tracker.get(rule.id).at) >= KEY_IDLE_TODAY_MS) {
+            issues.push({ code: "CHANNEL_KEY_IDLE_TODAY", scope: "rule", channelId: rule.channels?.[0]?.channelId ?? null, detail: issueText("CHANNEL_KEY_IDLE_TODAY"), observedAt: Date.now() });
+          }
+        }
+      }
       const resultHealth = healthWithIssues(issues);
       // 按 Key 整体取数的关联在核算起点之前没有成本和收入：裁切后的取数窗口如实覆盖了整个请求窗口。
       const sideWindow = (side) => {
