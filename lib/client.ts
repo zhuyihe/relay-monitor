@@ -118,7 +118,8 @@ export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" |
 export type ProfitKeyRow = {
   tokenId: number; name: string;
   upstream: { stationId: string; name: string | null; provider: "newapi" | "sub2api" | null };
-  state: "active" | "swapped"; firstDay: string; lastDay: string; days: number;
+  // active 在绑的渠道现在用的那把；unbound 已解绑的渠道最后用的那把（不标标签）；swapped 已换掉的
+  state: "active" | "swapped" | "unbound"; firstDay: string; lastDay: string; days: number;
   // 倍率：New API 是分组倍率，Sub2API 是 实际扣除 ÷ 标准计费；读不到是 null。rawUsd 原价用量
   ratio: number | null; ratioKind: "group" | "actual_over_standard";
   costUsd: number | null; rawUsd: number | null; incomeUsd: number | null; incomeBasis: "single" | "raw" | "cost" | null;
