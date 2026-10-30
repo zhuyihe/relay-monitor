@@ -1235,7 +1235,7 @@ for (const upstreamType of ["newapi", "sub2api"]) {
       const keys = (await f.repository.listDayKeys([two.ruleId], "2026-10-21", "2026-10-24"))[two.ruleId];
       assert.deepEqual(["2026-10-21", "2026-10-22", "2026-10-23"].map((day) => keys[day].map((key) => [key.tokenId, key.yielded === true])), [[[9, true]], [[9, true]], [[9, true]]], "那三天改成新 Key，让给渠道 1");
       for (const iso of ["2026-10-24T11:00:00", "2026-10-24T12:00:00", "2026-10-25T01:00:00", "2026-10-25T09:00:00"]) await f.round(iso);
-      assert.deepEqual((await blockedDays()).filter((day) => day <= "2026-10-23"), [], "解开了，不再需处理");
+      assert.deepEqual((await blockedDays()), [], "整个流程里没有被挡的天（包括换 Key 当天）");
       const D = 24 * 3600;
       const row = (day, ruleId) => f.costOn(`2026-10-${day}`).filter((item) => item.rule_id === ruleId).sort((x, y) => y.revision - x.revision)[0];
       for (const day of ["21", "22", "23"]) {
@@ -1254,7 +1254,7 @@ for (const upstreamType of ["newapi", "sub2api"]) {
       const written = f.repository.tables.ledger.length;
       await f.rt.reconciliation.queryRules({ ruleIds: [two.ruleId], preset: "custom", startMs: SH("2026-10-22T00:00:00"), endMs: SH("2026-10-23T00:00:00") }, { mode: "observe", force: true, origin: "manual" });
       assert.equal(f.repository.tables.ledger.length, written, "重新读取：数一样，不写新版");
-      assert.deepEqual((await blockedDays()).filter((day) => day <= "2026-10-23"), []);
+      assert.deepEqual(await blockedDays(), []);
     });
   }
 }
@@ -1272,4 +1272,72 @@ test("计算明细：这个功能以前固定的日子（没有 Key 行）、固
   const detail = await f.rt.reconciliation.profitDetail({ ruleIds: [bound.ruleId], day: "2026-10-10" });
   assert.deepEqual([detail.keys.length, detail.keys[0].tokenId, detail.keys[0].costUsd, detail.split.basis], [1, 9, 0, "single"]);
   assert.equal(detail.keys[0].incomeUsd, detail.income.usd);
+});
+
+// 让出去的 Key 不能两边都不算：渠道 1 停掉、Key 9 给渠道 2（渠道 2 那几天让出 Key 9）以后，渠道 1 重新打开、换成它从 10-21 起真正在用的 Key 11——
+// 渠道 1 那几天原来的 Key 9 留着，和 Key 11 一起记，Key 9 只算一次，Key 11 也算进来
+for (const upstreamType of ["newapi", "sub2api"]) {
+  for (const [rate9, rate11] of [[1, 5], [5, 1]]) {
+    test(`重新打开并换成真正在用的 Key：被渠道 2 让出的那几天，原来的 Key 9 在渠道 1 上留着，每把 Key 只算一次（${upstreamType}，Key 9 ${rate9} 倍、Key 11 ${rate11} 倍）`, async (t) => {
+      const f = await setup(t, { upstreamType, keys: [7, 9, 11], channelKey: {}, noAgent: true, windows: { 7: [-Infinity, SH("2026-10-21T00:00:00")], 9: [-Infinity, Infinity], 11: [SH("2026-10-21T00:00:00"), Infinity] }, rates: { 7: 2, 9: rate9, 11: rate11 } });
+      await f.at("2026-10-18T10:00:00");
+      const one = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+      await f.at("2026-10-18T10:01:00");
+      const two = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier.id, tokenId: 7 });
+      for (const day of ["18", "19", "20", "21", "22", "23"]) { await f.round(`2026-10-${day}T23:00:00`); await f.round(`2026-10-${String(Number(day) + 1)}T01:00:00`); }
+      await f.at("2026-10-24T10:00:00");
+      await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+      await f.at("2026-10-24T10:30:00");
+      await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, tokenId: 9 });
+      for (const iso of ["2026-10-24T11:00:00", "2026-10-25T01:00:00"]) await f.round(iso);
+      await f.at("2026-10-25T10:00:00");
+      const back = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 11 });
+      assert.deepEqual([back.reopened, back.fromDay], [true, "2026-10-21"]);
+      for (const iso of ["2026-10-25T11:00:00", "2026-10-25T12:00:00", "2026-10-25T13:00:00", "2026-10-26T01:00:00", "2026-10-26T09:00:00"]) await f.round(iso);
+      const D = 24 * 3600;
+      const row = (day, ruleId) => f.costOn(`2026-10-${day}`).filter((item) => item.rule_id === ruleId).sort((x, y) => y.revision - x.revision)[0];
+      for (const day of ["21", "22", "23"]) {
+        const start = SH(`2026-10-${day}T00:00:00`), end = start + DAY * 1000;
+        assert.equal(Number(row(day, one.ruleId).cost_usd), f.used(9, start, end) + f.used(11, start, end), `10-${day} 渠道 1：Key 9 留着、Key 11 也算进来`);
+        assert.equal(Number(row(day, two.ruleId).cost_usd), 0, `10-${day} 渠道 2：Key 9 让出去`);
+        assert.equal(Number(row(day, one.ruleId).cost_usd) + Number(row(day, two.ruleId).cost_usd), f.used(7, start, end) + f.used(9, start, end) + f.used(11, start, end), `10-${day} 每把 Key 的用量只算一次，合计等于真值`);
+      }
+      assert.equal((await f.repository.listSettlementStates([one.ruleId, two.ruleId])).filter((state) => state.manualReason).length, 0, "没有需处理的，也没有被「少一半以上」挡住的");
+    });
+  }
+}
+
+// 让出去的 Key 不算「在用」：渠道 1 那几天算的 Key 9，被后绑的渠道 2 让出之后再重结，不会被渠道 2 让出的记录抢走
+test("对方让出去的 Key 不算它在用：渠道 2（后绑）让出的那几天，渠道 1 重结还是按 Key 9 算，不被抢走", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [7, 9], channelKey: {}, noAgent: true, windows: { 7: [-Infinity, SH("2026-10-21T00:00:00")], 9: [-Infinity, Infinity] }, rates: { 7: 3, 9: 1 } });
+  await f.at("2026-10-18T10:00:00");
+  const one = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.at("2026-10-18T10:01:00");
+  const two = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier.id, tokenId: 7 });
+  for (const day of ["18", "19", "20", "21", "22", "23"]) { await f.round(`2026-10-${day}T23:00:00`); await f.round(`2026-10-${String(Number(day) + 1)}T01:00:00`); }
+  await f.at("2026-10-24T10:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-24T10:30:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, tokenId: 9 });
+  for (const iso of ["2026-10-24T11:00:00", "2026-10-25T01:00:00"]) await f.round(iso);
+  await f.repository.requestResettle(one.ruleId, ["2026-10-22"], { now: f.state.now });
+  for (const iso of ["2026-10-25T02:00:00", "2026-10-25T03:00:00"]) await f.round(iso);
+  const latest = f.costOn("2026-10-22").filter((item) => item.rule_id === one.ruleId).sort((x, y) => y.revision - x.revision)[0];
+  assert.equal(Number(latest.cost_usd), 24 * 3600, "渠道 1 重结以后 10-22 还是 Key 9 整天");
+  assert.equal((await f.repository.listSettlementStates([one.ruleId])).filter((state) => state.manualReason).length, 0, "没有被「少一半以上」挡住");
+});
+
+// 往前找新 Key 第一次有用量的那天：别的绑定让出去的 Key 不算它在用（直接写让出的记录来验证这一条判断）
+test("往前找新 Key 第一次有用量的那天：别的绑定让出去的 Key 不算它在用，不在那里停", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20, 30], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity], 30: [-Infinity, Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  const three = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 3, upstreamStationId: f.supplier.id, tokenId: 20 });
+  const two = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier.id, tokenId: 30 });
+  // 渠道 2 在 10-18 到 10-20 把 Key 9 让出去了（直接写记录）；Key 9 在这几天没有别的绑定记着
+  const station = f.supplier.id;
+  await f.repository.replaceDayKeys(two.ruleId, ["2026-10-18", "2026-10-19", "2026-10-20"], ["2026-10-18", "2026-10-19", "2026-10-20"].map((billDate) => ({ billDate, upstreamStationId: station, tokenId: 9, tokenName: "Key 9", yielded: true })));
+  await f.at("2026-10-22T10:00:00");
+  const swapped = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 3, tokenId: 9 });
+  assert.equal(swapped.fromDay, "2026-10-10", "让出去的天不算渠道 2 在用：一直查到渠道 3 的开始日");
+  assert.ok(three.ruleId);
 });
