@@ -918,7 +918,7 @@ for (const upstreamType of ["newapi", "sub2api"]) {
   });
 }
 
-test("一把 Key 一天只算在一个渠道上：后绑的绑定把这把 Key 补回已经固定的天，先绑的那条那几天自动重算（成本拿掉），少一半以上也不挡", async (t) => {
+test("一把 Key 一天只算在一个渠道上：后绑的渠道接过先绑渠道刚放掉的 Key：往前找第一次有用量的那天碰到先绑渠道的天就停，先绑那条已经固定的天不改、也不重算", async (t) => {
   const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity] }, rates: { 9: 1, 20: 3 } });
   const D = 24 * 3600;
   await f.at("2026-10-10T10:00:00");
@@ -934,16 +934,14 @@ test("一把 Key 一天只算在一个渠道上：后绑的绑定把这把 Key �
   const ruleOf = (channelId) => rules.find((rule) => rule.channels.some((channel) => channel.channelId === channelId));
   const costOf = (day, channelId) => Number(f.costOn(day).filter((row) => row.rule_id === ruleOf(channelId).id).sort((x, y) => y.revision - x.revision)[0]?.cost_usd); // 最新一版
   assert.equal(costOf("2026-10-11", 1), D, "10-11 渠道 1 固定时 Key 9 整天算在它上面");
-  // 10-12 渠道 7 换成 Key 9：新 Key 从哪天开始有用量查到 10-11（渠道 7 的开始日），10-11 补回渠道 7；先绑的渠道 1 那条 10-11 已固定的要重算
+  // 10-12 渠道 7 换成 Key 9：往前找新 Key 第一次有用量的那天，碰到 10-11（Key 9 在先绑的渠道 1 的每天 Key 里）就停，从 10-12 起；10-11 还是渠道 1 的
   await f.at("2026-10-12T10:00:00");
   const swapped = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, tokenId: 9 });
-  assert.equal(swapped.fromDay, "2026-10-11");
-  const states = await f.repository.listSettlementStates([ruleOf(1).id]);
-  assert.deepEqual(states.filter((state) => state.resettleRequestedAt != null).map((state) => [state.billDate, state.resettleReason]), [["2026-10-11", "key_owner"]]);
+  assert.equal(swapped.fromDay, "2026-10-12");
+  assert.deepEqual((await f.repository.listSettlementStates([ruleOf(1).id])).filter((state) => state.resettleRequestedAt != null), [], "渠道 1 已固定的天不重算");
   for (const iso of ["2026-10-12T11:00:00", "2026-10-12T12:00:00", "2026-10-12T13:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
-  assert.equal(costOf("2026-10-11", 1), 0, "渠道 1 这天 Key 9 的成本拿掉了（少一半以上也没挡）");
-  assert.equal(costOf("2026-10-11", 7), D + 3 * D, "渠道 7 这天：Key 9 整天 + 原来的 Key 20 整天（3 倍）");
-  assert.equal((await f.repository.listSettlementStates([ruleOf(1).id])).filter((state) => state.manualReason).length, 0, "没有被 RESETTLE_SHRUNK 挡住");
+  assert.equal(costOf("2026-10-11", 1), D, "渠道 1 这天 Key 9 整天还是它的");
+  assert.equal(costOf("2026-10-11", 7), 3 * D, "渠道 7 这天只有它原来的 Key 20（3 倍）");
 });
 
 test("每日利润多天按「渠道 × 天」挡：同一个渠道同一天换上游挂着两条绑定，只固定了一条的那天整天不算，不出现只有成本没有收入的假亏损；两条都固定了才算", async (t) => {
@@ -1114,4 +1112,22 @@ test("重新打开并换新 Key：新 Key 解绑当天就有用量时，解绑�
   assert.equal(again.fromDay, "2026-10-11");
   const keys = (await f.repository.listDayKeys([first.ruleId], "2026-10-10", "2026-10-12"))[first.ruleId];
   assert.deepEqual(Object.fromEntries(Object.entries(keys).map(([day, list]) => [day, list.map((key) => key.tokenId).sort((a, b) => a - b)])), { "2026-10-10": [9], "2026-10-11": [9, 30], "2026-10-12": [30] });
+});
+
+test("换 Key 往前找新 Key 第一次有用量的那天：碰到这把 Key 那天在别的渠道的每天 Key 里就停——渠道 7 接过渠道 1 刚放掉的 Key，渠道 7 以前的日子不被改", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity] }, rates: { 9: 1, 20: 3 } });
+  await f.at("2026-10-08T10:00:00");
+  const seven = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, upstreamStationId: f.supplier.id, tokenId: 20 });
+  await f.round("2026-10-08T23:00:00"); await f.round("2026-10-09T23:00:00");
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T23:00:00"); await f.round("2026-10-11T01:00:00");
+  await f.at("2026-10-11T12:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-12T10:00:00");
+  const swapped = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, tokenId: 9 });
+  assert.equal(swapped.fromDay, "2026-10-12", "Key 9 在 10-11 以前是渠道 1 的：往前只查到 10-12");
+  const keys = (await f.repository.listDayKeys([seven.ruleId], "2026-10-08", "2026-10-12"))[seven.ruleId];
+  assert.deepEqual(Object.fromEntries(Object.entries(keys).map(([day, list]) => [day, list.map((key) => key.tokenId).sort((a, b) => a - b)])),
+    { "2026-10-08": [20], "2026-10-09": [20], "2026-10-10": [20], "2026-10-11": [20], "2026-10-12": [9, 20] }, "渠道 7 以前的日子还是 Key 20，只有换 Key 那天两把都记");
 });

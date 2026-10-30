@@ -1132,10 +1132,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       try { return used(await upstreamWindowFor(upstream, metadata, token, { startMs, endMs, timezone: rule.timezone }, { readOnly: true })); }
       catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); }
     };
+    // 一把 Key 一天只算在一个渠道上：往前查碰到「这把 Key 那天在同一个上游里别的绑定的每天 Key 里」就停，那一天和更早的都不算进来
+    // （查到的用量是那个渠道的，不能回补成这条绑定的；没记每天 Key 的天按那条绑定现在的 Key 算）
+    const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && (() => { const range = bindingDayRange(other); return range.from <= today && range.to >= startDay; })());
+    let theirs = {};
+    if (peers.length) { try { theirs = await repository.listDayKeys(peers.map((other) => other.id), startDay, today); } catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); } }
+    const heldByOther = (day) => peers.some((other) => { const range = bindingDayRange(other); return day >= range.from && day <= range.to && (theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => Number(key.tokenId) === Number(token?.id)); });
+    if (heldByOther(today)) return { fromDay: today, noRecentUsage: false };
     const usedToday = await readDay(today);
     let first = usedToday ? today : null, checked = 1;
     for (let day = shiftDayLabel(today, -1); day >= startDay && checked < SWAP_LOOKBACK_DAYS; day = shiftDayLabel(day, -1), checked += 1) {
-      if (!await readDay(day)) break;
+      if (heldByOther(day) || !await readDay(day)) break;
       first = day;
     }
     return { fromDay: first ?? today, noRecentUsage: first == null };
