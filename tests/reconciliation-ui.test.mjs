@@ -1839,8 +1839,8 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
 });
 
 // 「绑定渠道」小窗口：和线上一样多的渠道（30 个左右，名字多是网址，6 个已禁用）
-async function openBindModal(t, { upstream, host, keys, matching }) {
-  const posts = [];
+async function openBindModal(t, { upstream, host, keys, matching, viewport }) {
+  const posts = [], keyReads = [];
   const names = ["https://api.lumen-cloud.com.cn", "http://10.8.3.21:3000/", "https://relay.example-hub.com/keys/claude-sonnet-premium-pool-overseas-backup", "星河-sonnet4.6-1.6", "https://gw.tianqi-ai.cn/keys", "碎-az-美西A2-1.9", "k7", "aws-东京-gpt5-1.2", "zz-azure-欧洲-2.0", "备用线路-03"];
   const channels = Array.from({ length: 30 }, (_, i) => {
     const channelId = 100 + i, name = i < 10 ? names[i] : `渠道-${i}-${["gpt", "claude", "gemini"][i % 3]}`;
@@ -1858,17 +1858,17 @@ async function openBindModal(t, { upstream, host, keys, matching }) {
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
     if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
     if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: upstream }], channels });
-    if (path === "/api/reconciliation/upstreams/up1/keys") return fulfill(route, { platform: "newapi", tokens: keys });
+    if (path === "/api/reconciliation/upstreams/up1/keys") { keyReads.push(new URL(route.request().url()).search); return fulfill(route, { platform: "newapi", tokens: keys }); }
     if (path === "/api/reconciliation/channels/select-key") { posts.push(route.request().postDataJSON()); return fulfill(route, { changed: true }); }
     throw new Error("unexpected API: " + path);
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: viewport?.width ?? 1440, height: viewport?.height ?? 900 });
   await page.locator(".jy-stations-table tbody tr", { hasText: upstream }).first().locator("td").nth(2).getByRole("button").click();
   const drawer = page.getByRole("dialog", { name: new RegExp(`${upstream}的渠道`) }); await drawer.waitFor();
   await drawer.getByRole("button", { name: "＋ 绑定渠道" }).click();
   const bind = page.getByRole("dialog", { name: "绑定渠道", exact: true }); await bind.waitFor();
   await page.waitForTimeout(500);
-  return { page, bind, posts };
+  return { page, bind, posts, keyReads };
 }
 const shot = async (page, name) => { if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/${name}.png` }); };
 // 弹窗什么都不超出去：弹窗在屏幕里，渠道列表框、搜索框在弹窗里
@@ -1908,6 +1908,38 @@ test("上游资源：绑定渠道（地址对得上一个）：对得上的一�
   await bind.getByRole("button", { name: "绑定", exact: true }).click();
   for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
   assert.deepEqual(posts[0], { ownStationId: "own", channelId: 100, upstreamStationId: "up1", tokenId: 30 });
+});
+
+test("上游资源：绑定小窗口打开时现读一次 Key 列表（force=true）；同名 Key 灰着点不了、后面写原因；已绑的写绑在哪个渠道；已停用 / 已过期 / 额度用完；能选的在前", async (t) => {
+  const keys = [{ id: 11, name: "jyuan", status: 1, group: "default" }, { id: 12, name: "jyuan", status: 1, group: "default" }, { id: 13, name: "jyuan", status: 1, group: "default" }, { id: 14, name: "jyuan", status: 1, group: "default" },
+    { id: 9, name: "oai", status: 1, group: "default" }, { id: 15, name: "测试", status: 2 }, { id: 16, name: "旧的", status: 3 }, { id: 17, name: "没额度", status: 4 }, { id: 30, name: "oai-16", status: 1, group: "default" }];
+  const { page, bind, keyReads } = await openBindModal(t, { upstream: "碎", host: "api.sui.example", matching: [100], keys });
+  assert.deepEqual(keyReads, ["?force=true"], "打开小窗口读一次，不吃缓存");
+  await bind.locator(".ant-select").click();
+  const items = page.locator(".ant-select-dropdown .ant-select-item-option");
+  const texts = (await items.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+  assert.equal(texts[0], "oai-16 · 分组 default", "能选的在前");
+  assert.equal(texts.length, 9);
+  assert.ok(texts.includes("jyuan · 分组 default 上游里有 4 把叫「jyuan」，系统分不清，到上游把要用的那把改个不重复的名字"));
+  assert.ok(texts.includes("oai · 分组 default 已绑在「已绑的」"));
+  assert.ok(texts.includes("测试 已停用") && texts.includes("旧的 已过期") && texts.includes("没额度 额度用完了"));
+  assert.equal(await items.filter({ hasText: "上游里有 4 把" }).first().getAttribute("aria-disabled"), "true", "点不了");
+  assert.equal(await page.locator(".jy-key-none").count(), 0, "有能选的：顶上不写那句");
+  if (!(await page.locator(".ant-select-dropdown:visible").count())) await bind.locator(".ant-select").click();
+  await page.waitForTimeout(300);
+  await shot(page, "keys-reasons-1440x900");
+});
+
+test("上游资源：一把能选的都没有时，下拉顶上写「这个上游里没有能选的 Key，原因写在每一把后面」，不能选的照样列出来；读不到写「读不到这个上游的 Key 列表」", async (t) => {
+  const keys = [{ id: 11, name: "jyuan", status: 1 }, { id: 12, name: "jyuan", status: 1 }, { id: 9, name: "oai", status: 1 }];
+  const { page, bind } = await openBindModal(t, { upstream: "碎", host: "api.sui.example", matching: [100], keys });
+  await bind.locator(".ant-select").click();
+  await page.locator(".jy-key-none").getByText("这个上游里没有能选的 Key，原因写在每一把后面", { exact: true }).waitFor();
+  assert.equal(await page.locator(".ant-select-dropdown .ant-select-item-option").count(), 3, "不能选的照样列出来");
+  assert.equal(await bind.getByText("这个上游只剩这一把 Key 没绑渠道，已经替你选好", { exact: true }).count(), 0);
+  assert.equal(await bind.getByRole("button", { name: "绑定", exact: true }).isDisabled(), true);
+  await page.setViewportSize({ width: 375, height: 812 }); await page.waitForTimeout(400);
+  await shot(page, "keys-reasons-375x812");
 });
 
 test("上游资源：绑定渠道（一个都对不上）：有提示、什么都不选、「绑定」灰着；搜得到名字或地址；搜不到有提示；已禁用的点开才列、带「已禁用」标签", async (t) => {

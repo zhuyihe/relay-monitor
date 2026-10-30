@@ -197,3 +197,8 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-swap-note .jy-sym { width: 14px; height: 14px; flex: none; margin-top: 3px; color: var(--jy-cobalt); }
 .jy-swap-working { margin: 8px 0 0; }
 .jy-swap-modal .ant-modal-content { max-height: calc(100vh - 32px); overflow-y: auto; }
+
+/* 挑 Key 的下拉里不能选的 Key：灰着，后面一句原因；一把能选的都没有时顶上一句 */
+.jy-key-off { display: flex; flex-direction: column; color: var(--jy-ink-3); }
+.jy-key-off small { font-size: 12px; line-height: 18px; white-space: normal; }
+.jy-key-none { padding: 8px 12px; font-size: 12px; color: var(--jy-ink-3); border-bottom: 1px solid var(--jy-rule-soft, #e5e5e5); }

@@ -8,7 +8,7 @@ import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { formatDayKey } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
-import { bindableKeys, channelChoices, defaultChannelId } from "../../../lib/channel-binding.js";
+import { channelChoices, defaultChannelId, keyChoices } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
 import { Icon, Sym } from "../../components/icons";
 import { useDrawerEscape } from "../../components/drawer-escape";
@@ -79,6 +79,36 @@ export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbi
   </Drawer>;
 }
 
+// 挑 Key 的下拉（绑定渠道、换 Key 两个小窗口共用）：打开小窗口时现读一次这个上游的 Key 列表（force=true，不吃 5 分钟缓存；平时不读），
+// 能选的在前，不能选的也列出来、灰着点不了、后面一句原因（名字重复 / 已绑在哪个渠道 / 已停用、已过期、额度用完了）
+export type KeyOption = { value: number; label: string; disabled?: boolean; reason?: string };
+export type KeyOptions = { options: KeyOption[]; usable: number };
+const keyReasonText = (reason: { code: string; channel?: string; count?: number; name?: string }) => {
+  const R = CHANNEL_BINDING.keyReason;
+  return reason.code === "USED" ? R.used(reason.channel ?? "") : reason.code === "DUPLICATE" ? R.duplicate(reason.count ?? 0, reason.name ?? "") : reason.code === "EXPIRED" ? R.expired : reason.code === "EXHAUSTED" ? R.exhausted : R.disabled;
+};
+async function loadKeyOptions(upstreamId: string, channels: ChannelOption[], exceptTokenId: number | null = null): Promise<KeyOptions> {
+  const metadata: any = await api(`/api/reconciliation/upstreams/${encodeURIComponent(upstreamId)}/keys?force=true`);
+  // 强制读时读不到 Key 目录，后台不报错、给空列表加这个原因：当成读失败
+  if (!metadata?.tokens?.length && metadata?.capability?.reason === "KEY_METADATA_UNAVAILABLE") throw new Error("KEY_METADATA_UNAVAILABLE");
+  const usedBy = new Map<number, string>();
+  for (const item of channels) if (item.upstreamStationId === upstreamId && item.tokenId != null) usedBy.set(Number(item.tokenId), item.name);
+  const { usable, blocked } = keyChoices(metadata?.tokens, usedBy, { platform: metadata?.platform, exceptTokenId });
+  const label = (token: any) => CHANNEL_BINDING.keyOf(token.name, token.group);
+  return { usable: usable.length, options: [...usable.map((token: any) => ({ value: token.id as number, label: label(token) })),
+    ...blocked.map(({ token, reason }: any) => ({ value: token.id as number, label: label(token), disabled: true, reason: keyReasonText(reason) }))] };
+}
+function KeySelect({ aria, placeholder, value, keys, failed, disabled, onChange }: { aria: string; placeholder: string; value: number | null; keys: KeyOptions | null; failed: boolean; disabled: boolean; onChange: (value: number) => void }) {
+  const M = CHANNEL_BINDING.bindModal;
+  return <Select
+    showSearch virtual={false} className="jy-bind-select" aria-label={aria} placeholder={placeholder} value={value ?? undefined} options={keys?.options ?? []} loading={keys == null && !failed} disabled={disabled}
+    filterOption={(input, option) => `${option?.label ?? ""} ${(option as KeyOption | undefined)?.reason ?? ""}`.toLowerCase().includes(input.trim().toLowerCase())}
+    optionRender={(option) => { const item = option.data as KeyOption; return item.disabled ? <span className="jy-key-off"><span>{item.label}</span><small>{item.reason}</small></span> : item.label; }}
+    popupRender={(menu) => <>{keys && keys.usable === 0 && keys.options.length ? <div className="jy-key-none">{CHANNEL_BINDING.keyReason.none}</div> : null}{menu}</>}
+    notFoundContent={failed ? M.keysFailed : M.noKeys} onChange={onChange}
+  />;
+}
+
 // 「绑定渠道」：搜索框 + 固定高的渠道列表（你站上还没绑的；地址对得上这个上游的一组在前；已禁用的默认不列）+ Key 下拉（这个上游里还能绑的；只剩一把时替用户选好）
 export function BindChannelModal({ upstream, ownStationId, options, onClose, onDone }: {
   upstream: Upstream | null; ownStationId: string; options: ChannelOptions | null; onClose: () => void; onDone: () => void | Promise<void>;
@@ -89,7 +119,7 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
   const [query, setQuery] = useState("");
   const [showDisabled, setShowDisabled] = useState(false);
   const [tokenId, setTokenId] = useState<number | null>(null);
-  const [keys, setKeys] = useState<{ value: number; label: string }[] | null>(null);
+  const [keys, setKeys] = useState<KeyOptions | null>(null);
   const [failed, setFailed] = useState(false);
   const [hint, setHint] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -103,13 +133,10 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
   useEffect(() => {
     if (!upstream) return;
     let alive = true;
-    api(`/api/reconciliation/upstreams/${encodeURIComponent(upstream.id)}/keys`).then((metadata: any) => {
+    loadKeyOptions(upstream.id, channels).then((loaded) => {
       if (!alive) return;
-      const used = channels.filter((item) => item.upstreamStationId === upstream.id && item.tokenId != null).map((item) => Number(item.tokenId));
-      const usable = bindableKeys(metadata?.tokens, used, { platform: metadata?.platform });
-      const items = usable.map((token: any) => ({ value: token.id as number, label: CHANNEL_BINDING.keyOf(token.name, token.group) }));
-      setKeys(items);
-      if (items.length === 1) { setTokenId(items[0].value); setHint(true); } else { setTokenId(null); setHint(false); }
+      setKeys(loaded);
+      if (loaded.usable === 1) { setTokenId(loaded.options.find((item) => !item.disabled)!.value); setHint(true); } else { setTokenId(null); setHint(false); }
     }).catch(() => { if (alive) { setKeys(null); setFailed(true); } });
     return () => { alive = false; };
   }, [upstream?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -156,11 +183,7 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
     </Radio.Group>
     {choices?.disabledCount ? <button type="button" className="jy-link-btn jy-bind-toggle" aria-expanded={showDisabled} onClick={() => setShowDisabled((on) => !on)}>{showDisabled ? M.hideDisabled : M.showDisabled(choices.disabledCount)}</button> : null}
     <label className="jy-bind-label">{M.key}</label>
-    <Select
-      showSearch className="jy-bind-select" aria-label={M.key} placeholder={M.keyPlaceholder} value={tokenId ?? undefined} options={keys ?? []} loading={keys == null && !failed} disabled={saving}
-      filterOption={(input, option) => String(option?.label ?? "").toLowerCase().includes(input.trim().toLowerCase())}
-      notFoundContent={failed ? M.keysFailed : M.noKeys} onChange={(value: number) => { setTokenId(value); setHint(false); }}
-    />
+    <KeySelect aria={M.key} placeholder={M.keyPlaceholder} value={tokenId} keys={keys} failed={failed} disabled={saving} onChange={(value) => { setTokenId(value); setHint(false); }} />
     {hint ? <p className="jy-caption jy-bind-hint">{M.onlyOne}</p> : null}
     {failed ? <p className="jy-caption jy-bind-hint">{M.keysFailed}</p> : null}
   </Modal>;
@@ -174,7 +197,7 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
   const { message, notification } = App.useApp();
   const channels = options?.ok ? options.channels : [];
   const [tokenId, setTokenId] = useState<number | null>(null);
-  const [keys, setKeys] = useState<{ value: number; label: string }[] | null>(null);
+  const [keys, setKeys] = useState<KeyOptions | null>(null);
   const [failed, setFailed] = useState(false);
   const [hint, setHint] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -183,13 +206,10 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
     if (!channel || !upstream) return;
     let alive = true;
     setTokenId(null); setKeys(null); setFailed(false); setHint(false); setSaving(false);
-    api(`/api/reconciliation/upstreams/${encodeURIComponent(upstream.id)}/keys`).then((metadata: any) => {
+    loadKeyOptions(upstream.id, channels, channel.tokenId).then((loaded) => {
       if (!alive) return;
-      const used = channels.filter((item) => item.upstreamStationId === upstream.id && item.tokenId != null).map((item) => Number(item.tokenId));
-      const usable = bindableKeys(metadata?.tokens, used, { platform: metadata?.platform });
-      const items = usable.map((token: any) => ({ value: token.id as number, label: CHANNEL_BINDING.keyOf(token.name, token.group) }));
-      setKeys(items);
-      if (items.length === 1) { setTokenId(items[0].value); setHint(true); }
+      setKeys(loaded);
+      if (loaded.usable === 1) { setTokenId(loaded.options.find((item) => !item.disabled)!.value); setHint(true); }
     }).catch(() => { if (alive) { setKeys(null); setFailed(true); } });
     return () => { alive = false; };
   }, [channel?.channelId, upstream?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -198,7 +218,7 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
     setSaving(true);
     try {
       const result: any = await api("/api/reconciliation/channels/select-key", { body: { ownStationId, channelId: channel.channelId, upstreamStationId: upstream.id, tokenId } });
-      const next = keys?.find((item) => item.value === tokenId)?.label.split(" · ")[0] ?? "";
+      const next = keys?.options.find((item) => item.value === tokenId)?.label.split(" · ")[0] ?? "";
       const note = swapNote(next, result);
       if (note.persistent) notification.success({ message: note.text, duration: 0, placement: "top" }); else message.success(note.text);
       onClose();
@@ -212,11 +232,7 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
     <label className="jy-bind-label">{M.current}</label>
     <div className="jy-swap-current">{channel.tokenName ? CHANNEL_BINDING.keyOf(channel.tokenName, channel.tokenGroup) : ""}</div>
     <label className="jy-bind-label">{M.next}</label>
-    <Select
-      showSearch className="jy-bind-select" aria-label={M.next} placeholder={M.nextPlaceholder} value={tokenId ?? undefined} options={keys ?? []} loading={keys == null && !failed} disabled={saving}
-      filterOption={(input, option) => String(option?.label ?? "").toLowerCase().includes(input.trim().toLowerCase())}
-      notFoundContent={failed ? M.keysFailed : M.noKeys} onChange={(value: number) => { setTokenId(value); setHint(false); }}
-    />
+    <KeySelect aria={M.next} placeholder={M.nextPlaceholder} value={tokenId} keys={keys} failed={failed} disabled={saving} onChange={(value) => { setTokenId(value); setHint(false); }} />
     {hint ? <p className="jy-caption jy-bind-hint">{CHANNEL_BINDING.bindModal.onlyOne}</p> : null}
     <p className="jy-swap-note"><Sym kind="info" /><span>{M.note}</span></p>
     {saving ? <p className="jy-caption jy-swap-working" role="status">{M.working}</p> : null}
