@@ -790,13 +790,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const addKeys = (object, keys, value) => { const next = { ...object }; for (const key of keys) if (key in next) next[key] = value; return next; };
       // 底（今天的现读，没有今天就是最后一个已固定的日子）需处理时，这一行不整行丢掉：已固定那几天的和照样返回，带上算进来的天数（countedDays），
       // 页面按天算（底的需处理留在 displayStatus 里，亮感叹号）；一天都没算进来时还是底本身
-      const merged = countsInSummary(skeleton)
+      // 今天的现读因为「同渠道的另一条没读成」被丢掉、又没有别的天算进来：底（今天那份）自己的数不能当整段的数用（它可能只有成本、没有收入的假亏损），这一行不算
+      const liveAllDropped = counted === 0 && entry.live.length > 0;
+      const merged = countsInSummary(skeleton) && !liveAllDropped
         ? { ...skeleton, window: w, downstream: addKeys(skeleton.downstream, ["amountUsd", "knownAmountUsd"], income), upstream: addKeys(skeleton.upstream, ["amountUsd", "knownAmountUsd", "countedAmountUsd"], cost),
             calculation: addKeys(skeleton.calculation, ["profitUsd"], income - cost) }
         : counted > 0
           ? { ...skeleton, window: w, countedDays: counted, downstream: { ...skeleton.downstream, amountUsd: income, knownAmountUsd: income }, upstream: { ...skeleton.upstream, amountUsd: cost, knownAmountUsd: cost, countedAmountUsd: cost },
               calculation: { ...skeleton.calculation, profitUsd: income - cost } }
-          : { ...skeleton, window: w };
+          : { ...skeleton, window: w, ...(liveAllDropped ? { calculation: { ...skeleton.calculation, profitUsd: null } } : {}) };
       if (costUnread) merged.todayCostUnread = true;
       rows.push(merged);
     }
