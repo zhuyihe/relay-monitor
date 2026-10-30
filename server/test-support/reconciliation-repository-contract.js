@@ -1781,6 +1781,33 @@ contract("changeRuleKey with extra: the key change, the day keys (fill / replace
   assert.deepEqual(states.map((row) => [row.billDate, row.resettleRequestedAt != null]).sort(), [["2026-10-03", true], ["2026-10-04", false]]);
 });
 
+contract("changeRuleKey with reopen: an archived rule is re-opened and takes the NEW key in one transaction (the old key may already belong to another binding); a key another binding holds rolls everything back and the rule stays archived", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:ro1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(241), name: "RO" }], initialRatio: 1, fixedGroup: "g1" });
+  const ref = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+  assert.equal(await repository.archiveRule(rule.id, { now: Date.now() - 1000, optout: true }), true);
+  // 旧 Key 给了别的绑定
+  const taker = await fixture.createRule({ tokenId: fixture.token(242), tokenName: `Contract ${fixture.tag} RT`, canonicalKey: `up:${fixture.tag}:ro1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(243), name: "RT" }] });
+  const holder = await fixture.createRule({ tokenId: fixture.token(244), tokenName: `Contract ${fixture.tag} RH`, canonicalKey: `up:${fixture.tag}:ro-holder`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(245), name: "RH" }] });
+  const a = EFFECTIVE_FROM + HOUR;
+  const plan = (after, canonicalKey) => ({ before: ref, after, canonicalKey, windowStart: a, windowEnd: a + 1000 });
+  const snapshot = async () => JSON.stringify([await repository.getRule(rule.id, { includeArchived: true }), await repository.listChannelOptouts(rule.ownStationId)]);
+  const before = await snapshot();
+  // 没标 reopen：归档的绑定找不到
+  await assert.rejects(() => repository.changeRuleKey(rule.id, plan({ upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(246), tokenName: "N" }, `up:${fixture.tag}:ro2`)), (error) => error.code === "RULE_NOT_FOUND");
+  // 选的新 Key 被别的绑定占着：整体回滚，还是归档着
+  const clash = { upstreamStationId: holder.upstreamStationId, tokenId: holder.tokenId, tokenName: holder.tokenName };
+  assert.deepEqual(await repository.changeRuleKey(rule.id, plan(clash, `up:${fixture.tag}:ro-holder`), { reopen: true }), { conflict: true, stale: false });
+  assert.equal(await snapshot(), before, "撞了唯一键：还是归档着、optout 还在");
+  // 新 Key 空闲：重新打开，占新 Key 和渠道的唯一键，清 optout；旧 Key 已经在 taker 手里也不影响
+  const fresh = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(246), tokenName: "N" };
+  assert.deepEqual(await repository.changeRuleKey(rule.id, plan(fresh, `up:${fixture.tag}:ro2`), { reopen: true }), { conflict: false, stale: false });
+  const reopened = await repository.getRule(rule.id);
+  assert.deepEqual([reopened.enabled, reopened.archivedAt, reopened.tokenId, reopened.canonicalKey], [true, null, fresh.tokenId, `up:${fixture.tag}:ro2`]);
+  assert.deepEqual((await repository.listChannelOptouts(rule.ownStationId)).filter((item) => item.channelId === fixture.channel(241)), []);
+  await assert.rejects(() => fixture.createRule({ tokenId: fixture.token(247), billingPolicy: "immediate", channels: [{ channelId: fixture.channel(241), name: "RO" }] }), "渠道的唯一键重新占上了");
+  assert.ok(taker.id);
+});
+
 // 每个渠道每天用过哪几把 Key：记、读；已经记过的忽略；没记过的天不出现；按绑定、日期范围读
 contract("recordDayKeys / listDayKeys: rows are stored once per rule, day and key; listing is scoped to the rules and the date range; an unknown rule or empty input gives {} / 0", async ({ repository, fixture }) => {
   const one = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:d1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(211), name: "D1" }] });

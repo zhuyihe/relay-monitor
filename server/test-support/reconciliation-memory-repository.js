@@ -513,12 +513,12 @@ export class MemoryReconciliationRepository {
   }
 
   // 对应 MySQL 版 changeRuleKey
-  async changeRuleKey(ruleId, plan, { detectedAt = Date.now(), extra = null } = {}) {
+  async changeRuleKey(ruleId, plan, { detectedAt = Date.now(), extra = null, reopen = false } = {}) {
     try {
       await this.#transaction("changeRuleKey", async (tx) => {
         await this.#lock(tx, `rule:${ruleId}`);
-        const entry = this.#ruleEntry(tx, ruleId);
-        if (!entry) throw repositoryError("RULE_NOT_FOUND");
+        const entry = this.#ruleEntry(tx, ruleId, { archived: reopen });
+        if (!entry || (reopen && entry.row.archived_at == null)) throw repositoryError("RULE_NOT_FOUND");
         const current = this.#segmentsOf(tx, ruleId).map(({ row }) => row).find((row) => row.effective_to_ms == null);
         if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
         if (keyChangeIsStale(plan, entry.row, current)) throw Object.assign(new Error("stale key change"), { stalePlan: true });
@@ -536,9 +536,16 @@ export class MemoryReconciliationRepository {
           open(plan.windowEnd, null, true, "key_change");
         }
         const ruleActiveKey = plan.canonicalKey ?? `${plan.after.upstreamStationId}:${plan.after.tokenId}`;
-        this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { active_token_key: null });
-        this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(plan.after.tokenId), token_name: plan.after.tokenName ?? entry.row.token_name, active_token_key: ruleActiveKey,
+        this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId, { archived: reopen })], { active_token_key: null });
+        this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId, { archived: reopen })], { token_id: bigint(plan.after.tokenId), token_name: plan.after.tokenName ?? entry.row.token_name, active_token_key: ruleActiveKey,
           ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });
+        if (reopen) {
+          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId, { archived: true })], { enabled: 1, archived_at: null, archived_at_ms: null });
+          const channels = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, ruleId));
+          for (const channel of channels) this.#update(tx, "channels", [channel], { active_channel_key: activeChannelKey({ enabled: true, ownStationId: entry.row.own_station_id }, channel.row.channel_id) ?? null });
+          const ids = new Set(channels.map(({ row }) => Number(row.channel_id)));
+          this.#delete(tx, "optouts", this.#rows("optouts", tx).filter(({ row }) => sameText(row.own_station_id, entry.row.own_station_id) && ids.has(Number(row.channel_id))));
+        }
         this.#refreshSegmentKeys(tx, ruleId);
         if (extra) this.#applyKeyChangeExtra(tx, ruleId, extra);
       });

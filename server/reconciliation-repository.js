@@ -758,11 +758,12 @@ export class ReconciliationRepository {
   // extra（换 Key 的这一批写操作和换 Key 同一个事务，半路失败整体回滚）：
   //   fillDayKeys 补记没有记录的天（已有的忽略）、replaceDayKeys { dates, rows } 这几天的 Key 换成 rows、resettleDates 写重结请求、
   //   recheckStates [{ billDate, state }] 把被挡住的日子的状态行标成「原因没了」；now 是这一批写的时刻
-  async changeRuleKey(ruleId, plan, { detectedAt = Date.now(), extra = null } = {}) {
+  // reopen：这条绑定是最近解绑的，换 Key 的同一个事务里把它重新打开（取消归档、占上新 Key 和渠道的唯一键、清 optout）——不去占旧 Key，旧 Key 已经给了别处也没关系
+  async changeRuleKey(ruleId, plan, { detectedAt = Date.now(), extra = null, reopen = false } = {}) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+      const [ruleRows] = await conn.query(`SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS ${reopen ? "NOT NULL" : "NULL"} FOR UPDATE`, [ruleId]);
       if (!ruleRows[0]) throw repositoryError("RULE_NOT_FOUND");
       const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [ruleId]);
       if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
@@ -787,7 +788,13 @@ export class ReconciliationRepository {
       const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [plan.after.tokenId, plan.after.tokenName ?? rule.token_name, ruleActiveKey];
       if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
       if (plan.group !== undefined) { sets.push("fixed_group = ?"); params.push(plan.group); }
+      if (reopen) sets.push("enabled = 1", "archived_at = NULL", "archived_at_ms = NULL");
       await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
+      if (reopen) {
+        const [channels] = await conn.query("SELECT channel_id FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [ruleId]);
+        for (const channel of channels) await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = ? WHERE rule_id = ? AND channel_id = ?", [activeChannelKey({ enabled: true, ownStationId: rule.own_station_id }, channel.channel_id), ruleId, channel.channel_id]);
+        if (channels.length) await conn.query("DELETE FROM reconciliation_channel_optout WHERE own_station_id = ? AND channel_id IN (?)", [rule.own_station_id, channels.map((channel) => channel.channel_id)]);
+      }
       await refreshSegmentKeys(conn, ruleId);
       if (extra) await this.#applyKeyChangeExtra(conn, ruleId, extra);
       await conn.commit();
