@@ -1125,9 +1125,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   2. D 到昨天里已经固定的天，写重结请求重算（和改时间、换 Key 时刻同一套，最远 31 天，更早的不动、返回 tooOld）；
   //      被 CHANNEL_KEY_NO_USAGE 挡住的天改按新 Key 重新排队结账（新 Key 那天也没用量的，结账时兜底照样会挡，不会把 0 成本固定进账本）。
   // 换之前先把过去没记录的天补成旧 Key（不然它们会按新 Key 读）。只读上游，不读用户的 New API；只在点的这一下读
-  async function changeRuleKeyManual(ruleId, tokenId) {
-    const rule = await repository.getRule(ruleId);
-    if (!rule || !rule.enabled || rule.archivedAt) throw ruleNotFound();
+  // reopen：这条绑定是最近解绑的，选了另一把 Key——重新打开和换 Key 在同一个事务里（先占新 Key，不去占旧 Key；换不成整体回滚，绑定还是解绑着）
+  async function changeRuleKeyManual(ruleId, tokenId, { reopen = false } = {}) {
+    const rule = await repository.getRule(ruleId, { includeArchived: reopen });
+    if (!rule || (reopen ? !rule.archivedAt : !rule.enabled || rule.archivedAt)) throw ruleNotFound();
     const configured = upstreamStation(rule.upstreamStationId);
     if (!billingStation(configured)) throw codedError("UPSTREAM_NOT_FOUND", "找不到这个上游");
     const upstream = { ...configured };
@@ -1170,7 +1171,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const extra = { now, fillDayKeys, replaceDayKeys: { dates: [...days, ...before.map((state) => state.billDate)], rows: [...dayRows, ...before.map((state) => ({ billDate: state.billDate, ...ref }))] },
       resettleDates, recheckStates };
     let result;
-    try { result = await repository.changeRuleKey(rule.id, built.plan, { detectedAt: now, extra }); } catch { throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试"); }
+    try { result = await repository.changeRuleKey(rule.id, built.plan, { detectedAt: now, extra, reopen }); } catch { throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试"); }
     if (result.conflict) throw codedError("KEY_ALREADY_BOUND", "这把 Key 已经在别的渠道算利润了");
     if (result.stale) throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试");
     (rt._dayKeyMemo ||= new Map()).set(`${rule.id}|${today}`, String(ref.tokenId));

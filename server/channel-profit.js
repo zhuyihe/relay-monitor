@@ -215,9 +215,9 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       .sort((x, y) => y.archivedAtMs - x.archivedAtMs)[0];
     const yesterday = stopped ? shiftDayLabel(dayKeyInTz(now(), stopped.timezone), -1) : null;
     if (stopped && stopped.upstreamStationId === upstream.id && stopped.channels.length === 1 && dayKeyInTz(stopped.archivedAtMs, stopped.timezone) >= yesterday) {
-      await reconciliation().reopenRule(stopped.id);
-      if (Number(stopped.tokenId) === token) return { changed: true, ruleId: stopped.id, reopened: true };
-      const result = await reconciliation().changeRuleKeyManual(stopped.id, token);
+      // 选的就是原来那把：重新打开（它被别处占了就是选的这把被占了，报错没错）；选的是另一把：重新打开和换 Key 一个事务，不去占旧 Key
+      if (Number(stopped.tokenId) === token) { await reconciliation().reopenRule(stopped.id); return { changed: true, ruleId: stopped.id, reopened: true }; }
+      const result = await reconciliation().changeRuleKeyManual(stopped.id, token, { reopen: true });
       return { changed: true, ruleId: stopped.id, reopened: true, ...result };
     }
     // 选 Key 就是在说这把 Key 只给这个渠道用：不再问「这把 Key 还给别处用吗」

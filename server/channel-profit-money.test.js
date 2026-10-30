@@ -903,3 +903,60 @@ test("每日利润多天按「渠道 × 天」挡：同一个渠道同一天换�
   assert.equal(half.notCountedDays.count, 1);
   assert.deepEqual([half.rows[0].incomeUsd, half.rows[0].actualCostUsd], [2 * D, D], "只剩 10-10：没有 10-11 那条旧绑定的成本（不出现只有成本没有收入的亏损）");
 });
+
+test("选 Key：渠道 1 解绑后旧 Key 已经给了渠道 7，再给渠道 1 选一把空闲的 Key——接着原来那条（重新打开和换 Key 一个事务，不去占旧 Key），不报错；选的 Key 被别处占着才报错，而且整体回滚、绑定还是解绑着", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20, 30], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity], 30: [-Infinity, Infinity] }, rates: { 9: 1, 20: 3, 30: 2 } });
+  const pick = (channelId, tokenId) => f.profit.selectKey({ ownStationId: f.own.id, channelId, upstreamStationId: f.supplier.id, tokenId });
+  const rules = (includeArchived) => f.rt.reconciliation.listRules({ includeArchived });
+  await f.at("2026-10-10T10:00:00");
+  const first = await pick(1, 9);
+  await f.at("2026-10-10T15:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-10T16:00:00");
+  await pick(7, 9); // 旧 Key 9 给了渠道 7
+  const held = await pick(7, 9);
+  assert.equal(held.changed, false);
+  // 渠道 1 选一把空闲的 Key 30：接着原来那条，不报「这把 Key 已经在别的绑定里」
+  await f.at("2026-10-10T17:00:00");
+  const again = await pick(1, 30);
+  assert.deepEqual([again.reopened, again.ruleId], [true, first.ruleId], JSON.stringify(again));
+  const back = (await rules(false)).find((rule) => rule.id === first.ruleId);
+  assert.deepEqual([back.tokenId, back.enabled, back.archivedAt], [30, true, null]);
+  assert.equal((await rules(true)).length, 2, "没有新建绑定");
+  assert.deepEqual(await f.rt.reconciliation.listChannelOptouts(f.own.id), []);
+  // 渠道 1 再解绑，这回选的 Key 20 被别处占着（渠道 7 换成 20）：报错，整体回滚——绑定还是解绑着，没挂上别的 Key
+  await f.at("2026-10-10T18:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, tokenId: 20 });
+  await f.at("2026-10-10T19:00:00");
+  await assert.rejects(pick(1, 20), { code: "KEY_ALREADY_BOUND" });
+  const stillOff = (await rules(true)).find((rule) => rule.id === first.ruleId);
+  assert.deepEqual([stillOff.archivedAt != null, stillOff.enabled, stillOff.tokenId], [true, false, 30], "换 Key 失败：整体回滚，还是解绑着、Key 没变");
+  assert.equal((await rules(false)).length, 1);
+});
+
+test("渠道 × 天按天挡：反过来旧绑定那天没固定、新绑定已固定也整天不算；看单独一天（昨天那种）两条里只有一条算得出时整行不算，不是假亏损也不是假盈利", async (t) => {
+  const SWITCH = SH("2026-10-11T12:00:00");
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: { 1: 9 }, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 } });
+  await f.at("2026-10-10T10:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-11T11:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  f.channelKey[1] = 20; await f.round("2026-10-11T12:00:00");
+  await f.at("2026-10-11T14:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  await settle(f, LATER);
+  const rules = await f.rt.reconciliation.listRules({ includeArchived: true });
+  const old = rules.find((rule) => rule.archivedAt), fresh = rules.find((rule) => !rule.archivedAt);
+  const without = (rule) => f.repository.tables.ledger.splice(0, f.repository.tables.ledger.length, ...f.repository.tables.ledger.filter((row) => !(row.rule_id === rule.id && row.bill_date === "2026-10-11")));
+  const D = 24 * 3600, day11 = { preset: "custom", startMs: SH("2026-10-11T00:00:00"), endMs: SH("2026-10-12T00:00:00") }, two = { preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-12T00:00:00") };
+  const kept = [...f.repository.tables.ledger];
+  without(old); // 旧的（Key 9，每秒 1）那天没固定
+  const noOld = await f.rt.reconciliation.profitPage(two);
+  assert.deepEqual([noOld.rows[0].incomeUsd, noOld.rows[0].actualCostUsd, noOld.notCountedDays.count], [2 * D, D, 1], "10-11 整天不算：只剩 10-10 的收入和成本");
+  const single = await f.rt.reconciliation.profitPage(day11);
+  assert.deepEqual([single.rows[0].counted, single.rows[0].incomeUsd, single.rows[0].actualCostUsd, single.rows[0].grossProfitUsd], [false, null, null, null], "单独看 10-11：新绑定有数、旧的没有，整行不算");
+  f.repository.tables.ledger.splice(0, f.repository.tables.ledger.length, ...kept);
+  without(fresh); // 新的（Key 20，每秒 3）那天没固定
+  const noNew = await f.rt.reconciliation.profitPage(two);
+  assert.deepEqual([noNew.rows[0].incomeUsd, noNew.rows[0].actualCostUsd], [2 * D, D]);
+  assert.equal((await f.rt.reconciliation.profitPage(day11)).rows[0].counted, false);
+});
