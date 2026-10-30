@@ -45,7 +45,7 @@ import { expectedCostForDay } from "../lib/expected-cost-day.js";
 import { lastSaleAtOf, noteTodayIncome } from "../lib/sale-tracker.js";
 import { buildProfitDetail, buildProfitPage, dayLabelsOf, fixedCostOfRange } from "../lib/profit-page.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
-import { connectionDiagnostic } from "../lib/connection-test.js";
+import { connectionDiagnostic, upstreamErrorDetail } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
@@ -452,7 +452,9 @@ function toErrorHealth(err, own = false, station = null) {
   }
   const issue = own ? "OWN_BILLING_UNAVAILABLE" : code === "UPSTREAM_AUTH_DENIED" ? "KEY_INVALID_OR_DENIED"
     : code === "UPSTREAM_FEATURE_UNSUPPORTED" ? "UPSTREAM_FEATURE_UNSUPPORTED" : "UPSTREAM_DATA_UNAVAILABLE";
-  return health(issue, issueText(issue));
+  // 读上游失败的几种（被拒、读不到、超时）：把上游回的原话脱敏以后带在问题上，「查看详细原因」用（不多读上游，就是这次读到的报错）；被拒的另写一句说明（variant: denied）
+  const diagnostic = own || !station ? "" : upstreamErrorDetail(err, station);
+  return health(issue, issueText(issue), { ...(issue === "KEY_INVALID_OR_DENIED" ? { variant: "denied" } : {}), ...(diagnostic ? { diagnostic } : {}) });
 }
 
 // 轮询沿用了不久前的身份（这一轮没现读）时上游拒绝（New API），或者读账单时核对出账号换了（Sub2API）：
@@ -491,6 +493,12 @@ const CALCULATION_BLOCKERS = new Set([
 // reference 问题只作参考（如固定采购上游的 Key 账单不全），不挡毛利。
 // 快照内容的指纹：去掉每轮都会变的各种时刻和窗口终点（「今天」的窗口终点就是现在），只看金额、问题、分段这些
 const SNAPSHOT_VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "observedAt", "stateObservedAt", "latestLogAtMs", "endMs"]);
+// 详细原因（上游回的原话）只在需处理的气泡里用，不进数据库快照：上游每轮措辞不一样（请求号、时间戳）会让「今天的快照没变就跳过」失效，也不该把上游原话存下来
+const withoutDiagnostic = (health) => {
+  if (!health || (!health.diagnostic && !(health.issues || []).some((issue) => issue?.diagnostic))) return health;
+  const { diagnostic, ...rest } = health;
+  return { ...rest, ...(Array.isArray(health.issues) ? { issues: health.issues.map(({ diagnostic: dropped, ...issue }) => issue) } : {}) };
+};
 function snapshotContentFingerprint(rows) {
   return createHash("sha256").update(JSON.stringify(rows, (key, value) => SNAPSHOT_VOLATILE_KEYS.has(key) ? undefined : value)).digest("hex");
 }
@@ -2653,12 +2661,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const key = metadata.tokens.find((item) => item.id === rule.tokenId);
         // 目录里找不到绑定的 Key：下一轮把这个上游的目录和身份全部重读（P1b 的异常之一）
         if (!key) staleMetadata.add(rule.upstreamStationId);
-        const detail = !key ? issueText("KEY_INVALID_OR_DENIED") : key.status !== 1 ? KEY_DISABLED_TEXT
+        const detail = !key ? "上游里找不到这把 Key" : key.status !== 1 ? KEY_DISABLED_TEXT
           : key.name !== rule.tokenName ? "上游里这把 Key 改名了，去确认"
             : !tokenNameIsUnique(metadata, key) ? KEY_NAME_AMBIGUOUS_TEXT
               : key.group === "auto" || key.crossGroupRetry ? KEY_GROUP_TEXT : null;
-        if (detail && !upstreamOptional) return unavailable(health("KEY_INVALID_OR_DENIED", detail), { metadata, token: key }, false);
-        if (detail) upstreamProblem ||= health("KEY_INVALID_OR_DENIED", detail);
+        // 找不到这把 Key：另写一句、按钮去换 Key（variant: missing）；别的（停用、改名、重名、分组）原因就是 detail 这句，放进详细原因里
+        const keyHealth = () => health("KEY_INVALID_OR_DENIED", detail, !key ? { variant: "missing" } : { diagnostic: detail });
+        if (detail && !upstreamOptional) return unavailable(keyHealth(), { metadata, token: key }, false);
+        if (detail) upstreamProblem ||= keyHealth();
       }
       let identity, ownSource;
       identity = upstreamResource?.identity;
@@ -2778,6 +2788,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const partialGapCandidate = consumeLogIssue?.code === "OWN_CONSUME_LOG_GAP" && !billDayOf(window) && !settle;
       if (consumeLogIssue && !partialGapCandidate) issues.push(consumeLogIssue);
       if (upstreamProblem) issues.push(upstreamSide({ code: upstreamProblem.code, scope: "upstream", detail: upstreamProblem.detail, observedAt: Date.now(),
+        ...(upstreamProblem.variant ? { variant: upstreamProblem.variant } : {}), ...(upstreamProblem.diagnostic ? { diagnostic: upstreamProblem.diagnostic } : {}),
         // 令牌作废、少了权限要说是哪个上游、少的哪一项（审核 #107 低-4：固定成本的上游走这里，原来这两样丢了）
         ...(upstreamProblem.stationName != null ? { stationName: upstreamProblem.stationName } : {}), ...(upstreamProblem.missingScope ? { missingScope: upstreamProblem.missingScope } : {}) }));
       else if (!catalogueObserved && platform !== "sub2api") {
@@ -2920,7 +2931,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // cause：读账单时上游报的原始码（限流、5xx 是 UPSTREAM_REQUEST_FAILED，连不上、超时是 NETWORK_UNREACHABLE），回看靠它分辨「这个上游这一刻整体读不到」
           segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now(),
             ...(upstreamResult.error?.code ? { cause: String(upstreamResult.error.code) } : {}),
-            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}) }));
+            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}),
+            ...(billHealth.variant ? { variant: billHealth.variant } : {}), ...(billHealth.diagnostic ? { diagnostic: billHealth.diagnostic } : {}) }));
           // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
@@ -3495,11 +3507,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           lastSuccessfulWindow: result.lastSuccessfulWindow,
           currentSegment: result.currentSegment,
           transitionSegments: result.transitionSegments,
-          segments: result.segments,
+          segments: result.segments?.map((segment) => (segment?.health ? { ...segment, health: withoutDiagnostic(segment.health) } : segment)),
           upstream: result.upstream,
           downstream: result.downstream,
           calculation: result.calculation,
-          health: result.health,
+          health: withoutDiagnostic(result.health),
           generatedAt: result.generatedAt,
         },
       };
