@@ -1105,7 +1105,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && (() => { const range = bindingDayRange(other); return range.from <= last && range.to >= first; })());
     let theirs = {};
     if (peers.length) { try { theirs = await repository.listDayKeys(peers.map((other) => other.id), first, last); } catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); } }
-    return (day) => peers.some((other) => { const range = bindingDayRange(other); return day >= range.from && day <= range.to && (theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => Number(key.tokenId) === Number(tokenId)); });
+    return (day) => peers.some((other) => { const range = bindingDayRange(other); return day >= range.from && day <= range.to && (theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => !key.yielded && Number(key.tokenId) === Number(tokenId)); });
   }
 
   // 换 Key 时找新 Key 哪天开始用的（D）：从今天往前一天一天查新 Key 在上游的用量，碰到第一个没用量的天就停，最多查 31 天，也不早于这条绑定的开始日；
@@ -1177,17 +1177,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
     }
     // 被挡住的几天：Key 集合换成新的一把（D 以后的已经换好），状态行标成「原因没了」，下一轮轮询按新 Key 结账固定
-    // 那天这把 Key 在同一个上游别的绑定的每天 Key 里（比如 Key 刚从别的渠道挪过来、那边照常固定着）：这一天不改给新 Key，继续挡着（还是需处理），不悄悄算两遍
-    const blockedAll = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
-    const heldBlocked = blockedAll.length ? await keyHeldByOthers(rule, token.id, blockedAll.map((state) => state.billDate).sort()[0], today) : () => false;
-    const blocked = blockedAll.filter((state) => !heldBlocked(state.billDate));
+    // 那天这把 Key 在同一个上游别的绑定的每天 Key 里（比如 Key 刚从别的渠道挪过来、控制台还没改，那边照常固定着）：这一天照样改成新 Key、重新排队结账，
+    // 但这条绑定这天这把 Key 让出去（yielded）：成本记 0、收入照算，这把 Key 只在别的绑定那边算一次，不回头改别的绑定已经固定的天
+    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
+    const heldBlocked = blocked.length ? await keyHeldByOthers(rule, token.id, blocked.map((state) => state.billDate).sort()[0], today) : () => false;
     const before = blocked.filter((state) => state.billDate < fromDay);
     const recheckStates = blocked.map((state) => {
       const window = { preset: "custom", startMs: dayStartInTz(state.billDate, rule.timezone), endMs: dayStartInTz(shiftDayLabel(state.billDate, 1), rule.timezone), timezone: rule.timezone };
       recomputed.add(state.billDate);
       return { billDate: state.billDate, state: settlementRecheck({ window, state, blocker: null, now }) };
     });
-    const extra = { now, fillDayKeys, replaceDayKeys: { dates: [...days, ...before.map((state) => state.billDate)], rows: [...dayRows, ...before.map((state) => ({ billDate: state.billDate, ...ref }))] },
+    const extra = { now, fillDayKeys, replaceDayKeys: { dates: [...days, ...before.map((state) => state.billDate)], rows: [...dayRows, ...before.map((state) => ({ billDate: state.billDate, ...ref, ...(heldBlocked(state.billDate) ? { yielded: true } : {}) }))] },
       resettleDates, recheckStates };
     let result;
     try { result = await repository.changeRuleKey(rule.id, built.plan, { detectedAt: now, extra, reopen }); } catch { throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试"); }
@@ -1930,6 +1930,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && laterBound(other, rule)
       && (() => { const range = bindingDayRange(other); return range.from <= last && range.to >= first; })());
     const lost = new Set();
+    // 这条绑定自己让出来的（yielded：控制台滞后挪 Key 的几天，那把 Key 在别的绑定那边已经固定）：不管谁先绑，这天这把 Key 都不算在这条上
+    for (const [day, keys] of Object.entries(recorded)) for (const key of keys) if (key.yielded) lost.add(`${key.tokenId}|${day}`);
     if (!peers.length) return lost;
     const theirs = await repository.listDayKeys(peers.map((other) => other.id), first, last);
     for (let day = first; day <= last; day = shiftDayLabel(day, 1)) {
@@ -1937,7 +1939,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       for (const other of peers) {
         const range = bindingDayRange(other);
         if (day < range.from || day > range.to) continue;
-        for (const key of theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]) if (mine.includes(String(key.tokenId))) lost.add(`${key.tokenId}|${day}`);
+        // 对方让出来的不算它在用
+        for (const key of (theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).filter((item) => !item.yielded)) if (mine.includes(String(key.tokenId))) lost.add(`${key.tokenId}|${day}`);
       }
     }
     return lost;
