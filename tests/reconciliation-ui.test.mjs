@@ -217,8 +217,8 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), ["渠道", "收入", "上游成本", "毛利", "毛利率", ""], "没点过表头不画箭头；看一天最后一列是「计算明细」（表头不写字）");
   assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C"], "默认按毛利从高到低");
   assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupIdle(3)], "今天分组：这几个渠道最近 1 小时都没收入");
-  // 名字下面只写上游名；没有 Key、分组、差额、选 Key
-  await rowOf(page, "Rule A").getByText("Fixture upstream", { exact: true }).waitFor();
+  // 名字下面小字写「上游 · Key ×倍率」；没有分组、差额、选 Key
+  await rowOf(page, "Rule A").getByText("Fixture upstream · Rule A ×1.0", { exact: true }).waitFor();
   assert.equal(await page.getByText(/Key|分组|差额|应付成本|对不上/).count(), 0);
   // 亏钱的毛利、毛利率标红
   assert.equal(await rowOf(page, "Rule C").locator(".jy-profit-neg").count(), 2); assert.equal(await rowOf(page, "Rule B").locator(".jy-profit-neg").count(), 0);
@@ -315,12 +315,12 @@ test("表下面一行：没算进利润的上游成本、还没算利润的渠�
 
 test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片（右上毛利、右下收入和毛利率）；看一天时「计算明细」整屏打开；不横向滚动", async (t) => {
   const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
-  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 375, height: 812 }, pageOf: (body) => profitPage(rows, { preset: "7d", customPreset: body.preset }) });
+  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 375, height: 812 }, pageOf: (body) => profitPage(rows, { preset: body.preset === "yesterday" ? "yesterday" : "7d", customPreset: body.preset }) });
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
   await page.locator(".jy-profit-chart").waitFor(); assert.equal(await page.locator(".jy-profit-table").count(), 0);
   const metrics = await page.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; }));
   assert.equal(metrics[0][1], metrics[1][1], "第一排两个"); assert.equal(metrics[2][1], metrics[3][1], "第二排两个"); assert.ok(metrics[2][1] > metrics[0][1]);
-  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText(PROFIT_COPY.table.mobileLine("$5.00", "80.0%"), { exact: true }).waitFor(); await cardB.getByText("Fixture upstream", { exact: true }).waitFor();
+  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText(PROFIT_COPY.table.mobileLine("$5.00", "80.0%"), { exact: true }).waitFor(); await cardB.getByText("Fixture upstream · Rule B ×1.0", { exact: true }).waitFor();
   assert.deepEqual(await page.locator(".jy-profit-card__head strong").allInnerTexts(), ["Rule B", "Rule A"], "按毛利从高到低");
     assert.equal(await page.getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).count(), 0, "多天：卡片上没有「计算明细」");
   await pickPreset(page, PROFIT_COPY.presets.yesterday);
@@ -333,6 +333,51 @@ test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片�
   if (process.env.UI_SHOT_DIR) { await cardB.scrollIntoViewIfNeeded(); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-375x812-expand.png` }); await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-375x812.png` }); }
 });
 
+
+// ---- 按 Key 算利润（PR3 接口形状：渠道一行，keys[] 一把一项；夹具先写死，接口合并后换成真的）----
+const fixtureKey = (name, o = {}) => ({ tokenId: name, name, upstream: { stationId: "upstream-1", name: "Fixture upstream", provider: "newapi" }, state: "active", firstDay: PROFIT_TODAY, lastDay: PROFIT_TODAY, days: 1, ratio: 0.5, ratioKind: "group",
+  costUsd: 1, rawUsd: 2, incomeUsd: 2.5, incomeBasis: "single", grossProfitUsd: 1.5, grossMarginRate: 0.6, pendingDays: 0, ...o });
+const keyedRows = () => [
+  { ...profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), bound: true, activeNow: true, keys: [fixtureKey("oai-A")] },
+  { ...profitRow("rule-2", "Rule B", { income: 5, cost: 2 }), bound: true, activeNow: false, keys: [fixtureKey("oai-16", { incomeUsd: 2, costUsd: 0.8, rawUsd: 1.6, grossProfitUsd: 1.2, incomeBasis: "raw" }), fixtureKey("oai-01", { state: "swapped", ratio: 0.8, incomeUsd: 3, costUsd: 1.2, rawUsd: 1.5, grossProfitUsd: 1.8, incomeBasis: "raw" })] },
+  { ...profitRow("rule-3", "Rule C", { income: 1, cost: 0.5 }), bound: false, unboundOn: PROFIT_TODAY, activeNow: false, keys: [fixtureKey("oai-C", { state: "unbound", incomeUsd: 1, costUsd: 0.5 })] },
+];
+const keyedDetail = () => profitDetail({ day: PROFIT_TODAY, keyChangeRatioDiffers: true, swappedUpstream: false,
+  keys: [fixtureKey("oai-16", { incomeUsd: 2, costUsd: 0.8, rawUsd: 1.6 }), fixtureKey("oai-01", { ratio: 0.8, incomeUsd: 3, costUsd: 1.2, rawUsd: 1.5 })], split: { basis: "raw", shares: [{ tokenId: "oai-16", percent: 40 }, { tokenId: "oai-01", percent: 60 }] } });
+
+test("按 Key 算利润（电脑）：今天分「有收入 / 没收入 / 已解绑」三组；只有一把 Key 的写小字、两把以上下面挂 Key 行（在用 / 已换掉）；已解绑的渠道最后一把不标；计算明细里一把 Key 一行", async (t) => {
+  const rows = keyedRows();
+  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 1440, height: 900 }, detail: (route, params) => fulfill(route, keyedDetail()) });
+  assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupActive(1), PROFIT_COPY.table.groupIdle(1), PROFIT_COPY.table.groupUnbound(1)]);
+  assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule A", "Rule B", "Rule C"]);
+  await rowOf(page, "Rule A").getByText("Fixture upstream · oai-A ×0.5", { exact: true }).waitFor();
+  assert.equal(await rowOf(page, "Rule C").locator(".jy-profit-unbound-tag").innerText(), PROFIT_COPY.table.unboundTag);
+  const keyRows = page.locator(".jy-profit-keyrow");
+  assert.deepEqual((await keyRows.evaluateAll((nodes) => nodes.map((node) => node.querySelector("td").innerText.replace(/\s+/g, " ").trim()))), ["oai-16 ×0.5在用", "oai-01 ×0.8已换掉"]);
+  assert.equal(await keyRows.first().evaluate((node) => node.dataset.keyOf), "upstream-1:rule-2", "Key 行只挂在用过两把 Key 的渠道下面");
+  assert.equal(await page.locator(".jy-profit-row.is-clickable").count(), 3);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-today-1440x900.png` });
+  await rowOf(page, "Rule B").click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月9日"), exact: true }); await drawer.waitFor();
+  assert.deepEqual(detailReads, [{ ruleIds: "rule-2", day: PROFIT_TODAY }]);
+  await drawer.getByText(PROFIT_COPY.detail.keys.intro(2), { exact: true }).waitFor();
+  assert.deepEqual((await drawer.locator(".jy-profit-keystable thead th").allInnerTexts()).map((text) => text.trim()), Object.values(PROFIT_COPY.detail.keys.col));
+  assert.equal(await drawer.locator(".jy-profit-keystable tbody tr").count(), 2);
+  await drawer.getByText(PROFIT_COPY.detail.keys.splitRaw(2, "oai-16 分 40%，oai-01 分 60%"), { exact: true }).waitFor();
+  await drawer.getByText(PROFIT_COPY.detail.keys.from(2), { exact: true }).waitFor();
+  await drawer.getByText(PROFIT_COPY.detail.verify.keyRatioDiffers, { exact: true }).waitFor();
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(600); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-detail-1440x900.png` }); }
+});
+
+test("按 Key 算利润（手机 375）：分组小标题；卡片里 Key 两行小字（Key 和标签 + 毛利率、收入和成本）；页面不横向滚动", async (t) => {
+  const { page } = await openDailyPage(t, { rows: keyedRows(), viewport: { width: 375, height: 812 } });
+  assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupActive(1), PROFIT_COPY.table.groupIdle(1), PROFIT_COPY.table.groupUnbound(1)]);
+  const cardB = cardOf(page, "Rule B");
+  assert.deepEqual((await cardB.locator(".jy-profit-key__head").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), ["oai-16 ×0.5在用 60.0%", "oai-01 ×0.8已换掉 60.0%"]);
+  await cardB.getByText(PROFIT_COPY.table.mobileKeyLine("$2.00", "$0.80"), { exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px document root overflows horizontally");
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-today-375x812.png` });
+});
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
@@ -416,7 +461,6 @@ test("按天挡：一个渠道中间一天需处理时，这一行照样写算�
   await bangOf(rowA, "Rule A").click(); await page.locator(".jy-issue-pop").getByRole("link", { name: /^去换 Key/ }).waitFor(); await page.locator(".jy-profit-caption").click(); await page.locator(".jy-issue-pop").waitFor({ state: "hidden" }); await page.waitForTimeout(400);
   assert.equal((await rowA.getAttribute("class")).includes("is-clickable"), false, "多天的行点不开");
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-per-day-block-1440x900.png` });
-}); }
 });
 
 test("计算明细：上面收入、上游成本、毛利三节；下面「核对上游扣费」可收起，右边一句结论；对不上的那天默认展开，对得上的收起；没有「改时间」", async (t) => {

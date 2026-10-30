@@ -114,6 +114,15 @@ export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" 
   incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null };
 // 差额的状态：over / under 对不上（多扣 / 少扣）、within 门槛以内、today 明天出、reading 还在读取、uncomputable 算不了（reason 给原因）、attention 需处理、notStarted 还没开始算
 export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" | "none";
+export type ProfitKeyRow = {
+  tokenId: number | string; name: string; upstream: { stationId: string; name: string | null; provider: string | null };
+  // unbound：已解绑渠道的最后一把，不标「在用」也不标「已换掉」
+  state: "active" | "swapped" | "unbound"; firstDay: string; lastDay: string; days: number;
+  ratio: number | null; ratioKind: "group" | "actual_over_standard";
+  costUsd: number | null; rawUsd: number | null; incomeUsd: number | null; incomeBasis: "single" | "raw" | "cost" | null;
+  grossProfitUsd: number | null; grossMarginRate: number | null; pendingDays: number;
+};
+export type ProfitDetailKey = Pick<ProfitKeyRow, "tokenId" | "name" | "upstream" | "ratio" | "ratioKind" | "costUsd" | "rawUsd" | "incomeUsd" | "incomeBasis" | "grossProfitUsd" | "grossMarginRate">;
 export type ProfitRow = {
   rowKey: string; ruleIds: string[]; channels: { channelId: number; name: string | null }[];
   upstream: { stationId: string; name: string | null; provider: string | null };
@@ -129,8 +138,10 @@ export type ProfitRow = {
     // 这天重算的数比原来少了一半多、没换掉（RESETTLE_SHRUNK）：点「重新读取」先弹确认框用这几个数，没有就是 null（C3，resettleShrunkConfirm）
     shrunk: { side: "revenue" | "cost" | "both"; before: { revenueUsd: number | null; costUsd: number | null }; after: { revenueUsd: number | null; costUsd: number | null } } | null } | null;
   excludedDays: number; daily: ProfitDayCell[];
-  // 已解绑的渠道（以前的数留在页面里）；最近 1 小时有收入（只看今天时用）
-  unbound?: boolean; activeNow?: boolean; lastSaleAt?: number | null;
+  // 一个渠道一行：现在还绑着吗、哪天解绑的（以前的数留在页面里）；渠道合计 = keys 相加；最近 1 小时有收入（只看今天时有，别的范围 null）
+  bound?: boolean; unboundOn?: string | null; grossMarginRate?: number | null; activeNow?: boolean | null; lastSaleAt?: number | null;
+  // 这段时间用过的每把 Key，在用的排最前
+  keys?: ProfitKeyRow[];
   latestSettledGap: { day: string; usd: number | null; state: "over" | "under" | "within" | null; reason: string | null } | null;
 };
 export type ProfitPageResponse = {
@@ -161,6 +172,9 @@ export type ProfitDetailResponse = {
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
   // 固定这天时自营站点的设置一直读不到（R2）
   settingUnreadable?: boolean;
+  // 这天用了不止一把 Key：每把的数、收入怎么分、这天有没有换上游、新旧倍率是否不一样
+  keys?: ProfitDetailKey[]; split?: { basis: "single" | "raw" | "cost" | "pending"; shares: { tokenId: number | string; percent: number }[] };
+  swappedUpstream?: boolean; keyChangeRatioDiffers?: boolean;
 };
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）

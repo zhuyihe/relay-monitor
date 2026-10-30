@@ -57,6 +57,11 @@ export const COPY = Object.freeze({
     groupIdle: (n: number) => `最近 1 小时没收入 · ${n}`,
     groupUnbound: (n: number) => `已解绑 · ${n}`,
     unboundTag: "已解绑",
+    // Key 行后面的标签
+    mobileKeyLine: (income: string, actual: string) => `收入 ${income} · 成本 ${actual}`,
+    keyActive: "在用", keySwapped: "已换掉",
+    keyActiveSince: (from: string) => `在用 · ${from}起`,
+    keySwappedRange: (range: string) => `已换掉 · 用了 ${range}`,
     mobileLine: (income: string, margin: string) => `收入 ${income} · 毛利率 ${margin}`,
     totals: (n: number) => `合计（算进来的 ${n} 个渠道）`,
     // 已固定、又因为重算的事需处理、照算进了合计的行（设计 10-26 定）
@@ -126,6 +131,7 @@ export const COPY = Object.freeze({
       match: "对得上",
       mismatch: (over: string) => `${over}，对不上`,
       keyChange: "这天换了 Key，不比差额",
+      keyRatioDiffers: "这天换了 Key，新旧倍率不一样，这天不比差额",
     }),
     title: (name: string, day: string) => `计算明细 · ${name} · ${day}`,
     readFailed: "读不到计算明细",
@@ -154,6 +160,16 @@ export const COPY = Object.freeze({
     missingHint: "这一天的应付成本、差额写「—」。",
     actual: "上游成本",
     unavailableUnknown: "这天还没算出来",
+    // 这天用了不止一把 Key（每把都按整天算）
+    keys: Object.freeze({
+      intro: (n: number) => `这天算了 ${n} 把 Key，每把都按整天算：`,
+      col: Object.freeze({ key: "Key", ratio: "倍率", cost: "上游成本", raw: "原价用量", income: "分到的收入", gross: "毛利", margin: "毛利率" }),
+      ratioKind: "实际扣除 ÷ 标准计费",
+      splitRaw: (n: number, shares: string) => `收入只读得到这个渠道一整天的，按原价用量（上游成本 ÷ 倍率）的比例分给这 ${n} 把 Key：${shares}。`,
+      splitCost: (n: number, shares: string) => `收入只读得到这个渠道一整天的，读不到倍率，按上游成本的比例分给这 ${n} 把 Key：${shares}。`,
+      share: (name: string, percent: string) => `${name} 分 ${percent}`,
+      from: (n: number) => `上游成本来自上游这 ${n} 把 Key 这天的用量记录。`,
+    }),
     actualFrom: (key: string) => `来自上游这把 Key「${key}」这天的用量记录。`,
     gap: "差额",
     gapFormula: "上游成本 − 应付成本",

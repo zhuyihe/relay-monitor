@@ -68,9 +68,21 @@
 .jy-profit-group__title > td { padding: 6px 24px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
 .jy-profit-group__dot { display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--jy-ok, #2e9e5b); vertical-align: middle; }
 .jy-profit-unbound-tag { margin-left: 8px; }
-.jy-profit-cards-wrap + .jy-profit-cards-wrap { margin-top: 8px; }
-.jy-profit-cards-title { margin: 0; padding: 6px 14px; background: var(--jy-sunken); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
+.jy-profit-group__title--card { padding: 6px 14px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule-soft); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
+.jy-profit-unbound-tag, .jy-profit-key-tag { font-style: normal; }
 .jy-profit-card__detail { padding: 0; height: auto; min-height: 32px; font-size: 12px; }
+
+/* Key 行：缩进、灰一点 */
+.jy-profit-keyrow > td { padding-top: 6px; padding-bottom: 6px; background: var(--jy-sunken); color: var(--jy-ink-2); font-size: 13px; border-top: 1px solid var(--jy-rule-soft); cursor: default; }
+.jy-profit-keyrow__name { padding-left: 44px !important; }
+.jy-profit-key-tag { margin-left: 8px; }
+.jy-profit-key-tag.is-active { color: var(--jy-ink); }
+.jy-profit-keys { margin: 8px 0 0 12px; padding: 0; list-style: none; border-left: 2px solid var(--jy-rule-soft); }
+.jy-profit-key { padding: 4px 0 4px 10px; color: var(--jy-ink-2); font-size: 13px; line-height: 20px; }
+.jy-profit-key__head { display: flex; justify-content: space-between; gap: 12px; }
+.jy-profit-key__head b { font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.jy-profit-key__sub { font-size: 12px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-profit-keystable small { display: block; font-size: 11px; color: var(--jy-ink-3); }
 
 /* 表下面那一行 */
 .jy-profit-notes { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: -4px 0 0; padding: 0 24px; }

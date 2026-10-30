@@ -2,7 +2,7 @@
 // 每日利润的渠道表（设计 10-29）：桌面一行一个渠道（收入、上游成本、毛利、毛利率），默认按毛利从高到低、点表头换排法、亏钱的标红；
 // 点开一个渠道一天一行，行末「计算明细」打开那天的计算明细；需处理的渠道名字后面一个感叹号，点开写原因加按钮。手机一个渠道一张卡片。
 // 字都从 copy.ts 和 profit-format.ts 来，这里只负责摆。
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Alert, Button } from "antd";
 import { RecheckConsumeLogButton } from "../../components/recheck-consume-log";
@@ -10,10 +10,10 @@ import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { CountBadge, Panel } from "../../components/panel";
 import { EmptyState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
-import type { ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
+import type { ProfitKeyRow, ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
 import { EMPTY } from "../../../lib/format";
 import { COPY } from "./copy";
-import { DEFAULT_SORT, arrangeRows, fmtMoney, isTodayView, marginText, rowCells, rowMoney, rowName, rowUpstream, totalsRow } from "./profit-format";
+import { DEFAULT_SORT, arrangeRows, fmtMoney, isTodayView, marginText, hasKeyRows, isSingleDay, isUnbound, keyCells, keyLabel, keyTag, rangeDays, rowCells, rowMoney, rowName, rowUpstream, swappedUpstream, totalsRow } from "./profit-format";
 import type { Ctx, RowGroup, RowLayout, Sort, SortKey } from "./profit-format";
 
 type Props = {
@@ -76,9 +76,29 @@ function Cells({ row, ctx }: { row: ProfitRow; ctx: Ctx }) {
   </>;
 }
 
+// Key 行（用过两把以上 Key 的渠道下面一直挂着，不能收起、不能点）：缩进、灰一点，列和渠道行一样；标签看一天只写「在用」「已换掉」，看多天带日子
+type KeyView = { singleDay: boolean; first: string; tz: string; now: number };
+const keyView = (page: ProfitPageResponse, ctx: Ctx): KeyView => ({ singleDay: isSingleDay(page), first: rangeDays(page).first, tz: ctx.tz, now: ctx.now });
+function KeyTag({ keyRow, view }: { keyRow: ProfitKeyRow; view: KeyView }) {
+  const tag = keyTag(keyRow, view.singleDay, view.first, view.tz, view.now);
+  return tag ? <em className={`jy-tag jy-tag--type jy-profit-key-tag${keyRow.state === "active" ? " is-active" : ""}`}>{tag}</em> : null;
+}
+function KeyRowDesktop({ row, keyRow, ctx, view, detailDay }: { row: ProfitRow; keyRow: ProfitKeyRow; ctx: Ctx; view: KeyView; detailDay: string | null }) {
+  const cells = keyCells(keyRow, row, ctx), loss = cells.gross != null && cells.gross < 0;
+  return <tr className="jy-profit-keyrow" data-key-of={row.rowKey}>
+    <td className="jy-profit-keyrow__name"><span>{keyLabel(keyRow, swappedUpstream(row))}</span><KeyTag keyRow={keyRow} view={view} /></td>
+    <td className="jy-profit-num">{fmtMoney(cells.income, ctx.currency)}</td>
+    <td className="jy-profit-num">{fmtMoney(cells.actual, ctx.currency)}</td>
+    <td className="jy-profit-num">{cells.gross == null ? EMPTY : neg(loss, fmtMoney(cells.gross, ctx.currency))}</td>
+    <td className="jy-profit-num">{cells.gross == null ? EMPTY : neg(loss, marginText(cells.gross, cells.income))}</td>
+    {detailDay ? <td /> : null}
+  </tr>;
+}
+
 // 看一天时（今天、昨天、选的某一天）每行最后一个「计算明细」，点它或点这一行都打开这天的计算明细；看多天时没有，行也不能点
 function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | null; setPopOpen: (key: string | null) => void }) {
   const { page, ctx, groups, onOpenDetail, sort, onSort, detailDay } = props;
+  const view = keyView(page, ctx);
   const totals = totalsRow(page, ctx), columns = COLUMNS.length + (detailDay ? 1 : 0);
   return <div className="jy-table-wrap">
     <table className="jy-profit-table">
@@ -92,18 +112,18 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
         {group.title ? <tr className={`jy-profit-group__title is-${group.key}`}><td colSpan={columns}>{group.key === "active" ? <i className="jy-profit-group__dot" aria-hidden="true" /> : null}{group.title}</td></tr> : null}
         {group.rows.map((row) => {
           const name = rowName(row);
-          return <tr key={row.rowKey} className={`jy-profit-row${detailDay ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={detailDay ? () => onOpenDetail(row, detailDay) : undefined}>
+          return <Fragment key={row.rowKey}><tr className={`jy-profit-row${detailDay ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={detailDay ? () => onOpenDetail(row, detailDay) : undefined}>
             <td className="jy-profit-row__name">
               <span className="jy-profit-row__line">
                 <strong>{name}</strong>
-                {row.unbound ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
+                {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
                 <RowBang row={row} popKey={row.rowKey} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
               </span>
-              <small>{rowUpstream(row)}</small>
+              {rowUpstream(row) ? <small>{rowUpstream(row)}</small> : null}
             </td>
             <Cells row={row} ctx={ctx} />
             {detailDay ? <td className="r jy-profit-detail-cell"><Button type="link" size="small" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}</Button></td> : null}
-          </tr>;
+          </tr>{hasKeyRows(row) ? row.keys!.map((key) => <KeyRowDesktop key={String(key.tokenId)} row={row} keyRow={key} ctx={ctx} view={view} detailDay={detailDay} />) : null}</Fragment>;
         })}
       </tbody>)}
       <tfoot><tr className="jy-profit-totals">
@@ -114,7 +134,8 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
 }
 
 function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null; setPopOpen: (key: string | null) => void }) {
-  const { ctx, groups, onOpenDetail, detailDay } = props;
+  const { page, ctx, groups, onOpenDetail, detailDay } = props;
+  const view = keyView(page, ctx);
   return <div className="jy-profit-cards-wrap">
     {groups.map((group) => <section key={group.key} data-group={group.key}>
       {group.title ? <div className={`jy-profit-group__title jy-profit-group__title--card is-${group.key}`}>{group.key === "active" ? <i className="jy-profit-group__dot" aria-hidden="true" /> : null}{group.title}</div> : null}
@@ -125,11 +146,18 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
           return <li key={row.rowKey} className={`jy-profit-card${detailDay ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={detailDay ? () => onOpenDetail(row, detailDay) : undefined}>
             <div className="jy-profit-card__head">
               <strong>{name}</strong>
-              {row.unbound ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
+              {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
               <RowBang row={row} popKey={`m:${row.rowKey}`} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
               <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</b>
             </div>
             <div className="jy-profit-card__sub"><span>{rowUpstream(row)}</span><span>{COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
+            {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
+              const cells = keyCells(key, row, ctx);
+              return <li key={String(key.tokenId)} className="jy-profit-key">
+                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span><b>{cells.gross == null ? EMPTY : marginText(cells.gross, cells.income)}</b></div>
+                <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(fmtMoney(cells.income, ctx.currency), fmtMoney(cells.actual, ctx.currency))}</div>
+              </li>;
+            })}</ul> : null}
             {detailDay ? <Button type="link" size="small" className="jy-profit-card__detail" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}</Button> : null}
           </li>;
         })}

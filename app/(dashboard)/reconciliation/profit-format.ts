@@ -2,7 +2,7 @@
 // 不含 JSX，页面组件和单元测试（profit-format.test.js，node 直接跑）共用；导入带 .js 后缀。
 // 钱：接口给美元原币，整页按 displayCurrency 换算——收入按自营站点的汇率、成本按这个上游的汇率（行上的 rates）；
 // 按美元显示时不换算。金额不写 0（算不出的写「—」），写法按 design/ui-copy-spec.md §5.7、§6、§7。
-import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow, ReconciliationCurrency } from "../../../lib/client";
+import type { ProfitDetailResponse, ProfitKeyRow, ProfitPageResponse, ProfitRow, ReconciliationCurrency } from "../../../lib/client";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view.js";
 import { EMPTY, MINUS, RATE_UNSET_USD, UPSTREAM_GONE, formatAsOfTime, formatCompact, formatDayKey, formatPct, formatUnitPrice, formatZonedTime, weekdayOfDayKey } from "../../../lib/format.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel, tzOffsetMs } from "../../../lib/business-time.js";
@@ -148,8 +148,36 @@ export function gapReasonText(reason: string | null | undefined, missingModels: 
 
 // ---- 一行 ----
 export const rowName = (row: ProfitRow) => row.channels.map((channel) => channel.name || `渠道 ${channel.channelId}`).join("、") || EMPTY;
-// 名字下面的小字只写上游名
-export const rowUpstream = (row: ProfitRow) => row.upstream?.name || UPSTREAM_GONE;
+export const isUnbound = (row: ProfitRow) => row.bound === false;
+// 这段时间用过两把以上 Key：下面一直挂着 Key 行；只有一把（或接口没给 keys）：名字下面小字写「上游 · Key ×倍率」
+export const hasKeyRows = (row: ProfitRow) => (row.keys?.length ?? 0) >= 2;
+const ratioPart = (ratio: number | null | undefined) => (finite(ratio) ? ` ×${ratioText(ratio)}` : "");
+export function rowUpstream(row: ProfitRow): string {
+  if (hasKeyRows(row)) return "";
+  const key = row.keys?.[0];
+  const upstream = key?.upstream?.name ?? row.upstream?.name ?? UPSTREAM_GONE;
+  return `${upstream} · ${key?.name ?? row.key?.name ?? EMPTY}${ratioPart(key ? key.ratio : row.key?.groupRatio)}`;
+}
+// Key 行的名字「oai-16 ×0.5」；这段时间换过上游，前面加上游名「云帆 · oai-16 ×0.5」
+export const swappedUpstream = (row: ProfitRow) => new Set((row.keys || []).map((key) => key.upstream?.stationId)).size > 1;
+export const keyLabel = (key: { name: string; ratio: number | null; upstream: { name: string | null } }, withUpstream: boolean) =>
+  `${withUpstream ? `${key.upstream?.name ?? UPSTREAM_GONE} · ` : ""}${key.name}${ratioPart(key.ratio)}`;
+// Key 行的数：和渠道行同一套换算（收入按自营站点汇率、成本按这个上游的汇率）；读不到的写「—」
+export function keyCells(key: Pick<ProfitKeyRow, "incomeUsd" | "costUsd">, row: ProfitRow, ctx: Ctx) {
+  const income = toDisplay(key.incomeUsd, row.rates?.income, ctx.currency), actual = toDisplay(key.costUsd, row.rates?.cost, ctx.currency);
+  const gross = income != null && actual != null ? income - actual : null;
+  return { income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null };
+}
+// Key 行后面的标签：看多天写「在用 · 27日起」「已换掉 · 用了 23日–27日」（跨月写全）；看一天只写「在用」「已换掉」；已解绑渠道的最后一把不标
+export function keyTag(key: { state: ProfitKeyRow["state"]; firstDay: string; lastDay: string }, singleDay: boolean, rangeFirst: string, tz: string, now: number): string | null {
+  if (key.state === "unbound") return null;
+  if (singleDay) return key.state === "active" ? COPY.table.keyActive : COPY.table.keySwapped;
+  const first = key.firstDay < rangeFirst ? rangeFirst : key.firstDay;
+  const day = (value: string) => Number(value.slice(8, 10)) + "日";
+  const full = (value: string) => formatDayKey(value, tz, now);
+  if (key.state === "active") return COPY.table.keyActiveSince(first.slice(0, 7) === dayKeyInTz(now, tz).slice(0, 7) ? day(first) : full(first));
+  return COPY.table.keySwappedRange(first.slice(0, 7) === key.lastDay.slice(0, 7) ? `${day(first)}–${day(key.lastDay)}` : `${full(first)}–${full(key.lastDay)}`);
+}
 // 毛利率 = 毛利 ÷ 收入；收入是 0 或毛利算不出就不写
 export function marginText(gross: number | null | undefined, income: number | null | undefined): string {
   return gross != null && income != null && income > 0 ? formatPct(gross / income) : EMPTY;
@@ -190,7 +218,7 @@ export type RowGroup = { key: RowGroupKey; title: string | null; rows: ProfitRow
 const GROUP_ORDER: RowGroupKey[] = ["active", "idle", "bound", "unbound", "flat"];
 export function groupKeyOf(row: ProfitRow, today: boolean, sorted: boolean): RowGroupKey {
   if (sorted) return "flat";
-  return row.unbound ? "unbound" : today ? (row.activeNow ? "active" : "idle") : "bound";
+  return isUnbound(row) ? "unbound" : today ? (row.activeNow ? "active" : "idle") : "bound";
 }
 const groupTitle = (key: RowGroupKey, rows: ProfitRow[]) => (key === "active" ? COPY.table.groupActive(channelCount(rows)) : key === "idle" ? COPY.table.groupIdle(channelCount(rows)) : key === "unbound" ? COPY.table.groupUnbound(channelCount(rows)) : null);
 export type RowLayout = { ids: string[]; groups: Record<string, RowGroupKey> };
