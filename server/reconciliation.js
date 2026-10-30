@@ -1166,7 +1166,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // D 那天新旧两把都算。重新打开的绑定：旧 Key 只算到解绑那天为止（解绑那一刻起它就不是这个渠道的了，可能已经给了别的渠道），
     // 所以新 Key 第一次有用量的那天晚于解绑那天时，那天和以后只写新 Key
     const archivedDay = reopen && rule.archivedAtMs != null ? dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) : null;
-    const dayRows = days.flatMap((billDate) => (billDate === fromDay && (archivedDay == null || fromDay <= archivedDay) ? [old, ref] : [ref]).map((key) => ({ billDate, ...key })));
+    // 原来那把 Key 在别的绑定那边某天让给了这条绑定（对方那天记着它、yielded）：这天原来那把 Key 留着，和新 Key 一起记——不然改过去的天把它拿掉，对方又让出去了，这把 Key 两边都不算
+    const yieldedToMe = new Set();
+    if (days.length) {
+      const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId);
+      const theirs = peers.length ? await repository.listDayKeys(peers.map((other) => other.id), fromDay, today).catch(() => ({})) : {};
+      for (const other of peers) for (const [day, list] of Object.entries(theirs[other.id] || {})) if (list.some((key) => key.yielded && Number(key.tokenId) === Number(old.tokenId))) yieldedToMe.add(day);
+    }
+    const dayRows = days.flatMap((billDate) => ((billDate === fromDay && (archivedDay == null || fromDay <= archivedDay)) || yieldedToMe.has(billDate) ? [old, ref] : [ref]).map((key) => ({ billDate, ...key })));
     // D 到昨天里已经固定（账本里有）的天：写重结请求重算；超过 31 天的不动
     const recomputed = new Set(), tooOldDays = [], resettleDates = [];
     if (fromDay < today) {
@@ -2041,7 +2048,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const zero = { platform, state: "complete", complete: true, amountUsd: 0, knownAmountUsd: 0, actualCostUsd: 0, quotaUnits: platform === "newapi" ? 0 : null, quotaPerUnit: platform === "newapi" ? metadata?.quotaPerUnit ?? 1 : null,
         window: { startMs: window.startMs, endMs: window.endMs, timezone: window.timezone }, observedAt: Date.now(), currency: "USD", billingTimezone: { state: "verified", timezone: window.timezone } };
       Object.defineProperty(zero, "keyStats", { value: [], enumerable: false, configurable: true });
-      Object.defineProperty(zero, "keysLost", { value: true, enumerable: false, configurable: true }); // 全算在别的绑定上（不是 Key 没用量）
+      Object.defineProperty(zero, "keysLost", { value: true, enumerable: false, configurable: true }); // 这个窗口里的 Key 全算在别的绑定上（不是 Key 没用量）
       return zero;
     }
     const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId })));
@@ -2057,6 +2064,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       byToken.set(id, entry);
     });
     Object.defineProperty(total, "keyStats", { value: [...byToken.values()], enumerable: false, configurable: true });
+    // 这个窗口里有任何一把 Key 这天算在别的绑定上：剩下的 Key 用量是 0 也不是「没用量」，不判 CHANNEL_KEY_NO_USAGE 这类
+    if (lost.size) Object.defineProperty(total, "keysLost", { value: true, enumerable: false, configurable: true });
     return total;
   }
 
@@ -3011,7 +3020,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 上游账单可能晚到几分钟，所以要这个情况连着满 1 小时才提示（从这个进程第一次看到起算，重启重新计时）；Key 有了用量、收入没了、
       // 解绑再绑（规则换了），下一次实时读自己消失
       // 这把 Key 这天全算在后绑的别的渠道上（一把 Key 一天只算在一个渠道上）：成本是 0 不是没用量，不判 CHANNEL_KEY_NO_USAGE / IDLE_TODAY
-      const keysLost = keyParts.length > 0 && keyParts.every((part) => part.keysLost);
+      const keysLost = keyParts.some((part) => part.keysLost);
       if (window.preset === "today" && !settle && !probe) {
         const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own) && !keysLost;
         const tracker = (rt._keyIdleSince ||= new Map()), seen = tracker.get(rule.id), dayKey = dayKeyInTz(Date.now(), rule.timezone);
