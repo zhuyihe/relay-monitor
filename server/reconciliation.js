@@ -42,6 +42,7 @@ import { OwnLogStore } from "./own-log-store.js";
 import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
+import { lastSaleAtOf, noteTodayIncome } from "../lib/sale-tracker.js";
 import { buildProfitDetail, buildProfitPage, dayLabelsOf, fixedCostOfRange } from "../lib/profit-page.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
@@ -2843,6 +2844,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 上游账单可能晚到几分钟，所以要这个情况连着满 1 小时才提示（从这个进程第一次看到起算，重启重新计时）；Key 有了用量、收入没了、
       // 解绑再绑（规则换了），下一次实时读自己消失
       if (window.preset === "today" && !settle && !probe) {
+        // 「最近 1 小时有收入」：记下今天的收入什么时候变多（每日利润页分组用），用的是这次本来就读到的数
+        if (completeDownstream) noteTodayIncome((rt._saleSeen ||= new Map()), rule.id, dayKeyInTz(Date.now(), rule.timezone), downstreamUsd);
         const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own);
         const tracker = (rt._keyIdleSince ||= new Map()), seen = tracker.get(rule.id), dayKey = dayKeyInTz(Date.now(), rule.timezone);
         if (!idleNow) tracker.delete(rule.id);
@@ -3851,7 +3854,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           stickyDays.get(state.ruleId).set(state.billDate, state.manualReason);
         }
       }
-      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays });
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays,
+        lastSaleOf: window.preset === "today" ? (ruleIds) => lastSaleAtOf(rt._saleSeen || new Map(), ruleIds, dayKeyInTz(now, tz)) : null });
       if (rawInput.preset === "since") page.range = { ...page.range, preset: "since" };
       // 固定成本（lib/profit-page.js fixedCostOfRange，运营总览、自营业务以后也用它）：已固定的日子读 reconciliation_fixed_cost_days 里那天记下的金额和汇率，
       // 今天和还没固定的日子按现在的购买记录算；自营站点关着收费记录碰到的日子不扣（决定记录 58）；那天是按用量算的不另扣（审核 #126 M3）。

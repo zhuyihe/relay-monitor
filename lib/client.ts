@@ -129,6 +129,8 @@ export type ProfitRow = {
     // 这天重算的数比原来少了一半多、没换掉（RESETTLE_SHRUNK）：点「重新读取」先弹确认框用这几个数，没有就是 null（C3，resettleShrunkConfirm）
     shrunk: { side: "revenue" | "cost" | "both"; before: { revenueUsd: number | null; costUsd: number | null }; after: { revenueUsd: number | null; costUsd: number | null } } | null } | null;
   excludedDays: number; daily: ProfitDayCell[];
+  // 已解绑的渠道（以前的数留在页面里）；最近 1 小时有收入（只看今天时用）
+  unbound?: boolean; activeNow?: boolean; lastSaleAt?: number | null;
   latestSettledGap: { day: string; usd: number | null; state: "over" | "under" | "within" | null; reason: string | null } | null;
 };
 export type ProfitPageResponse = {

@@ -17,7 +17,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 
 const { COPY } = await import("./copy.ts");
 const {
-  attentionSuffix, chartDays, dayRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
+  attentionSuffix, arrangeRows, chartDays, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
   marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
@@ -171,18 +171,27 @@ test("渠道表默认按毛利从高到低，亏钱的在后面；没算进利�
   assert.deepEqual(nextSort({ key: "gross", dir: "desc" }, "name"), { key: "name", dir: "asc" });
 });
 
-test("点开一个渠道：一天一行，新的在上；已固定写已固定、今天和还在读取写实时、需处理写需处理；没开始算、还没到的不列；亏钱标出来", () => {
-  const r = chan("甲", 100, 60, { daily: [day("10-22", "notStarted"), fixedDay("10-23", 20, 30), day("10-24", "attention", { reason: "OWN_CONSUME_LOG_GAP" }), fixedDay("10-25", 40, 25),
-    day("10-26", "today", { incomeUsd: 8, actualCostUsd: 5, grossUsd: 3 }), day("10-27", "future")] });
-  const rows = dayRows(r, weekPage({ rows: [r] }), ctx);
-  assert.deepEqual(rows.map((x) => [x.label.split(" ")[0], x.state, x.stateText, x.income, x.actual, x.gross, x.margin, x.negative]), [
-    ["10月26日", "live", "实时", "$8.00", "$5.00", "$3.00", "37.5%", false],
-    ["10月25日", "fixed", "已固定", "$40.00", "$25.00", "$15.00", "37.5%", false],
-    ["10月24日", "attention", "需处理", EMPTY, EMPTY, EMPTY, EMPTY, false],
-    ["10月23日", "fixed", "已固定", "$20.00", "$30.00", "−$10.00", "−50.0%", true],
+test("排法：看今天分「有收入 / 没收入 / 已解绑」三组，组内毛利从高到低再按名字；别的范围一张表、已解绑最后；点了表头就是平铺、不分组", () => {
+  const rows = [chan("丙", 10, 12, { activeNow: true }), chan("甲", 50, 20), chan("乙", 30, 10, { activeNow: true }), chan("丁", 5, 1, { unbound: true }), chan("戊", 40, 5, { unbound: true })];
+  const shape = (arranged) => arranged.groups.map((g) => [g.key, g.title, g.rows.map((r) => r.channels[0].name)]);
+  assert.deepEqual(shape(arrangeRows(rows, { today: true, sort: null }, ctx)), [
+    ["active", "最近 1 小时有收入 · 2", ["乙", "丙"]], ["idle", "最近 1 小时没收入 · 1", ["甲"]], ["unbound", "已解绑 · 2", ["戊", "丁"]],
   ]);
-  assert.match(rows[0].label, /今天$/, "今天写「今天」，别的天写周几");
-  assert.match(rows[1].label, /周[日一二三四五六]$/);
+  assert.deepEqual(shape(arrangeRows(rows, { today: false, sort: null }, ctx)), [
+    ["bound", null, ["甲", "乙", "丙"]], ["unbound", "已解绑 · 2", ["戊", "丁"]],
+  ], "多天：已绑定的按毛利排，已解绑放最后、有标题行");
+  assert.deepEqual(shape(arrangeRows(rows, { today: true, sort: { key: "income", dir: "desc" } }, ctx)), [["flat", null, ["甲", "戊", "乙", "丙", "丁"]]]);
+});
+
+test("排法：详情或感叹号气泡开着时顺序和分组不动，新来的接在自己那组后面；关了再按新数排", () => {
+  const first = arrangeRows([chan("甲", 50, 20), chan("乙", 30, 10)], { today: false, sort: null }, ctx);
+  const later = [chan("乙", 90, 10), chan("甲", 50, 20), chan("丙", 60, 0)];
+  const held = arrangeRows(later, { today: false, sort: null }, ctx, first.layout, true);
+  assert.deepEqual(held.groups[0].rows.map((r) => r.channels[0].name), ["甲", "乙", "丙"]);
+  const free = arrangeRows(later, { today: false, sort: null }, ctx, first.layout, false);
+  assert.deepEqual(free.groups[0].rows.map((r) => r.channels[0].name), ["乙", "丙", "甲"]);
+  const moved = arrangeRows([chan("甲", 50, 20, { activeNow: true })], { today: true, sort: null }, ctx, arrangeRows([chan("甲", 50, 20)], { today: true, sort: null }, ctx).layout, true);
+  assert.equal(moved.groups[0].key, "idle", "开着气泡时这行不跳组");
 });
 
 test("每天的毛利：多天才有；一天 = 算进利润的渠道这天的数相加；今天和没固定的天浅色；需处理没算进来的渠道不加；一个数都没有的天不画", () => {

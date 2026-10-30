@@ -45,48 +45,32 @@
 .jy-profit-sort { display: inline-flex; align-items: center; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
 .jy-profit-sort:hover { color: var(--jy-ink); }
 .jy-profit-sort:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: 2px; }
-.jy-profit-row { cursor: pointer; }
-.jy-profit-row:hover > td { background: linear-gradient(var(--jy-cobalt-tint), var(--jy-cobalt-tint)), var(--jy-sheet); }
-.jy-profit-row.is-open > td { background: var(--jy-sunken); }
-.jy-profit-row__expanded > td { padding: 4px 24px 16px 44px; background: var(--jy-sunken); border-top: 0; cursor: default; }
+.jy-profit-row.is-clickable { cursor: pointer; }
+.jy-profit-row.is-clickable:hover > td { background: linear-gradient(var(--jy-cobalt-tint), var(--jy-cobalt-tint)), var(--jy-sheet); }
 .jy-profit-row__name { min-width: 240px; }
 .jy-profit-row__line { display: inline-flex; align-items: center; gap: 0; max-width: 100%; }
 .jy-profit-row__name small { display: block; margin-left: 20px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
-.jy-profit-row__toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; color: var(--jy-ink); font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
-.jy-profit-row__toggle strong { font-weight: 600; }
-.jy-profit-row__toggle .jy-icon, .jy-profit-card__toggle .jy-icon { width: 14px; height: 14px; color: var(--jy-ink-3); flex: none; transition: transform .15s; }
-.jy-profit-row__toggle .jy-icon.is-open, .jy-profit-card__toggle .jy-icon.is-open { transform: rotate(90deg); }
-.jy-profit-row__toggle:focus-visible, .jy-profit-card__toggle:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: 2px; }
 .jy-profit-bang { display: inline-flex; }
 .jy-profit-neg { color: var(--jy-crit); }
 .jy-profit-totals > td { background: var(--jy-sunken); font-weight: 600; border-top: 1px solid var(--jy-rule); }
 
-/* 点开一个渠道：一天一行 */
-.jy-profit-days { width: 100%; background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); font-variant-numeric: tabular-nums; }
-.jy-profit-days th, .jy-profit-days td { padding: 10px 16px; border-top: 1px solid var(--jy-rule-soft); font-size: 13px; line-height: 20px; }
-.jy-profit-days thead th { border-top: 0; }
-.jy-profit-days__state { color: var(--jy-ink); }
-.jy-profit-days__state.is-attention { color: var(--jy-warn-ink); }
-.jy-profit-days__state.is-fixed { color: var(--jy-ink-2); }
-.jy-profit-days--cards { margin: 10px 0 0 20px; padding: 0; list-style: none; width: auto; }
-.jy-profit-days--cards li { padding: 8px 10px; border-top: 1px solid var(--jy-rule-soft); font-size: 13px; line-height: 20px; }
-.jy-profit-days--cards li:first-child { border-top: 0; }
-.jy-profit-days__top, .jy-profit-days__line { display: flex; justify-content: space-between; gap: 12px; }
-.jy-profit-days__line { margin-top: 2px; color: var(--jy-ink-2); font-size: 12px; }
-.jy-profit-days__line b { font-weight: 500; color: var(--jy-ink); white-space: nowrap; }
-.jy-profit-days--cards .ant-btn { padding: 0; height: auto; font-size: 12px; min-height: 32px; }
 
 /* 手机：一个渠道一张卡片 */
 .jy-profit-cards { margin: 0; padding: 0; list-style: none; }
 .jy-profit-card { padding: 12px 14px; border-top: 1px solid var(--jy-rule-soft); }
 .jy-profit-card:first-child { border-top: 0; }
-.jy-profit-card.is-open { background: var(--jy-sunken); }
 .jy-profit-card__head { display: flex; align-items: center; min-width: 0; }
-.jy-profit-card__toggle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 0; border: 0; background: none; color: var(--jy-ink); font: inherit; text-align: left; cursor: pointer; }
-.jy-profit-card__toggle strong { font-size: 15px; line-height: 24px; font-weight: 600; overflow-wrap: anywhere; }
 .jy-profit-card__gross { margin-left: auto; padding-left: 12px; font-size: 15px; line-height: 24px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.jy-profit-card__sub { display: flex; justify-content: space-between; gap: 12px; margin-top: 2px; padding-left: 20px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-profit-card__sub { display: flex; justify-content: space-between; gap: 12px; margin-top: 2px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
 .jy-profit-card__sub span:last-child { text-align: right; }
+
+/* 分组标题行（只在「今天」）、已解绑标记、手机卡片的计算明细 */
+.jy-profit-group__title > td { padding: 6px 24px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
+.jy-profit-group__dot { display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--jy-ok, #2e9e5b); vertical-align: middle; }
+.jy-profit-unbound-tag { margin-left: 8px; }
+.jy-profit-cards-wrap + .jy-profit-cards-wrap { margin-top: 8px; }
+.jy-profit-cards-title { margin: 0; padding: 6px 14px; background: var(--jy-sunken); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
+.jy-profit-card__detail { padding: 0; height: auto; min-height: 32px; font-size: 12px; }
 
 /* 表下面那一行 */
 .jy-profit-notes { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: -4px 0 0; padding: 0 24px; }
@@ -139,5 +123,5 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .jy-profit-switching, .jy-profit-row__toggle .jy-icon, .jy-profit-card__toggle .jy-icon, .jy-profit-verify__head .jy-icon { transition: none; }
+  .jy-profit-switching, .jy-profit-verify__head .jy-icon { transition: none; }
 }

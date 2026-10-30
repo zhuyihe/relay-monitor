@@ -52,6 +52,11 @@ export const COPY = Object.freeze({
     col: Object.freeze({ channel: "渠道", income: "收入", actual: "上游成本", gross: "毛利", margin: "毛利率" }),
     day: Object.freeze({ date: "日期", state: "状态", detail: "计算明细", live: "实时", fixed: "已固定", attention: "需处理", today: "今天" }),
     mobileSort: (column: string, desc: boolean) => `按${column} ${desc ? "▼" : "▲"}`,
+    // 渠道表的分组小标题（只在看今天时有三组；看多天只有「已解绑」）
+    groupActive: (n: number) => `最近 1 小时有收入 · ${n}`,
+    groupIdle: (n: number) => `最近 1 小时没收入 · ${n}`,
+    groupUnbound: (n: number) => `已解绑 · ${n}`,
+    unboundTag: "已解绑",
     mobileLine: (income: string, margin: string) => `收入 ${income} · 毛利率 ${margin}`,
     mobileDay: (income: string, actual: string) => `收入 ${income} · 成本 ${actual}`,
     mobileGross: (gross: string) => `毛利 ${gross}`,
