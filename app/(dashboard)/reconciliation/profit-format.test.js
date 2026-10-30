@@ -283,6 +283,7 @@ test("「核对上游扣费」的结论：对得上、多扣 / 少扣、换了 K
   assert.deepEqual(verifyView(base({ usd: 9.26, rate: 0.085, state: "over" }), p, ctx, null), { text: "多扣 $9.26，对不上", open: true, tone: "crit" });
   assert.deepEqual(verifyView(base({ usd: -0.7, rate: -0.05, state: "under" }), p, ctx, null), { text: "少扣 $0.70，对不上", open: true, tone: "crit" });
   assert.deepEqual(verifyView(base({ usd: 0.01, rate: 0, state: "within" }), p, ctx, null), { text: "对得上", open: false, tone: null });
+  assert.deepEqual(verifyView(base(null, { reason: "REVENUE_ON_LATER_BINDING" }), p, ctx, null), { text: "这天换了上游，这天不比差额", open: false, tone: null });
   assert.deepEqual(verifyView(base(null, { reason: "KEY_CHANGE_RATIO_DIFFERS" }), p, ctx, null), { text: "这天换了 Key，不比差额", open: false, tone: null });
   assert.deepEqual(verifyView(base(null, { reason: "KEY_SHARED" }), p, ctx, null), { text: "这把 Key 别处也在用", open: false, tone: null });
   assert.deepEqual(verifyView({ ...base(null), day: p.today }, p, ctx, null), { text: "明天出", open: false, tone: null });

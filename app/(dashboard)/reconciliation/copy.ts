@@ -100,6 +100,8 @@ export const COPY = Object.freeze({
       // 接口（A1）现在没有把那个时刻单独带出来，先用这句不分情况的；时刻那版等 A1 补数据再接（design/ui-copy-spec.md §5.7）
       PARTIAL_HOUR_UNSUPPORTED: "这天算的时段不是整点开始或结束，收费记录按整点记，切不开，算不了应付成本",
       // 这天换了 Key、新旧倍率不一样（用语规范 §5.7，设计 10-27 定）；换 Key 的时刻带得到时用 keyChangeRatio（见下）
+      // 同一个渠道同一天换了上游：这天先绑的那条不算应付成本
+      REVENUE_ON_LATER_BINDING: "这天换了上游，这天不比差额",
       KEY_CHANGE_RATIO_DIFFERS: "这天换了 Key，新旧倍率不一样，换的那一段分不清该按哪个倍率算，这天不比差额",
     }),
     keyChangeRatio: (when: string) => `这天 ${when} 换了 Key，新旧倍率不一样，换的那一段分不清该按哪个倍率算，这天不比差额`,
