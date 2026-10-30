@@ -493,6 +493,12 @@ const CALCULATION_BLOCKERS = new Set([
 // reference 问题只作参考（如固定采购上游的 Key 账单不全），不挡毛利。
 // 快照内容的指纹：去掉每轮都会变的各种时刻和窗口终点（「今天」的窗口终点就是现在），只看金额、问题、分段这些
 const SNAPSHOT_VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "observedAt", "stateObservedAt", "latestLogAtMs", "endMs"]);
+// 详细原因（上游回的原话）只在需处理的气泡里用，不进数据库快照：上游每轮措辞不一样（请求号、时间戳）会让「今天的快照没变就跳过」失效，也不该把上游原话存下来
+const withoutDiagnostic = (health) => {
+  if (!health || (!health.diagnostic && !(health.issues || []).some((issue) => issue?.diagnostic))) return health;
+  const { diagnostic, ...rest } = health;
+  return { ...rest, ...(Array.isArray(health.issues) ? { issues: health.issues.map(({ diagnostic: dropped, ...issue }) => issue) } : {}) };
+};
 function snapshotContentFingerprint(rows) {
   return createHash("sha256").update(JSON.stringify(rows, (key, value) => SNAPSHOT_VOLATILE_KEYS.has(key) ? undefined : value)).digest("hex");
 }
@@ -3501,11 +3507,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           lastSuccessfulWindow: result.lastSuccessfulWindow,
           currentSegment: result.currentSegment,
           transitionSegments: result.transitionSegments,
-          segments: result.segments,
+          segments: result.segments?.map((segment) => (segment?.health ? { ...segment, health: withoutDiagnostic(segment.health) } : segment)),
           upstream: result.upstream,
           downstream: result.downstream,
           calculation: result.calculation,
-          health: result.health,
+          health: withoutDiagnostic(result.health),
           generatedAt: result.generatedAt,
         },
       };

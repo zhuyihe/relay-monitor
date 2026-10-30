@@ -1551,3 +1551,57 @@ test("超时是读取类（还在读取，不是需处理）：问题上带着�
   const issue = result.health.issues.find((item) => item.code === "UPSTREAM_DATA_UNAVAILABLE");
   assert.match(issue.diagnostic, /^\/api\/log\/self\/stat · 错误：.*timeout/);
 });
+
+test("上游回话不是字符串（数组）、秘密正好压在截断边界：先脱敏再截断，详细原因里连秘密的前几个字都没有（令牌、站点密码、邮箱、sk- 开头的 Key）", async (t) => {
+  const pad = "x".repeat(290);
+  for (const secret of [SECRET_TOKEN, "StationPassw0rdXYZ", "station-ops@example.com", "sk-" + "A".repeat(40)]) {
+    const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+    const station = f.store.get(f.supplier.id);
+    Object.assign(station, { accessToken: SECRET_TOKEN, password: "StationPassw0rdXYZ", email: "station-ops@example.com" });
+    await f.at("2026-10-30T10:00:00");
+    await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+    const inner = globalThis.fetch;
+    t.mock.method(globalThis, "fetch", async (input, init) => {
+      const url = new URL(String(input));
+      if (url.host === "up.test" && url.pathname === "/api/log/self/stat") return { status: 403, text: async () => JSON.stringify({ success: false, message: [pad + "  " + secret] }) };
+      return inner(input, init);
+    });
+    await f.at("2026-10-30T15:00:00");
+    const text = (await todayRow(f)).attention?.diagnostic || "";
+    assert.match(text, /^HTTP 403 · \/api\/log\/self\/stat · 上游回：/, secret);
+    for (const size of [6, 8]) assert.ok(!text.includes(secret.slice(0, size)), `${secret} 的前 ${size} 个字不该出现`);
+  }
+});
+
+test("Sub2API：读账单被拒、上游回话里回显了登录令牌（JWT）——详细原因里没有它，路径是 /api/v1/usage/stats", async (t) => {
+  const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MiJ9.Zx9Q-abcDEF_1234567890qwerty";
+  const f = await setup(t, { upstreamType: "sub2api", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+  f.store.get(f.supplier.id).accessToken = JWT;
+  await f.at("2026-10-30T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-30T10:05:00");
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "up.test" && url.pathname === "/api/v1/usage/stats") return { status: 403, text: async () => JSON.stringify({ code: 403, message: ["forbidden", `token ${JWT}`, `Authorization: Bearer ${JWT}`] }) };
+    return inner(input, init);
+  });
+  await f.at("2026-10-30T15:00:00");
+  const row = await todayRow(f);
+  assert.equal(row.attention?.code, "KEY_INVALID_OR_DENIED");
+  assert.match(row.attention.diagnostic, /^HTTP 403 · \/api\/v1\/usage\/stats · 上游回：/);
+  assert.ok(!row.attention.diagnostic.includes(JWT.slice(0, 12)) && !JSON.stringify(row).includes(JWT.slice(0, 12)));
+});
+
+test("详细原因不进数据库快照：读上游失败后轮询写了今天的快照，快照、账本里都没有上游回的原话和接口路径；上游每轮措辞不一样也不影响「没变就跳过」", async (t) => {
+  let n = 0;
+  const f = await failingUpstreamFixture(t, () => ({ status: 403, text: async () => JSON.stringify({ success: false, message: `forbidden request-id=${++n} at ${n}` }) }));
+  assert.match((await todayRow(f)).attention.diagnostic, /上游回：forbidden request-id=\d+/);
+  await f.round("2026-10-30T15:01:00");
+  const writes = f.repository.log.snapshotWrites.length;
+  await f.round("2026-10-30T15:03:00");
+  await f.round("2026-10-30T15:05:00");
+  const dump = JSON.stringify(f.repository.tables, (key, value) => (value instanceof Map ? [...value] : value));
+  assert.ok(!dump.includes("上游回") && !dump.includes("request-id") && !dump.includes("/api/log/self/stat"), "数据库里没有详细原因");
+  assert.equal(f.repository.log.snapshotWrites.length, writes, "措辞每轮不一样，今天的快照也没再写");
+});
