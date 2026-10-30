@@ -954,6 +954,41 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   assert.equal(await repository.latestLedgerEntry(other.id, shanghai), null);
 });
 
+// 每把 Key 分开记账：和账本行同一个事务、同一个 revision 写；只读每天最新一版的 Key 行；内容没变不写新版就不动 Key 行
+contract("ledger keys: written with the ledger row in the same revision; listLedgerKeys gives only each day's latest revision; a resettle with the same content adds no revision and keeps the rows; scoped to the rules and the date range", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const other = await fixture.createRule({ tokenId: fixture.token(2), canonicalKey: `up:${fixture.tag}:lk`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(2), name: "B" }] });
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const day = Date.UTC(2026, 2, 3);
+  const window = { preset: "yesterday", startMs: day, endMs: day + DAY, timezone: "UTC" };
+  let minutes = 20;
+  const settle = async ({ revenueUsd = 3, costUsd = 1, keys = null } = {}, options = {}) => {
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: new Date(day + DAY + (minutes += 10) * 60000).toISOString(), profitUsd: revenueUsd - costUsd });
+    snapshot.source.result.downstream.amountUsd = revenueUsd;
+    snapshot.source.result.upstream.amountUsd = costUsd;
+    return repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(snapshot, { costBasis: "usage", keys, ...options }) });
+  };
+  const keysOf = async (ruleIds = [rule.id], from = "2026-03-03", to = "2026-03-03") => (await repository.listLedgerKeys(ruleIds, from, to)).map((key) => [key.ruleId === rule.id ? "r" : "o", key.billDate, key.tokenId, key.costUsd, key.ratio, key.rawUsd]);
+  assert.deepEqual(await repository.listLedgerKeys([], "2026-03-03", "2026-03-03"), []);
+  const two = [{ tokenId: 9, costUsd: 0.4, ratio: 1.5, rawUsd: 0.266667 }, { tokenId: 20, costUsd: 0.6, ratio: null, rawUsd: null }];
+  assert.equal(await settle({ keys: two }), true);
+  assert.deepEqual(await keysOf(), [["r", "2026-03-03", 9, 0.4, 1.5, 0.266667], ["r", "2026-03-03", 20, 0.6, null, null]], "和账本行一起写，null 还是 null");
+  assert.deepEqual(await keysOf([other.id]), [], "别的绑定没有");
+  assert.deepEqual(await keysOf([rule.id], "2026-03-04", "2026-03-10"), [], "日期范围外没有");
+  // 重结、内容没变：不写新版，Key 行不动
+  assert.equal(await settle({ keys: [{ tokenId: 9, costUsd: 9, ratio: 1, rawUsd: 9 }] }, { resettle: true }), true);
+  assert.equal((await repository.latestLedgerEntry(rule.id, window)).revision, 1);
+  assert.deepEqual((await keysOf()).map((row) => row[2]), [9, 20]);
+  // 重结、金额变了：写第 2 版和它自己的 Key 行；只读最新一版的
+  assert.equal(await settle({ costUsd: 2, revenueUsd: 3, keys: [{ tokenId: 20, costUsd: 2, ratio: 2, rawUsd: 1 }] }, { resettle: true }), true);
+  assert.equal((await repository.latestLedgerEntry(rule.id, window)).revision, 2);
+  assert.deepEqual(await keysOf(), [["r", "2026-03-03", 20, 2, 2, 1]], "最新一版只有 Key 20，旧版的行不读");
+  // 没带 Key 的账本行：这天没有 Key 行（老日子的样子）
+  assert.equal(await settle({ costUsd: 3, revenueUsd: 3 }, { resettle: true }), true);
+  assert.deepEqual(await keysOf(), []);
+});
+
 // B-L1：重结出来的账和最新一版内容相同就不写新版。内容只比窗口、成本计法，金额按 DECIMAL(20,8)、汇率按 DECIMAL(12,6) 存进去以后比；
 // 不比明细和结账时刻
 contract("a resettle with the same ledger content adds no revision; a change in amounts, rates or cost basis does", async ({ repository, fixture }) => {

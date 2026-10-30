@@ -741,6 +741,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       return found || null;
     };
     const rows = [];
+    const liveKeys = new Map(); // 规则 -> 今天现读的每把 Key 的数（每把 Key 分开算，每日利润页的 keys 用）
     for (const item of per) {
       const { rule, w } = item, entry = plan.get(rule.id);
       let skeleton = resultAt(skeletonKey.get(rule.id), rule.id, `${skeletonKey.get(rule.id)}|${[...requests.get(skeletonKey.get(rule.id)).ruleIds].sort().join(",")}`);
@@ -759,6 +760,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!piece || !countsInSummary(piece)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
         const money = moneyOfResult(piece);
         income += money.income; cost += money.cost; counted += 1;
+        if (piece.upstreamKeys?.length) liveKeys.set(rule.id, piece.upstreamKeys);
       }
       const addKeys = (object, keys, value) => { const next = { ...object }; for (const key of keys) if (key in next) next[key] = value; return next; };
       // 底（今天的现读，没有今天就是最后一个已固定的日子）需处理时，这一行不整行丢掉：已固定那几天的和照样返回，带上算进来的天数（countedDays），
@@ -772,7 +774,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           : { ...skeleton, window: w };
       rows.push(merged);
     }
-    return { response, results: rows, stickyDays: sticky, notCounted };
+    return { response, results: rows, stickyDays: sticky, notCounted, liveKeys };
   }
 
   function serializeWrite(write) {
@@ -1848,6 +1850,42 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       channels: (rule.channels || []).map((channel) => ({ channelId: channel.channelId, name: channel.name, billingState: "complete", quotaUnits: 0, amountUsd: 0, adminUsageQuotaUnits: 0, adminUsageAmountUsd: 0 })) };
   }
 
+  // 一个窗口里每把 Key 的数（每把 Key 分开记账）：costUsd 是这把 Key 的扣费，ratio 是倍率（New API 是它的分组倍率，Sub2API 是 实际扣除 ÷ 标准计费），
+  // rawUsd 是原价用量（New API 是 costUsd ÷ ratio，Sub2API 是标准计费 total_cost）。倍率读不到（分组目录没有、Sub2API 老部署没有 total_cost）ratio、rawUsd 是 null，
+  // 分收入时按成本比例分。固定成本的上游成本记 0，倍率和原价用量不记。一天里倍率变过时 New API 的原价用量是近似值（按现在的分组倍率）
+  function upstreamKeysOf({ rule, keyParts, metadata, platform, costBasis, currentRatio, ownTokenName, totalUsd }) {
+    const merged = new Map();
+    const add = (tokenId, tokenName, costUsd, standardUsd) => {
+      const entry = merged.get(tokenId) || { tokenId, tokenName, costUsd: 0, standardUsd: 0 };
+      entry.costUsd = entry.costUsd != null && Number.isFinite(costUsd) ? entry.costUsd + costUsd : null;
+      entry.standardUsd = entry.standardUsd != null && Number.isFinite(standardUsd) ? entry.standardUsd + standardUsd : null;
+      merged.set(tokenId, entry);
+    };
+    for (const part of keyParts) {
+      if (part.stats?.length) for (const stat of part.stats) add(stat.tokenId, stat.tokenName, stat.costUsd, stat.standardUsd);
+      else add(Number(rule.tokenId), ownTokenName ?? rule.tokenName ?? null, Number.isFinite(part.amountUsd) ? part.amountUsd : null, part.standardUsd);
+    }
+    if (merged.size === 1 && totalUsd != null && Number.isFinite(totalUsd)) { const [only] = merged.values(); if (only.costUsd == null) only.costUsd = totalUsd; }
+    const tokens = metadata?.tokens || [];
+    const groupRatio = (tokenId) => {
+      if (platform === "sub2api" || !metadata?.groupsAvailable) return null;
+      const token = tokens.find((item) => Number(item.id) === Number(tokenId));
+      const ratio = token ? Number(metadata.groups?.[token.group]?.ratio) : NaN;
+      return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+    };
+    return [...merged.values()].map((entry) => {
+      if (costBasis === "fixed") return { tokenId: entry.tokenId, tokenName: entry.tokenName, costUsd: 0, ratio: null, rawUsd: null };
+      let ratio = null, rawUsd = null;
+      if (platform === "sub2api") {
+        if (entry.standardUsd != null && entry.costUsd != null) { rawUsd = entry.standardUsd; ratio = entry.standardUsd > 0 ? entry.costUsd / entry.standardUsd : null; }
+      } else {
+        ratio = Number(entry.tokenId) === Number(rule.tokenId) && Number.isFinite(Number(currentRatio)) && Number(currentRatio) > 0 ? Number(currentRatio) : groupRatio(entry.tokenId);
+        if (ratio != null && entry.costUsd != null) rawUsd = entry.costUsd / ratio;
+      }
+      return { tokenId: entry.tokenId, tokenName: entry.tokenName, costUsd: entry.costUsd, ratio, rawUsd };
+    });
+  }
+
   function costOwnerFor(rule, canonicalKey, registry) {
     // 已解除、锚定过的：解除前这把 Key 只有它在用（active_token_key 唯一键保证），算唯一；账号换了人（身份对不上）就算不出
     if (rule.archivedAt) return rule.canonicalKey && canonicalKey === rule.canonicalKey
@@ -1953,7 +1991,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
     }
     const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId })));
-    return results.length === 1 ? results[0] : sumKeyStats(results);
+    const total = results.length === 1 ? { ...results[0] } : sumKeyStats(results);
+    // 每把 Key 各取了多少（每把 Key 分开记账，reconciliation_ledger_keys）：一把 Key 在窗口里分成几段连着的天时各段相加。
+    // costUsd 是读到的扣费（读不全是 null），standardUsd 是 Sub2API 的标准计费（老部署没有就是 null）
+    const byToken = new Map();
+    pieces.forEach((piece, index) => {
+      const stat = results[index], id = Number(piece.key.tokenId), entry = byToken.get(id) || { tokenId: id, tokenName: piece.key.tokenName ?? null, costUsd: 0, standardUsd: 0 };
+      const cost = stat.state === "complete" && !stat.emptySecondWindow ? Number(stat.amountUsd ?? stat.knownAmountUsd) : NaN;
+      entry.costUsd = entry.costUsd != null && Number.isFinite(cost) ? entry.costUsd + cost : null;
+      entry.standardUsd = entry.standardUsd != null && Number.isFinite(stat.standardCostUsd) ? entry.standardUsd + stat.standardCostUsd : null;
+      byToken.set(id, entry);
+    });
+    Object.defineProperty(total, "keyStats", { value: [...byToken.values()], enumerable: false, configurable: true });
+    return total;
   }
 
   // 老绑定（legacy-v3，不是 isScopedBillingPolicy）的上游成本：这个窗口里有每天记下的 Key（手动选 Key、读取服务认出换 Key 都会记）就按它们读，
@@ -2761,6 +2811,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 减压 PR：这一轮里哪些分段的渠道收入是沿用的（没人看、放慢）——有一段是，这整条绑定这一轮的结果就不进 resultCache
       // （downstreamResult.staleFromIdleSkip 在 foldSplitSegments/下面的对象展开里会丢，这里单独记一份）
       const staleFromIdleSkip = [];
+      const keyParts = []; // 每段上游取到的每把 Key 的扣费（每把 Key 分开记账用，下面 upstreamKeys）
       const segmentResults = foldSplitSegments(await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow, upstreamWindow: upstreamOwnWindow }) => {
         // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
         const upstreamWindow = upstreamOwnWindow || segmentWindow;
@@ -2778,6 +2829,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             .catch((error) => ({ error })),
         ]);
         if (downstreamResult.staleFromIdleSkip) staleFromIdleSkip.push(true);
+        if (!upstreamResult.error) keyParts.push({ stats: upstreamResult.keyStats ?? null, standardUsd: upstreamResult.standardCostUsd ?? null, state: upstreamResult.state, amountUsd: upstreamResult.amountUsd });
         const segmentIssues = issues.filter((issue) => CALCULATION_BLOCKERS.has(issue.code));
         const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
         // 只有上游一侧的窗口或时区对不上时算上游侧问题；本站一侧对不上始终阻断。
@@ -2984,6 +3036,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 减压 PR：这一轮有分段的渠道收入是沿用的（没人看、放慢）——记在 result 上（不可枚举，不进序列化、不进快照、不进账本），
       // 调用方据此不把这份结果放进 resultCache；页面来看时才会照旧现读，不会拿到沿用的数（总指挥 10-26 定）
       if (staleFromIdleSkip.length) Object.defineProperty(result, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
+      // 这个窗口里每把 Key 的扣费、倍率、原价用量（不可枚举：不进序列化、不进快照；结账写进 reconciliation_ledger_keys，今天的页面现读用）
+      Object.defineProperty(result, "upstreamKeys", { value: completeUpstream ? upstreamKeysOf({ rule, keyParts, metadata, platform, costBasis, currentRatio, ownTokenName: evidenceToken?.name ?? rule.tokenName, totalUsd: upstreamUsd }) : [], enumerable: false, configurable: true });
       // 兜底（手动选 Key 的站点，没装读取服务）：这天有收入，可选的 Key 这一天一点用量都没有——多半是在 New API 里换了 Key、控制台还没改。
       // 这天先不固定，记成要人处理的 CHANNEL_KEY_NO_USAGE（按钮「选 Key」打开那一行的下拉框）；用户改了 Key，被挡住的几天按新 Key 重新算（changeRuleKeyManual）。
       // 只在结账（要固定的整天）时判；今天、固定成本的上游、收入是 0 的天不判
@@ -3384,7 +3438,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const expected = ledgerDay ? await expectedCostForSettlement(rule, result, token) : null;
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement, ...(expected ? { expected: expected.detail } : {}) }, {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
-      costBasis: financialSnapshot.costBasis, expectedCostUsd: expected?.usd ?? null, gapReason: expected?.reason ?? null, tokens: expected?.tokens ?? null }) : null;
+      costBasis: financialSnapshot.costBasis, expectedCostUsd: expected?.usd ?? null, gapReason: expected?.reason ?? null, tokens: expected?.tokens ?? null,
+      keys: result.upstreamKeys?.length ? result.upstreamKeys : null }) : null;
     // 重结读出来的收入或上游成本比账本最新一版少一半以上（日志过了保留期之类）：不写新版，等人确认（手动「重新读取」才覆盖）。
     // 记 RESETTLE_SHRUNK 的状态行由 settleDay 写；页面上这天还是已固定的旧数
     // 确认了（confirmShrink）：确认框里写的「重算」数（confirmedAfter）和这次再读到的不一样、或者根本没带，照旧挡下、把新的数记下来再让人看一眼（直接调接口也绕不过），
@@ -3965,7 +4020,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           stickyDays.get(state.ruleId).set(state.billDate, state.manualReason);
         }
       }
-      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays });
+      // 每把 Key 分开算：已固定的日子读账本的 Key 行（reconciliation_ledger_keys，一条语句），每天记下的 Key（取 Key 名、没有 Key 行的老日子用）；今天用现读的
+      let keyData = null;
+      if (labels.length && results.length) {
+        const ids = results.map((row) => row.rule.id), todayLabel = dayKeyInTz(now, tz);
+        const [fixedKeys, recorded] = await Promise.all([repository.listLedgerKeys(ids, labels[0], labels.at(-1)).catch(() => []), repository.listDayKeys(ids, labels[0], labels.at(-1)).catch(() => ({}))]);
+        const fixed = new Map();
+        for (const key of fixedKeys) { const id = `${key.ruleId}|${key.billDate}`; fixed.set(id, [...(fixed.get(id) || []), { tokenId: key.tokenId, costUsd: key.costUsd, ratio: key.ratio, rawUsd: key.rawUsd }]); }
+        const live = daily ? daily.liveKeys : new Map(labels.length === 1 && labels[0] === todayLabel ? results.filter((row) => row.upstreamKeys?.length).map((row) => [row.rule.id, row.upstreamKeys]) : []);
+        keyData = { fixed, live, dayKeys: recorded };
+      }
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays, keyData });
       if (rawInput.preset === "since") page.range = { ...page.range, preset: "since" };
       // 固定成本（lib/profit-page.js fixedCostOfRange，运营总览、自营业务以后也用它）：已固定的日子读 reconciliation_fixed_cost_days 里那天记下的金额和汇率，
       // 今天和还没固定的日子按现在的购买记录算；自营站点关着收费记录碰到的日子不扣（决定记录 58）；那天是按用量算的不另扣（审核 #126 M3）。
@@ -4003,14 +4068,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       for (const rule of rules) {
         const startMs = dayStartInTz(day, rule.timezone), endMs = shiftedDayStartInTz(startMs, 1, rule.timezone);
         const entry = await repository.latestLedgerEntry(rule.id, { preset: "custom", startMs, endMs, timezone: rule.timezone });
-        if (entry) { pieces.push({ rule, result: entry.detail?.result || null, expected: entry.detail?.expected || null, entry }); continue; }
+        const dayKeys = (await repository.listDayKeys([rule.id], day, day).catch(() => ({})))[rule.id]?.[day] || [];
+        if (entry) {
+          // 这天每把 Key 的数：账本的 Key 行；这个功能以前固定的日子没有，这天只记了一把 Key（或没记）就都算在它上面，记了几把的拆不开（null：这天不分）
+          const rows = (await repository.listLedgerKeys([rule.id], day, day).catch(() => [])).map((key) => ({ tokenId: key.tokenId, costUsd: key.costUsd, ratio: key.ratio, rawUsd: key.rawUsd }));
+          const keys = rows.length ? rows : dayKeys.length > 1 ? null : [{ tokenId: Number(dayKeys[0]?.tokenId ?? rule.tokenId), costUsd: entry.costUsd ?? null, ratio: null, rawUsd: null }];
+          pieces.push({ rule, result: entry.detail?.result || null, expected: entry.detail?.expected || null, entry, keys, dayKeys });
+          continue;
+        }
         const now = Date.now();
         if (startMs > now) throw codedError("TIME_RANGE_FUTURE", "不能选以后的时间");
         const today = dayKeyInTz(now, rule.timezone) === day;
         const live = await api.queryRules({ ruleIds: [rule.id], ...(today ? { preset: "today" } : { preset: "custom", startMs, endMs: Math.min(endMs, now) }) }, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds: [rule.id] }); // 只有今天现读，过去没固定的天给「还在读取」和原因
-        pieces.push({ rule, result: live.results[0] || null, expected: null, entry: null });
+        pieces.push({ rule, result: live.results[0] || null, expected: null, entry: null, keys: live.results[0]?.upstreamKeys?.length ? live.results[0].upstreamKeys : null, dayKeys });
       }
-      return buildProfitDetail(pieces, { day });
+      return buildProfitDetail(pieces, { day, stationOf: upstreamStation });
     },
     async getConfirmedHistory(id, input = {}) {
       const options = normalizeConfirmedHistoryOptions(input);

@@ -16,13 +16,15 @@ const SH = (iso) => Date.parse(`${iso}+08:00`);
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 const DAY = 86400;
 
-async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1: 9, 2: 9, 3: 9, 4: 10, 5: 11, 6: 12 }, windows = {}, elsewhere = {}, rates = {}, noAgent = false }) {
+async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1: 9, 2: 9, 3: 9, 4: 10, 5: 11, 6: 12 }, windows = {}, elsewhere = {}, rates = {}, noAgent = false, standardRatio = null }) {
   const state = { now: SH("2026-10-10T09:00:00") };
   t.mock.method(Date, "now", () => state.now);
   // windows[keyId] = [fromMs, toMs)：这把 Key 有用量的时段（每秒 1 美元）；没给就是一直在用
   const used = (keyId, fromMs, toMs) => { const [a, b] = windows[keyId] || [-Infinity, Infinity]; return Math.max(0, Math.min(toMs, b, state.now) - Math.max(fromMs, a)) / 1000 * (rates[keyId] ?? 1); };
   const fake = upstreamType === "sub2api" ? createFakeSub2Api({ keys: keys.map((id) => ({ id, name: `Key ${id}` })),
-    dayUsageUsd: (id, day) => { const start = SH(`${day}T00:00:00`); return used(Number(id), start, start + DAY * 1000); }, now: () => state.now }) : null;
+    dayUsageUsd: (id, day) => { const start = SH(`${day}T00:00:00`); return used(Number(id), start, start + DAY * 1000); }, now: () => state.now,
+    // standardRatio：标准计费（total_cost）= 实际扣除 × 这个数（倍率 = 实际 ÷ 标准）；不给就和实际扣除一样
+    standardUsd: standardRatio ? (id, day) => { const start = SH(`${day}T00:00:00`); return used(Number(id), start, start + DAY * 1000) * standardRatio; } : undefined }) : null;
   const reply = (body, status = 200) => ({ status, text: async () => JSON.stringify(body) });
   const requests = [];
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
@@ -832,3 +834,51 @@ test("每日利润页带上已解绑的绑定：解绑那天整天算、数留�
   const todayAfter = await f.rt.reconciliation.profitPage({ preset: "today" });
   assert.equal(todayAfter.rows.length, 0, "只看今天：昨天解绑的不带");
 });
+
+// ===== 渠道按 Key 算利润 PR3：每把 Key 分开记账、分收入 =====
+// 渠道 1 先用 Key 9（每秒 1 美元），10-12 15 点换成 Key 20（每秒 3 美元）；收入每个渠道每秒 2 美元。
+// New API：分组倍率读目录（夹具里 g1 倍率 1）；Sub2API：标准计费 = 实际扣除 × 2（倍率 = 实际 ÷ 标准 = 0.5）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`每把 Key 分开记账（${upstreamType}）：换 Key 那天两把各一行，成本、倍率、原价用量写进账本；每日利润的 keys 按原价用量比例分收入，几项加起来等于渠道合计；计算明细按天、按 Key 分开`, async (t) => {
+    const SWITCH = SH("2026-10-12T15:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 }, standardRatio: upstreamType === "sub2api" ? 2 : null });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+    for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00"]) await f.round(iso);
+    await f.at("2026-10-13T10:00:00");
+    const swapped = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+    assert.equal(swapped.fromDay, "2026-10-12");
+    for (const iso of ["2026-10-13T11:00:00", "2026-10-13T12:00:00", "2026-10-13T23:00:00", "2026-10-14T01:00:00"]) await f.round(iso);
+    const H = 3600, rule = (await f.rt.reconciliation.listRules())[0];
+    const keysOf = (day) => f.repository.tables.ledgerKeys.filter((row) => row.bill_date === day && row.rule_id === rule.id).sort((a, b) => a.token_id - b.token_id);
+    // 10-11 只有 Key 9：一行；10-12 换 Key 那天：Key 9 到 15 点、Key 20 从 15 点起，各整天读
+    assert.deepEqual(keysOf("2026-10-11").map((row) => [Number(row.token_id), Number(row.cost_usd)]), [[9, 24 * H]]);
+    const day12 = keysOf("2026-10-12");
+    assert.deepEqual(day12.map((row) => [Number(row.token_id), Number(row.cost_usd)]), [[9, 15 * H], [20, 9 * H * 3]]);
+    const ratioOf = (tokenId) => Number(day12.find((row) => Number(row.token_id) === tokenId).ratio), rawOf = (tokenId) => Number(day12.find((row) => Number(row.token_id) === tokenId).raw_usd);
+    if (upstreamType === "sub2api") assert.deepEqual([ratioOf(9), ratioOf(20), rawOf(9), rawOf(20)], [0.5, 0.5, 15 * H * 2, 9 * H * 3 * 2], "标准计费 total_cost 是实际扣除的 2 倍：倍率 = 实际 ÷ 标准，原价用量 = total_cost");
+    else assert.deepEqual([ratioOf(9), ratioOf(20), rawOf(9), rawOf(20)], [1, 1, 15 * H, 9 * H * 3], "New API：分组倍率 1，原价用量 = 成本 ÷ 倍率");
+    assert.equal(day12.reduce((sum, row) => sum + Number(row.cost_usd), 0), Number(f.costOn("2026-10-12")[0].cost_usd), "每把 Key 的成本加起来 = 账本里这天的上游成本");
+    // 每日利润（10-10 到 10-12）：keys 两项，在用的 Key 20 在前
+    const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-13T00:00:00") });
+    const [row] = page.rows;
+    assert.deepEqual(row.keys.map((key) => [key.tokenId, key.state, key.firstDay, key.lastDay, key.days]), [[20, "active", "2026-10-12", "2026-10-12", 1], [9, "swapped", "2026-10-10", "2026-10-12", 3]]);
+    assert.equal(row.keys.reduce((sum, key) => sum + key.costUsd, 0), row.actualCostUsd, "每把 Key 的成本加起来 = 渠道成本");
+    assert.ok(Math.abs(row.keys.reduce((sum, key) => sum + key.incomeUsd, 0) - row.incomeUsd) < 1e-6, "分到的收入加起来 = 渠道收入");
+    const k9 = row.keys.find((key) => key.tokenId === 9), k20 = row.keys.find((key) => key.tokenId === 20);
+    // 10-12 那天收入 2 × 86400 按原价用量比例分：Key 9 : Key 20 = 15 : 27；10-10、10-11 收入全归 Key 9（只有一把）
+    const day12Income = 2 * 24 * H, total = 15 + 27;
+    assert.ok(Math.abs(k20.incomeUsd - day12Income * 27 / total) < 1e-6);
+    assert.ok(Math.abs(k9.incomeUsd - (2 * 2 * 24 * H + day12Income * 15 / total)) < 1e-6);
+    assert.deepEqual([k9.incomeBasis, k20.incomeBasis, k9.pendingDays, k20.pendingDays], ["raw", "raw", 0, 0]);
+    assert.deepEqual([k20.ratio, k20.ratioKind], upstreamType === "sub2api" ? [0.5, "actual_over_standard"] : [1, "group"]);
+    // 计算明细：这一天按 Key 分开，几项收入加起来等于这天收入，分摊说明写明
+    const detail = await f.rt.reconciliation.profitDetail({ ruleIds: row.ruleIds, day: "2026-10-12" });
+    assert.deepEqual(detail.keys.map((key) => key.tokenId), [20, 9]);
+    assert.deepEqual([detail.split.basis, detail.split.shares.map((item) => [item.tokenId, item.percent])], ["raw", [[20, 64.29], [9, 35.71]]]);
+    assert.deepEqual([detail.swappedUpstream, detail.keyChangeRatioDiffers], [false, false]);
+    assert.ok(Math.abs(detail.keys.reduce((sum, key) => sum + key.incomeUsd, 0) - detail.income.usd) < 1e-6);
+    const single = await f.rt.reconciliation.profitDetail({ ruleIds: row.ruleIds, day: "2026-10-11" });
+    assert.deepEqual([single.keys.length, single.split.basis, single.keys[0].incomeUsd, single.keys[0].incomeBasis], [1, "single", single.income.usd, "single"]);
+  });
+}

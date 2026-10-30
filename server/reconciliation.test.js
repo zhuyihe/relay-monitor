@@ -1151,6 +1151,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   const ledgerTop = ([ruleId, billDate]) => ledgerRows.filter((row) => row.rule_id === ruleId && row.bill_date === billDate)
     .sort((a, b) => b.revision - a.revision).slice(0, 1);
   const ledgerQuery = (sql, params) => {
+    if (sql.includes("reconciliation_ledger_keys")) return sql.startsWith("SELECT") ? [[]] : [{ affectedRows: 1 }]; // 每把 Key 的行，这个用例不看
     if (sql.startsWith("INSERT INTO reconciliation_ledger")) {
       ledgerRows.push(Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, params[index]])));
       return [{ affectedRows: 1 }];

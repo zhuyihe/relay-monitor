@@ -292,6 +292,17 @@ export async function ensureSchema(pool) {
     tokens BIGINT NULL,
     PRIMARY KEY (rule_id, bill_date, revision)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 每把 Key 分开记账：每个账本版本、每把 Key 一行，和账本行同一个事务写；不存分到的收入（读的时候按原价用量比例算）。不加外键，只插入不改
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_ledger_keys (
+    rule_id VARCHAR(32) NOT NULL,
+    bill_date DATE NOT NULL,
+    revision INT NOT NULL,
+    token_id BIGINT NOT NULL,
+    cost_usd DECIMAL(20,8) NULL,
+    ratio DECIMAL(12,6) NULL,
+    raw_usd DECIMAL(20,8) NULL,
+    PRIMARY KEY (rule_id, bill_date, revision, token_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 应付成本（V1-b）：账本多三列，旧账是 null
   await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "gap_reason", "VARCHAR(40) NULL");

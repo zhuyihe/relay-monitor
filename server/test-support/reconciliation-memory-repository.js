@@ -14,7 +14,7 @@ import { billDayOf } from "../../lib/business-time.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
-  ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
+  ledgerWriteDecision, LEDGER_KEY_COLUMNS, LEDGER_KEY_DECIMAL_SCALE, ledgerKeyFromRow, ledgerKeyValues } from "../../lib/reconciliation-ledger.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangeIsStale, dayKeysFromRows,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
@@ -32,6 +32,7 @@ const TABLE_NAMES = {
   alerts: "reconciliation_alert_state",
   capabilities: "reconciliation_billing_capabilities",
   ledger: "reconciliation_ledger",
+  ledgerKeys: "reconciliation_ledger_keys",
   settlementState: "reconciliation_settlement_state",
   segmentKeys: "reconciliation_segment_keys",
   fixedCostDays: "reconciliation_fixed_cost_days",
@@ -78,6 +79,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["rule_id", "bill_date", "revision"] },
     notNull: ["rule_id", "bill_date", "revision", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "source", "settled_at"],
     varchar: { rule_id: 32, version_id: 32, timezone: 64, cost_basis: 16, source: 24 },
+  },
+  ledgerKeys: {
+    keys: { PRIMARY: ["rule_id", "bill_date", "revision", "token_id"] },
+    notNull: ["rule_id", "bill_date", "revision", "token_id"],
+    varchar: { rule_id: 32 },
   },
   segmentKeys: {
     keys: { PRIMARY: ["segment_id", "upstream_station_id", "token_id"], uq_segment_key_active: ["active_token_key"] },
@@ -165,7 +171,7 @@ export class MemoryReconciliationRepository {
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
   constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], optouts = [], dayKeys = [], fixedCostDays = [], now = () => Date.now(), hooks = {} } = {}) {
     this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger],
-      settlementState: [...settlementState], segmentKeys: [...segmentKeys], optouts: [...optouts], dayKeys: [...dayKeys], fixedCostDays: [...fixedCostDays] };
+      settlementState: [...settlementState], ledgerKeys: [], segmentKeys: [...segmentKeys], optouts: [...optouts], dayKeys: [...dayKeys], fixedCostDays: [...fixedCostDays] };
     this.now = now;
     this.hooks = hooks;
     this.migrationMarks = new Map();
@@ -713,6 +719,10 @@ export class MemoryReconciliationRepository {
           const row = Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, values[index]]));
           this.log.ledgerWrites.push({ ruleId, billDate: row.bill_date, revision: row.revision, source: row.source });
           this.#insert(tx, "ledger", row);
+          for (const keyValues of ledgerKeyValues(ledger.entry, { ruleId, revision: booked.revision })) {
+            const keyRow = Object.fromEntries(LEDGER_KEY_COLUMNS.map((column, index) => [column, keyValues[index]]));
+            this.#insert(tx, "ledgerKeys", { ...keyRow, ...Object.fromEntries(Object.entries(LEDGER_KEY_DECIMAL_SCALE).map(([column, scale]) => [column, ledgerDecimal(keyRow[column], scale)])) });
+          }
         }
       }
       if (settlement?.billDate) {
@@ -843,6 +853,16 @@ export class MemoryReconciliationRepository {
 
   async deleteSettlementState(ruleId, billDate) {
     this.#delete(null, "settlementState", this.#settlementEntries(null, ruleId, billDate));
+  }
+
+  // 每把 Key 分开记账（同 MySQL 版）：这些绑定在 [fromDate, toDate] 里每天最新一版账本的每把 Key 一行
+  async listLedgerKeys(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    await this.#read("listLedgerKeys", [ruleIds, fromDate, toDate]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#plain("ledgerKeys").filter((row) => wanted.has(String(row.rule_id)) && row.bill_date >= fromDate && row.bill_date <= toDate
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0]?.revision)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id) || Number(a.token_id) - Number(b.token_id)).map((row) => ledgerKeyFromRow(row));
   }
 
   async getMigrationMark(key) { return this.migrationMarks.get(key) ?? null; }

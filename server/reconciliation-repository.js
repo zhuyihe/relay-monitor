@@ -2,7 +2,7 @@
 import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord,
-  ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
+  ledgerInsertValues, ledgerWriteDecision, LEDGER_KEY_COLUMNS, ledgerKeyValues, ledgerKeyFromRow } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql } from "../db/segment-keys.js";
 import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
@@ -1033,6 +1033,8 @@ export class ReconciliationRepository {
         if (booked.write) {
           await conn.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
             ledgerInsertValues({ ...ledger.entry, ruleId, revision: booked.revision, source: booked.source }));
+          const keyRows = ledgerKeyValues(ledger.entry, { ruleId, revision: booked.revision });
+          if (keyRows.length) await conn.query(`INSERT INTO reconciliation_ledger_keys (${LEDGER_KEY_COLUMNS.join(", ")}) VALUES ?`, [keyRows]);
         }
       }
       if (settlement?.billDate) {
@@ -1138,6 +1140,19 @@ export class ReconciliationRepository {
        ORDER BY bill_date, rule_id`,
       [ruleIds, fromDate, toDate]);
     return rows.map(ledgerDayFactFromRow);
+  }
+
+  // 每把 Key 分开记账：这些绑定在 [fromDate, toDate] 里每天最新一版账本的每把 Key 一行（只认最新版，旧版的行不读）；
+  // 账本行没有 Key 行（这个功能以前固定的日子）的天不出现。一条语句，按 (rule_id, bill_date, revision) 主键走
+  async listLedgerKeys(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT k.rule_id, DATE_FORMAT(k.bill_date, '%Y-%m-%d') AS bill_date, k.token_id, k.cost_usd, k.ratio, k.raw_usd FROM reconciliation_ledger_keys k
+       WHERE k.rule_id IN (?) AND k.bill_date >= ? AND k.bill_date <= ?
+         AND k.revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = k.rule_id AND m.bill_date = k.bill_date)
+       ORDER BY k.bill_date, k.rule_id, k.token_id`,
+      [ruleIds, fromDate, toDate]);
+    return rows.map(ledgerKeyFromRow);
   }
 
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
