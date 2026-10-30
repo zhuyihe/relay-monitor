@@ -4115,7 +4115,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (entry) {
           // 这天每把 Key 的数：账本的 Key 行；这个功能以前固定的日子没有，这天只记了一把 Key（或没记）就都算在它上面，记了几把的拆不开（null：这天不分）
           const rows = (await repository.listLedgerKeys([rule.id], day, day).catch(() => [])).map((key) => ({ tokenId: key.tokenId, costUsd: key.costUsd, ratio: key.ratio, rawUsd: key.rawUsd }));
-          const keys = rows.length ? rows : dayKeys.length > 1 ? null : [{ tokenId: Number(dayKeys[0]?.tokenId ?? rule.tokenId), costUsd: entry.costUsd ?? null, ratio: null, rawUsd: null }];
+          const keys = rows.length ? rows : dayKeys.length > 1 ? null : [{ tokenId: Number(dayKeys[0]?.tokenId ?? rule.tokenId), costUsd: entry.costBasis === "fixed" ? 0 : entry.costUsd ?? null, ratio: null, rawUsd: null }];
           pieces.push({ rule, result: entry.detail?.result || null, expected: entry.detail?.expected || null, entry, keys, dayKeys });
           continue;
         }

@@ -1014,12 +1014,15 @@ test("渠道 × 天按天挡：反过来旧绑定那天没固定、新绑定已�
   without(old); // 旧的（Key 9，每秒 1）那天没固定
   const noOld = await f.rt.reconciliation.profitPage(two);
   assert.deepEqual([noOld.rows[0].incomeUsd, noOld.rows[0].actualCostUsd, noOld.notCountedDays.count], [2 * D, D, 1], "10-11 整天不算：只剩 10-10 的收入和成本");
+  const sumCost = (row) => row.keys.reduce((total, key) => total + key.costUsd, 0), sumIncome = (row) => row.keys.reduce((total, key) => total + (key.incomeUsd ?? 0), 0);
+  assert.deepEqual([sumCost(noOld.rows[0]), Math.round(sumIncome(noOld.rows[0])), noOld.rows[0].keys.every((key) => key.pendingDays === 1)], [D, 2 * D, true], "Key 行：各把成本加起来 = 渠道成本，10-11 整天不进，每把 pendingDays 1");
   const single = await f.rt.reconciliation.profitPage(day11);
   assert.deepEqual([single.rows[0].counted, single.rows[0].incomeUsd, single.rows[0].actualCostUsd, single.rows[0].grossProfitUsd], [false, null, null, null], "单独看 10-11：新绑定有数、旧的没有，整行不算");
   f.repository.tables.ledger.splice(0, f.repository.tables.ledger.length, ...kept);
   without(fresh); // 新的（Key 20，每秒 3）那天没固定
   const noNew = await f.rt.reconciliation.profitPage(two);
   assert.deepEqual([noNew.rows[0].incomeUsd, noNew.rows[0].actualCostUsd], [2 * D, D]);
+  assert.deepEqual([sumCost(noNew.rows[0]), Math.round(sumIncome(noNew.rows[0])), noNew.rows[0].keys.every((key) => key.pendingDays === 1)], [D, 2 * D, true]);
   assert.equal((await f.rt.reconciliation.profitPage(day11)).rows[0].counted, false);
 });
 
