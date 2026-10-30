@@ -1249,3 +1249,18 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     });
   }
 }
+
+test("计算明细：这个功能以前固定的日子（没有 Key 行）、固定成本的上游——Key 的成本记 0（和渠道行同一个口径），收入全归这把 Key（single）", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+  f.store.get(f.supplier.id).fixedPurchases = [{ amount: 100, days: 30, startDate: null }];
+  await f.at("2026-10-10T10:00:00");
+  const bound = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]) await f.round(iso);
+  const fact = f.costOn("2026-10-10").find((row) => row.rule_id === bound.ruleId);
+  assert.equal(fact.cost_basis, "fixed", "固定成本的上游");
+  assert.ok(Number(fact.cost_usd) > 0, "账本里记着读到的用量");
+  f.repository.tables.ledgerKeys.splice(0, f.repository.tables.ledgerKeys.length); // 模拟这个功能以前固定的日子：没有 Key 行
+  const detail = await f.rt.reconciliation.profitDetail({ ruleIds: [bound.ruleId], day: "2026-10-10" });
+  assert.deepEqual([detail.keys.length, detail.keys[0].tokenId, detail.keys[0].costUsd, detail.split.basis], [1, 9, 0, "single"]);
+  assert.equal(detail.keys[0].incomeUsd, detail.income.usd);
+});
