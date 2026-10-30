@@ -201,6 +201,8 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "archived_at_ms", "BIGINT NULL");
   // 核算起点的下限（毫秒）：同一天里更早解除了一条占着同一个渠道（或同一把 Key）的 New API 绑定时，新绑定从那一刻起算，不从 0 点，免得重叠算两遍（C3）
   await addColumnIfMissing(pool, "reconciliation_rules", "accounting_floor_ms", "BIGINT NULL");
+  // 这条绑定「最后一次绑上」的时刻（建绑定、重新打开解绑不久的绑定时记下）：一个渠道一天的收入只记在当天最后绑上的那条上。老绑定是空的，按 created_at 算
+  await addColumnIfMissing(pool, "reconciliation_rules", "bound_at_ms", "BIGINT NULL");
   await pool.query("UPDATE reconciliation_rules SET archived_at_ms = UNIX_TIMESTAMP(archived_at) * 1000 WHERE archived_at IS NOT NULL AND archived_at_ms IS NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "cost_coverage", "VARCHAR(24) NOT NULL DEFAULT 'unknown'");
   await addColumnIfMissing(pool, "reconciliation_rules", "provider", "VARCHAR(24) NULL");

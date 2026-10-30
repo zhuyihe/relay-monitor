@@ -121,6 +121,8 @@ export type ProfitRow = {
   // 页面换算用的汇率：收入按自营站点、成本按这个上游；没设置是 null（按美元显示）
   rates: { income: number | null; cost: number | null; costBasis: "usage" | "fixed" | null };
   startedOn: string | null; startedAt: number | null; counted: boolean;
+  // 一个渠道一行（rowKey `ch:<自营站点>:<渠道>`）；bound 在绑着的，unboundOn 已解绑的那天（整天算，之后不算）；毛利率 = 毛利 ÷ 收入，没收入是 null（页面 PR 接了就去掉 ?）
+  bound?: boolean; unboundOn?: string | null; grossMarginRate?: number | null;
   incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
   gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };
   // 提示类的感叹号（今天提醒换 Key）：这一行照读到的数算、进合计，不是需处理

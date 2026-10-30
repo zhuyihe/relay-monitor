@@ -193,13 +193,14 @@ contract("createRule stores the rule, name-ordered channels and one operator-con
   });
   const after = Date.now();
   assert.match(rule.id, /^rr_/);
-  assert.deepEqual({ ...rule, id: null, createdAt: null, updatedAt: null }, {
+  assert.ok(rule.boundAtMs >= before && rule.boundAtMs <= after, "建绑定时记下绑定时刻（一个渠道一天的收入记在最后绑上的那条上）");
+  assert.deepEqual({ ...rule, id: null, createdAt: null, updatedAt: null, boundAtMs: null }, {
     id: null, upstreamStationId: fixture.station("up"), ownStationId: fixture.station("own"), tokenId: fixture.token(),
     tokenName: `Contract ${fixture.tag}`, fixedGroup: "default", timezone: "UTC", enabled: true,
     billingPolicy: "legacy-v3", scopeVersion: 1, billingEffectiveFrom: null, costCoverage: "unknown", provider: null, canonicalKey: null,
     keyIssue: null,
     sourceBinding: null, ownSource: null, coverageDeclaration: { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] },
-    archivedAt: null, archivedAtMs: null, accountingFloorMs: null, createdAt: null, updatedAt: null,
+    archivedAt: null, archivedAtMs: null, accountingFloorMs: null, boundAtMs: null, createdAt: null, updatedAt: null,
     channels: [
       { channelId: fixture.channel(1), name: "alpha", state: null, stateObservedAt: null, stateChangedAt: null },
       { channelId: fixture.channel(3), name: "Alpha", state: null, stateObservedAt: null, stateChangedAt: null },
@@ -1479,27 +1480,36 @@ contract("pruneSettlementStates also drops a request made before the given time 
   assert.equal(await repository.pruneSettlementStates("2025-12-01", 500), 0);
 });
 
-contract("createRule: a new binding that takes the same channel (or Key) on the day an earlier New API binding was archived starts at that moment, not at 0:00; Sub2API, other channels and other days are not affected", async ({ repository, fixture }) => {
+contract("createRule: a binding created on the day an earlier one was archived no longer gets an accounting floor (whole days; the day's revenue goes to the last bound)", async ({ repository, fixture }) => {
   const old = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:floor`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(1), name: "A" }] });
-  const other = await fixture.createRule({ tokenId: fixture.token(8), canonicalKey: `up:${fixture.tag}:floor-other`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(8), name: "Z" }] });
-  const sub2 = await fixture.createRule({ tokenId: fixture.token(9), canonicalKey: `up:${fixture.tag}:floor-sub2`, billingPolicy: "immediate", timezone: "UTC", provider: "sub2api", channels: [{ channelId: fixture.channel(9), name: "S" }] });
-  const at = Date.now() - 60000; // 解除在一分钟前：新绑定（现在建）和它在同一天，除非正好跨过 0 点
-  for (const rule of [old, other, sub2]) assert.equal(await repository.archiveRule(rule.id, { now: at }), true);
-  const dayStart = Math.floor(Date.now() / 86400000) * 86400000;
-  if (at < dayStart) return; // 刚好跨过 UTC 0 点，这一轮不测
+  const at = Date.now() - 60000;
+  assert.equal(await repository.archiveRule(old.id, { now: at }), true);
   const sameChannel = await fixture.createRule({ tokenId: fixture.token(2), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(1), name: "A" }] });
-  assert.equal(sameChannel.accountingFloorMs, at, "同一个渠道：从解除那一刻起算");
+  assert.equal(sameChannel.accountingFloorMs, null, "同一个渠道：不再从解除那一刻起算");
+  assert.ok(sameChannel.boundAtMs >= old.boundAtMs, "后绑的绑定时刻不早于先绑的");
   const sameKey = await fixture.createRule({ tokenId: fixture.token(3), canonicalKey: `up:${fixture.tag}:floor`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(3), name: "C" }] });
-  assert.equal(sameKey.accountingFloorMs, at, "同一把 Key");
-  const unrelated = await fixture.createRule({ tokenId: fixture.token(4), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(4), name: "D" }] });
-  assert.equal(unrelated.accountingFloorMs, null, "别的渠道、别的 Key 不受影响");
-  const afterSub2 = await fixture.createRule({ tokenId: fixture.token(5), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(9), name: "S" }] });
-  assert.equal(afterSub2.accountingFloorMs, null, "旧的是 Sub2API：解除当天整天不算，新绑定照 0 点");
-  // 新绑定是 Sub2API、旧的是 New API：下限照给（收入按秒切，上游成本取这把 Key 全天的，见 accountingUpstreamWindow）
-  const oldNewApi = await fixture.createRule({ tokenId: fixture.token(10), canonicalKey: `up:${fixture.tag}:floor-n`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(10), name: "N" }] });
-  assert.equal(await repository.archiveRule(oldNewApi.id, { now: at }), true);
-  const toSub2 = await fixture.createRule({ tokenId: fixture.token(6), billingPolicy: "immediate", timezone: "UTC", provider: "sub2api", channels: [{ channelId: fixture.channel(10), name: "N" }] });
-  assert.equal(toSub2.accountingFloorMs, at, "新绑定是 Sub2API：也从旧绑定解除那一刻起算收入");
+  assert.equal(sameKey.accountingFloorMs, null, "同一把 Key 也不");
+});
+
+contract("reopenRule: undo an unbind in one transaction — un-archive, re-take the Key and channel unique keys, clear the opt-out; refused when another binding holds them", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:reopen`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(1), name: "A" }] });
+  await assert.rejects(() => repository.reopenRule(rule.id), (error) => error.code === "RULE_NOT_FOUND", "没解绑的不能重新打开");
+  assert.equal(await repository.archiveRule(rule.id, { now: Date.now() - 1000, optout: true }), true);
+  assert.equal((await repository.listChannelOptouts(rule.ownStationId)).some((item) => item.channelId === fixture.channel(1)), true);
+  const reopened = await repository.reopenRule(rule.id);
+  assert.equal(reopened.conflict, false);
+  assert.deepEqual([reopened.rule.enabled, reopened.rule.archivedAt, reopened.rule.archivedAtMs, reopened.rule.boundAtMs], [true, null, null, rule.boundAtMs], "绑定时刻不变（撤销解绑）");
+  assert.equal((await repository.listChannelOptouts(rule.ownStationId)).some((item) => item.channelId === fixture.channel(1)), false, "「用户停的」记号清掉");
+  assert.equal((await repository.listRules()).some((item) => item.id === rule.id && item.enabled), true);
+  // 重新占上了 Key 和渠道：别的绑定再建同一把 Key / 同一个渠道要被挡
+  await assert.rejects(() => fixture.createRule({ tokenId: fixture.token(5), canonicalKey: `up:${fixture.tag}:reopen`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(5), name: "E" }] }));
+  await assert.rejects(() => fixture.createRule({ tokenId: fixture.token(6), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(1), name: "A" }] }));
+  // 解绑以后别的绑定占了这把 Key：重新打开被拒绝，什么也不改
+  assert.equal(await repository.archiveRule(rule.id, { now: Date.now() - 500 }), true);
+  const taker = await fixture.createRule({ tokenId: fixture.token(7), canonicalKey: `up:${fixture.tag}:reopen`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(7), name: "G" }] });
+  assert.deepEqual(await repository.reopenRule(rule.id), { conflict: true });
+  assert.equal((await repository.getRule(rule.id, { includeArchived: true })).archivedAt != null, true, "拒绝以后还是解绑着");
+  assert.ok(taker.id);
 });
 
 contract("segment keys (K1c): every segment has its Key row, filled from the rule; a new segment gets one; active_token_key follows the open segment of an enabled rule; the keys are not enumerable (results stay byte-identical)", async ({ repository, fixture }) => {
@@ -1746,6 +1756,29 @@ contract("changeRuleKey: stale plans (the rule's key is not the plan's `before`,
   const clash = { upstreamStationId: holder.upstreamStationId, tokenId: holder.tokenId, tokenName: holder.tokenName };
   assert.deepEqual(await repository.changeRuleKey(rule.id, { before: ref, after: clash, canonicalKey: `up:${fixture.tag}:s-holder`, windowStart: a, windowEnd: a + 1000 }), { conflict: true, stale: false });
   assert.equal(await snapshot(), before, "撞了唯一键：整体回滚");
+});
+
+contract("changeRuleKey with extra: the key change, the day keys (fill / replace), the re-settle requests and the state rows are written in one transaction; a clash rolls all of it back", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:x1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(231), name: "X" }], initialRatio: 1, fixedGroup: "g1" });
+  const holder = await fixture.createRule({ tokenId: fixture.token(232), tokenName: `Contract ${fixture.tag} XH`, canonicalKey: `up:${fixture.tag}:x-holder`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(233), name: "XH" }] });
+  const ref = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+  const fresh = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(234), tokenName: "X2" };
+  const a = EFFECTIVE_FROM + HOUR, now = Date.now();
+  const retry = { op: "retry", reason: "PENDING", attempts: 1, nextAttemptAt: 1, firstFailedAt: 1, lastAttemptAt: 1, sourceVersion: null, detail: null };
+  const extra = { now, fillDayKeys: [{ billDate: "2026-10-01", ...ref }], replaceDayKeys: { dates: ["2026-10-02"], rows: [{ billDate: "2026-10-02", ...ref }, { billDate: "2026-10-02", ...fresh }] },
+    resettleDates: ["2026-10-03"], recheckStates: [{ billDate: "2026-10-04", state: retry }] };
+  await repository.recordDayKeys(rule.id, [{ billDate: "2026-10-02", ...ref }]);
+  const snapshot = async () => JSON.stringify([await repository.getRule(rule.id), await repository.listDayKeys([rule.id], "2026-10-01", "2026-10-05"), await repository.listSettlementStates([rule.id])]);
+  const before = await snapshot();
+  const clash = { upstreamStationId: holder.upstreamStationId, tokenId: holder.tokenId, tokenName: holder.tokenName };
+  assert.deepEqual(await repository.changeRuleKey(rule.id, { before: ref, after: clash, canonicalKey: `up:${fixture.tag}:x-holder`, windowStart: a, windowEnd: a + 1000 }, { extra }), { conflict: true, stale: false });
+  assert.equal(await snapshot(), before, "撞了唯一键：换 Key 和后面补的各样写入一起回滚");
+  assert.deepEqual(await repository.changeRuleKey(rule.id, { before: ref, after: fresh, canonicalKey: `up:${fixture.tag}:x2`, windowStart: a, windowEnd: a + 1000 }, { extra }), { conflict: false, stale: false });
+  assert.equal((await repository.getRule(rule.id)).tokenId, fresh.tokenId);
+  const keys = (await repository.listDayKeys([rule.id], "2026-10-01", "2026-10-05"))[rule.id];
+  assert.deepEqual(Object.fromEntries(Object.entries(keys).map(([day, list]) => [day, list.map((key) => key.tokenId).sort()])), { "2026-10-01": [ref.tokenId], "2026-10-02": [ref.tokenId, fresh.tokenId].sort() });
+  const states = await repository.listSettlementStates([rule.id]);
+  assert.deepEqual(states.map((row) => [row.billDate, row.resettleRequestedAt != null]).sort(), [["2026-10-03", true], ["2026-10-04", false]]);
 });
 
 // 每个渠道每天用过哪几把 Key：记、读；已经记过的忽略；没记过的天不出现；按绑定、日期范围读

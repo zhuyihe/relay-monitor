@@ -2103,7 +2103,7 @@ test("上游资源：换好的提示——后台没带字段只写「已换成 x
     if (persistent) { await page.waitForTimeout(5500); assert.equal(await note.count(), 1, "5 秒以后还在"); await note.locator(".ant-notification-notice-close").click(); await note.waitFor({ state: "hidden" }); }
   };
   await run({}, "已换成 oai-16");
-  await run({ noRecentUsage: true }, "已换成 oai-16。新 Key 最近 31 天都没有用量，从今天起按新 Key 算");
+  await run({ noRecentUsage: true }, "已换成 oai-16。往前查没找到新 Key 的用量，从今天起按新 Key 算");
   await run({ fromDay: new Date().toLocaleDateString("sv", { timeZone: "Asia/Shanghai" }), recomputedDays: 0, tooOld: null }, "已换成 oai-16，从今天起按新 Key 算");
   await run({ fromDay: "2026-09-20", recomputedDays: 31, tooOld: { from: "2026-09-20", to: "2026-09-27" } },
     "已换成 oai-16，从 9月20日起按新 Key 算，补算了 31 天。9月20日–9月27日 在 31 天以前，没自动补算；要按新 Key 算，到每日利润选那天点「重新读取」。", { persistent: true });
@@ -2161,7 +2161,7 @@ test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂�
   const drawer = page.getByRole("dialog", { name: /主力上游的渠道/ }); await drawer.waitFor();
   await drawer.getByRole("button", { name: "解绑 高速 A", exact: true }).click();
   const confirm = page.getByRole("dialog", { name: "解绑「高速 A」？", exact: true });
-  await confirm.getByText("解绑后，「高速 A」不再挂在主力上游下面，以后可以再绑。", { exact: true }).waitFor();
+  await confirm.getByText("解绑后，「高速 A」不再挂在主力上游下面；今天的数照样算完，以前的数都留着。以后可以再绑。", { exact: true }).waitFor();
   await confirm.getByRole("button", { name: "解绑", exact: true }).click();
   for (let i = 0; i < 60 && !stops.length; i++) await page.waitForTimeout(100);
   assert.deepEqual(stops[0], { ownStationId: "own", channelIds: [1] });
