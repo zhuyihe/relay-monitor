@@ -1341,3 +1341,152 @@ test("往前找新 Key 第一次有用量的那天：别的绑定让出去的 Ke
   assert.equal(swapped.fromDay, "2026-10-10", "让出去的天不算渠道 2 在用：一直查到渠道 3 的开始日");
   assert.ok(three.ruleId);
 });
+
+// ===== 今天：换下来的那条绑定今天没读成，不拖垮整行 =====
+// 渠道 1 先在上游 1 用 Key 9（10-29 起），10-30 上午解绑，11 点绑到上游 2 的 Key 50（后绑，收入记在它上面）
+async function swappedUpstreamToday(t, { unreadOld }) {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], secondKeys: [50], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 50: [-Infinity, Infinity] }, rates: { 9: 1, 50: 2 } });
+  await f.at("2026-10-29T10:00:00");
+  const oldRule = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-29T23:00:00");
+  await f.at("2026-10-30T09:00:00");
+  await f.round("2026-10-30T09:05:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-30T11:00:00");
+  const newRule = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier2.id, tokenId: 50 });
+  let unread = false;
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (unread && url.host === "up.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+    return inner(input, init);
+  });
+  await f.at("2026-10-30T15:00:00");
+  unread = unreadOld;
+  return { f, oldRule, newRule };
+}
+
+test("今天：换下来的那条绑定今天没读成（上游读超时）、收入记在后绑的那条上——这一行照读到的算进合计，成本只有读成的那部分，亮「成本可能少算了」，不是需处理", async (t) => {
+  const { f } = await swappedUpstreamToday(t, { unreadOld: true });
+  const H = 3600, page = await f.rt.reconciliation.profitPage({ preset: "today" });
+  const [row] = page.rows;
+  assert.deepEqual([page.rows.length, row.counted, row.incomeUsd, row.actualCostUsd, row.attention], [1, true, 2 * 15 * H, 2 * 15 * H, null], "收入照算（今天 0 点到 15 点，每秒 2），成本只有后绑那条 Key 50（每秒 2）读成的部分");
+  assert.deepEqual([row.notice?.code, row.notice?.text, row.notice?.action], ["COST_UNREAD_TODAY", "成本可能少算了", null]);
+  assert.equal(row.notice.detail, "换下来的那把 Key 今天的用量还没读到，读到以后会自动补上。");
+  assert.deepEqual([page.pageTotals.incomeUsd, page.pageTotals.actualCostUsd, page.counts.attentionChannels, page.notCountedDays.count], [2 * 15 * H, 2 * 15 * H, 0, 0], "进合计、不是需处理、不记没算进来的天");
+  // 读成了：数照常、没有提示
+  const ok = await swappedUpstreamToday(t, { unreadOld: false });
+  const good = (await ok.f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
+  assert.deepEqual([good.counted, good.notice, good.actualCostUsd > good.incomeUsd / 2], [true, null, true], "读成了：成本含旧 Key 那条，没有提示");
+});
+
+test("今天：后绑的那条（收入记在它上面）没读成，照旧整行不算、成本「—」；多天范围里今天那一格同样放宽", async (t) => {
+  const { f } = await swappedUpstreamToday(t, { unreadOld: false });
+  // 后绑那条在上游 2：让上游 2 读超时
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up2.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
+  const row = (await f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
+  assert.deepEqual([row.counted, row.actualCostUsd, row.grossProfitUsd], [false, null, null]);
+});
+
+test("多天范围里今天那一格：换下来的那条今天没读成，今天照读到的算进合计，行上亮「成本可能少算了」；过去已固定的天不受影响", async (t) => {
+  const { f } = await swappedUpstreamToday(t, { unreadOld: true });
+  const H = 3600, D = 24 * H;
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") });
+  const [row] = page.rows;
+  assert.deepEqual([row.counted, row.notice?.code, row.attention], [true, "COST_UNREAD_TODAY", null]);
+  // 10-29 已固定（一整天，Key 9 每秒 1、收入每秒 2）+ 今天读成的部分
+  assert.equal(row.incomeUsd, 2 * D + 2 * 15 * H);
+  assert.equal(row.actualCostUsd, D + 2 * 15 * H);
+  assert.equal(page.notCountedDays.count, 0);
+});
+
+test("过去的天：同样的设置（一边有账本、一边没固定）仍然整天不算，不出假亏损", async (t) => {
+  const { f, oldRule } = await swappedUpstreamToday(t, { unreadOld: false });
+  await f.round("2026-10-30T23:00:00"); await f.round("2026-10-31T01:00:00");
+  f.repository.tables.ledger.splice(0, f.repository.tables.ledger.length, ...f.repository.tables.ledger.filter((row) => !(row.rule_id === oldRule.ruleId && row.bill_date === "2026-10-30")));
+  await f.at("2026-10-31T10:00:00");
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-30T00:00:00"), endMs: SH("2026-10-31T00:00:00") });
+  assert.deepEqual([page.rows[0].counted, page.rows[0].notice, page.rows[0].actualCostUsd], [false, null, null]);
+  const week = await f.rt.reconciliation.profitPage({ preset: "yesterday" });
+  assert.deepEqual([week.rows[0].counted, week.rows[0].notice], [false, null]);
+});
+
+// 放宽生效时 Key 行也要对：各把 Key 的成本之和 = 渠道成本，读成的 Key 行有它真实的成本（不能显示 $0）
+const keyCostSum = (row) => row.keys.reduce((total, key) => total + (key.costUsd ?? 0), 0);
+
+test("放宽生效时：单看今天、多天范围，各把 Key 的成本之和都等于渠道成本；读成的 Key 行有真实成本，换下来那把今天没有 Key 数", async (t) => {
+  const { f } = await swappedUpstreamToday(t, { unreadOld: true });
+  const H = 3600;
+  const today = (await f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
+  assert.equal(today.notice?.code, "COST_UNREAD_TODAY");
+  assert.deepEqual(today.keys.map((key) => [key.tokenId, key.costUsd]), [[50, 2 * 15 * H]], "只有读成的 Key 50，成本是真实的");
+  assert.equal(keyCostSum(today), today.actualCostUsd);
+  const multi = (await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") })).rows[0];
+  assert.equal(multi.notice?.code, "COST_UNREAD_TODAY");
+  assert.equal(keyCostSum(multi), multi.actualCostUsd, "多天：各把 Key 的成本加起来 = 渠道成本");
+  assert.deepEqual(multi.keys.map((key) => [key.tokenId, key.pendingDays]).sort((a, b) => a[0] - b[0]), [[9, 0], [50, 0]]);
+});
+
+test("放宽生效时，渠道今天挂过三条绑定（旧的读不成，中间一条已解绑读成了，最后一条在用）：Key 成本之和 = 渠道成本", async (t) => {
+  const keys = [9, 10];
+  const f = await setup(t, { upstreamType: "newapi", keys, secondKeys: [50], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 10: [-Infinity, Infinity], 50: [-Infinity, Infinity] }, rates: { 9: 1, 10: 3, 50: 2 } });
+  await f.at("2026-10-30T08:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-30T08:05:00");
+  await f.at("2026-10-30T09:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-30T11:00:00"); await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier2.id, tokenId: 50 });
+  await f.at("2026-10-30T13:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-30T13:30:00"); await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 10 });
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up.test" && url.searchParams.get("token_name") === "Key 9") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
+  await f.at("2026-10-30T15:00:00");
+  const row = (await f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
+  assert.deepEqual([row.counted, row.notice?.code, row.ruleIds.length, row.keys.map((key) => key.tokenId).sort((a, b) => a - b)], [true, "COST_UNREAD_TODAY", 3, [10, 50]]);
+  assert.equal(keyCostSum(row), row.actualCostUsd);
+  assert.ok(row.actualCostUsd > 0 && row.keys.every((key) => key.costUsd > 0));
+  const multi = (await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") })).rows[0];
+  assert.equal(keyCostSum(multi), multi.actualCostUsd);
+});
+
+test("今天：已解绑的那条就是收入记在它上面的那条（后绑），而且没读成——整行不算，不出现收入 0、成本只有旧那条的假亏损（单看今天、多天范围都是）", async (t) => {
+  // 渠道 1：先在上游 2 用 Key 50（10:00 起，10:30 解绑），再绑到上游 1 的 Key 9（后绑，11:00 起，12:00 解绑）；没有在用的。后绑的上游 1 今天读超时
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], secondKeys: [50], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 50: [-Infinity, Infinity] }, rates: { 9: 1, 50: 2 } });
+  await f.at("2026-10-30T10:00:00"); await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier2.id, tokenId: 50 });
+  await f.at("2026-10-30T10:30:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-30T11:00:00"); await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.at("2026-10-30T12:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
+  await f.at("2026-10-30T15:00:00");
+  const row = (await f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
+  assert.deepEqual([row.counted, row.actualCostUsd, row.grossProfitUsd, row.notice], [false, null, null, null]);
+  const multi = (await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") })).rows[0];
+  assert.deepEqual([multi.counted, multi.notice], [false, null]);
+});
+
+test("多天范围里今天：后绑的那条（在用、收入记在它上面）今天没读成——今天不算进来（没算进来的天 +1），不放宽", async (t) => {
+  const { f } = await swappedUpstreamToday(t, { unreadOld: false });
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up2.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") });
+  assert.deepEqual([page.rows[0].notice, page.notCountedDays.count], [null, 1]);
+  assert.equal(page.rows[0].incomeUsd, 2 * 24 * 3600, "只有 10-29 已固定的那一天");
+});
+
+test("今天：没读成的那条还在绑着（只是收入记在更晚绑的、已解绑的那条上）——不放宽，整行不算（单看今天、多天范围都是）", async (t) => {
+  // 渠道 1：A（上游 1，Key 9，10:00 绑、10:30 解绑），B（上游 2，Key 50，11:00 绑、12:00 解绑，后绑），然后 A 重新打开（绑定时刻不变）：A 在绑、B 已解绑且更晚绑
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], secondKeys: [50], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 50: [-Infinity, Infinity] }, rates: { 9: 1, 50: 2 } });
+  await f.at("2026-10-30T10:00:00"); const a = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.at("2026-10-30T10:30:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-30T11:00:00"); await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier2.id, tokenId: 50 });
+  await f.at("2026-10-30T12:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-30T12:30:00"); await f.rt.reconciliation.reopenRule(a.ruleId);
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
+  await f.at("2026-10-30T15:00:00");
+  const row = (await f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
+  assert.deepEqual([row.bound, row.counted, row.notice], [true, false, null]);
+  const multi = (await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") })).rows[0];
+  assert.deepEqual([multi.counted, multi.notice], [false, null]);
+});
