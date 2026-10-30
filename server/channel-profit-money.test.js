@@ -190,7 +190,7 @@ test("同时点两次开始只建一条绑定；同时停止不报错、每个�
 });
 
 for (const upstreamType of ["newapi", "sub2api"]) {
-  test(`A 在算、当天 9 点换 Key，旧 Key 挪给新渠道 B，手动开始 B——简单口径：每个渠道按当天用过的 Key 整天算，换 Key 那天旧 Key 在 A、B 两行各算一次（已知的重复，第二天起每天之和 = 各 Key 用量之和）（${upstreamType}）`, async (t) => {
+  test(`A 在算、当天 9 点换 Key，旧 Key 挪给新渠道 B，手动开始 B——一把 Key 一天只算在一个渠道上：换 Key 那天 Key 9 先在 A、后在 B，只算在后绑的 B 上，每天各 Key 的用量只算一次（${upstreamType}）`, async (t) => {
     const SWITCH = SH("2026-10-11T09:00:00");
     const f = await setup(t, { upstreamType, keys: [9, 20, 13], channelKey: { 1: 9, 7: 13 }, windows: { 9: [-Infinity, Infinity], 20: [SWITCH, Infinity], 13: [Infinity, Infinity] } });
     await f.at("2026-10-10T10:00:00");
@@ -207,8 +207,8 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const report = [];
     for (const day of ["2026-10-10", "2026-10-11", "2026-10-12"]) {
       const start = SH(`${day}T00:00:00`), end = start + DAY * 1000;
-      // 换 Key 那天（10-11）Key 9 先属于 A、后属于 B，两行各按整天算一次
-      const truth = [9, 20, 13].reduce((sum, id) => sum + f.used(id, start, end), 0) + (day === "2026-10-11" ? f.used(9, start, end) : 0);
+      // 换 Key 那天（10-11）Key 9 先属于 A、后属于 B：只算在后绑的 B 上，每把 Key 的用量一天只算一次
+      const truth = [9, 20, 13].reduce((sum, id) => sum + f.used(id, start, end), 0);
       const rows = f.costOn(day);
       report.push({ day, truth, got: rows.reduce((sum, row) => sum + Number(row.cost_usd || 0), 0), rows: rows.map((row) => `${rules.find((r) => r.id === row.rule_id)?.channels.map((c) => c.channelId)}:${row.cost_usd}`) });
     }
@@ -299,8 +299,9 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const dayStart = (day) => SH(`${day}T00:00:00`);
     const live = await f.rt.reconciliation.queryRules({ preset: "custom", startMs: dayStart("2026-10-10"), endMs: dayStart("2026-10-13") }, { mode: "evaluate", force: true, origin: "manual" });
     const costOf = (channelId) => Number(live.results.find((row) => row.rule.channels.some((channel) => channel.channelId === channelId)).upstream.amountUsd);
-    // 渠道 1：10-10 记 Key 9，10-11 记 Key 9 和 20（换 Key 那天），10-12 记 Key 20；渠道 7：10-11、10-12 记 Key 9
-    assert.equal(costOf(1), f.used(9, dayStart("2026-10-10"), dayStart("2026-10-12")) + f.used(20, dayStart("2026-10-11"), dayStart("2026-10-13")));
+    // 渠道 1：10-10 记 Key 9，10-11 记 Key 9 和 20（换 Key 那天），10-12 记 Key 20；渠道 7：10-11、10-12 记 Key 9。
+    // 10-11 Key 9 两条绑定都记了：只算在后绑的渠道 7 上，渠道 1 那天只算 Key 20
+    assert.equal(costOf(1), f.used(9, dayStart("2026-10-10"), dayStart("2026-10-11")) + f.used(20, dayStart("2026-10-11"), dayStart("2026-10-13")));
     assert.equal(costOf(7), f.used(9, dayStart("2026-10-11"), dayStart("2026-10-13")));
   });
 }
@@ -882,3 +883,63 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     assert.deepEqual([single.keys.length, single.split.basis, single.keys[0].incomeUsd, single.keys[0].incomeBasis], [1, "single", single.income.usd, "single"]);
   });
 }
+
+// ===== 渠道按 Key 算利润 PR2：一把 Key 一天只算在一个渠道上 =====
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`一把 Key 一天只算在一个渠道上（${upstreamType}）：渠道 1 当天解绑、同一把 Key 当天挪给渠道 7——这天这把 Key 只算在后绑的渠道 7 上，渠道 1 这天收入照算、成本不含这把 Key；每天各 Key 的用量只算一次`, async (t) => {
+    const f = await setup(t, { upstreamType, keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+    await f.round("2026-10-10T23:00:00");
+    await f.round("2026-10-11T01:00:00");
+    await f.at("2026-10-11T10:00:00");
+    await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+    await f.at("2026-10-11T11:00:00");
+    await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, upstreamStationId: f.supplier.id, tokenId: 9 });
+    // 当天（今天现读）：渠道 1（已解绑）成本不含 Key 9、也不亮「可能换了 Key」；Key 9 这天的用量只在渠道 7 上算一次
+    await f.at("2026-10-11T13:00:00");
+    const live = await f.rt.reconciliation.profitPage({ preset: "today" });
+    const liveRow = (channelId) => live.rows.find((row) => row.channels.some((channel) => channel.channelId === channelId));
+    assert.deepEqual([liveRow(1).bound, liveRow(1).actualCostUsd, liveRow(1).notice, liveRow(1).counted], [false, 0, null, true]);
+    assert.equal(liveRow(7).actualCostUsd, 13 * 3600, "渠道 7 今天读到 13 点：Key 9 整个今天");
+    for (const iso of ["2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+    const D = 24 * 3600, rules = await f.rt.reconciliation.listRules({ includeArchived: true });
+    const byChannel = (channelId) => rules.find((rule) => rule.channels.some((channel) => channel.channelId === channelId));
+    const rowOf = (day, channelId) => f.costOn(day).find((row) => row.rule_id === byChannel(channelId).id);
+    assert.equal(Number(rowOf("2026-10-10", 1).cost_usd), D, "10-10 只有渠道 1 一条：Key 9 整天");
+    // 10-11：渠道 1（解绑那天整天算）收入 2D、成本不含 Key 9（后绑的渠道 7 拿了它）；渠道 7 收入 2D、Key 9 整天
+    assert.deepEqual([Number(rowOf("2026-10-11", 1).revenue_usd), Number(rowOf("2026-10-11", 1).cost_usd)], [2 * D, 0]);
+    assert.deepEqual([Number(rowOf("2026-10-11", 7).revenue_usd), Number(rowOf("2026-10-11", 7).cost_usd)], [2 * D, D]);
+    assert.equal(f.costOn("2026-10-11").reduce((sum, row) => sum + Number(row.cost_usd), 0), D, "Key 9 这天的用量只算一次");
+    assert.equal((await f.repository.listSettlementStates(rules.map((rule) => rule.id))).filter((state) => state.manualReason).length, 0, "没有要人处理的");
+    assert.equal(f.repository.tables.ledgerKeys.filter((row) => row.bill_date === "2026-10-11" && row.rule_id === byChannel(1).id).length, 0, "渠道 1 这天没有 Key 9 的 Key 行");
+  });
+}
+
+test("一把 Key 一天只算在一个渠道上：后绑的绑定把这把 Key 补回已经固定的天，先绑的那条那几天自动重算（成本拿掉），少一半以上也不挡", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 20: [-Infinity, Infinity] }, rates: { 9: 1, 20: 3 } });
+  const D = 24 * 3600;
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T23:00:00"); await f.round("2026-10-11T01:00:00");
+  await f.at("2026-10-11T10:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-11T11:00:00");
+  // 渠道 7 后绑，先绑 Key 20；10-11 渠道 1 那条已经固定的（要到 10-12 凌晨）还没固定，所以先让它固定
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, upstreamStationId: f.supplier.id, tokenId: 20 });
+  for (const iso of ["2026-10-11T23:00:00", "2026-10-12T01:00:00"]) await f.round(iso);
+  const rules = await f.rt.reconciliation.listRules({ includeArchived: true });
+  const ruleOf = (channelId) => rules.find((rule) => rule.channels.some((channel) => channel.channelId === channelId));
+  const costOf = (day, channelId) => Number(f.costOn(day).filter((row) => row.rule_id === ruleOf(channelId).id).sort((x, y) => y.revision - x.revision)[0]?.cost_usd); // 最新一版
+  assert.equal(costOf("2026-10-11", 1), D, "10-11 渠道 1 固定时 Key 9 整天算在它上面");
+  // 10-12 渠道 7 换成 Key 9：新 Key 从哪天开始有用量查到 10-11（渠道 7 的开始日），10-11 补回渠道 7；先绑的渠道 1 那条 10-11 已固定的要重算
+  await f.at("2026-10-12T10:00:00");
+  const swapped = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 7, tokenId: 9 });
+  assert.equal(swapped.fromDay, "2026-10-11");
+  const states = await f.repository.listSettlementStates([ruleOf(1).id]);
+  assert.deepEqual(states.filter((state) => state.resettleRequestedAt != null).map((state) => [state.billDate, state.resettleReason]), [["2026-10-11", "key_owner"]]);
+  for (const iso of ["2026-10-12T11:00:00", "2026-10-12T12:00:00", "2026-10-12T13:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+  assert.equal(costOf("2026-10-11", 1), 0, "渠道 1 这天 Key 9 的成本拿掉了（少一半以上也没挡）");
+  assert.equal(costOf("2026-10-11", 7), D + 3 * D, "渠道 7 这天：Key 9 整天 + 原来的 Key 20 整天（3 倍）");
+  assert.equal((await f.repository.listSettlementStates([ruleOf(1).id])).filter((state) => state.manualReason).length, 0, "没有被 RESETTLE_SHRUNK 挡住");
+});

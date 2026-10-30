@@ -5,7 +5,7 @@ import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCur
   ledgerInsertValues, ledgerWriteDecision, LEDGER_KEY_COLUMNS, ledgerKeyValues, ledgerKeyFromRow } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql } from "../db/segment-keys.js";
 import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
-import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
+import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_KEY_OWNER, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
@@ -756,7 +756,7 @@ export class ReconciliationRepository {
   // 落库那一刻规则现在的 Key 不是 plan.before（别处先换过了）、a 早于开着那段的起点、窗口倒挂：什么也不写，返回 { stale: true }；
   // 新 Key 已经在别的绑定里（唯一约束）：整体回滚，返回 { conflict: true }
   // extra（换 Key 的这一批写操作和换 Key 同一个事务，半路失败整体回滚）：
-  //   fillDayKeys 补记没有记录的天（已有的忽略）、replaceDayKeys { dates, rows } 这几天的 Key 换成 rows、resettleDates 写重结请求、
+  //   fillDayKeys 补记没有记录的天（已有的忽略）、replaceDayKeys { dates, rows } 这几天的 Key 换成 rows、resettleDates 写重结请求、resettleOthers [{ ruleId, dates }] 别的绑定的重结请求、
   //   recheckStates [{ billDate, state }] 把被挡住的日子的状态行标成「原因没了」；now 是这一批写的时刻
   async changeRuleKey(ruleId, plan, { detectedAt = Date.now(), extra = null } = {}) {
     const conn = await this.pool.getConnection();
@@ -814,6 +814,8 @@ export class ReconciliationRepository {
       await insertRows((extra.replaceDayKeys.rows || []).filter((row) => dates.includes(row?.billDate)), false);
     }
     if (extra.resettleDates?.length) await this.requestResettle(ruleId, extra.resettleDates, { now }, conn);
+    // 新 Key 这几天改记在这条绑定上，先绑的那条绑定这几天已经固定的要重算（这把 Key 的成本拿掉）
+    for (const other of extra.resettleOthers || []) await this.requestResettle(other.ruleId, other.dates, { now, reason: RESETTLE_REASON_KEY_OWNER }, conn);
     for (const item of extra.recheckStates || []) await this.recordSettlementState(ruleId, item.billDate, item.state, now, { conn });
   }
 

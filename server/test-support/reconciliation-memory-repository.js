@@ -11,7 +11,7 @@
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
-import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
+import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_KEY_OWNER, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision, LEDGER_KEY_COLUMNS, LEDGER_KEY_DECIMAL_SCALE, ledgerKeyFromRow, ledgerKeyValues } from "../../lib/reconciliation-ledger.js";
@@ -569,6 +569,7 @@ export class MemoryReconciliationRepository {
       for (const row of valid(extra.replaceDayKeys.rows).filter((item) => dates.has(item.billDate))) insert(row);
     }
     if (extra.resettleDates?.length) this.#requestResettle(tx, ruleId, extra.resettleDates, { reason: RESETTLE_REASON_TRANSITION, now });
+    for (const other of extra.resettleOthers || []) this.#requestResettle(tx, other.ruleId, other.dates, { reason: RESETTLE_REASON_KEY_OWNER, now });
     for (const item of extra.recheckStates || []) this.#recordState(tx, ruleId, item.billDate, item.state, now, null);
   }
 

@@ -1801,19 +1801,21 @@ contract("changeRuleKey with extra: the key change, the day keys (fill / replace
   const a = EFFECTIVE_FROM + HOUR, now = Date.now();
   const retry = { op: "retry", reason: "PENDING", attempts: 1, nextAttemptAt: 1, firstFailedAt: 1, lastAttemptAt: 1, sourceVersion: null, detail: null };
   const extra = { now, fillDayKeys: [{ billDate: "2026-10-01", ...ref }], replaceDayKeys: { dates: ["2026-10-02"], rows: [{ billDate: "2026-10-02", ...ref }, { billDate: "2026-10-02", ...fresh }] },
-    resettleDates: ["2026-10-03"], recheckStates: [{ billDate: "2026-10-04", state: retry }] };
+    resettleDates: ["2026-10-03"], resettleOthers: [{ ruleId: holder.id, dates: ["2026-10-05"] }], recheckStates: [{ billDate: "2026-10-04", state: retry }] };
   await repository.recordDayKeys(rule.id, [{ billDate: "2026-10-02", ...ref }]);
   const snapshot = async () => JSON.stringify([await repository.getRule(rule.id), await repository.listDayKeys([rule.id], "2026-10-01", "2026-10-05"), await repository.listSettlementStates([rule.id])]);
   const before = await snapshot();
   const clash = { upstreamStationId: holder.upstreamStationId, tokenId: holder.tokenId, tokenName: holder.tokenName };
   assert.deepEqual(await repository.changeRuleKey(rule.id, { before: ref, after: clash, canonicalKey: `up:${fixture.tag}:x-holder`, windowStart: a, windowEnd: a + 1000 }, { extra }), { conflict: true, stale: false });
   assert.equal(await snapshot(), before, "撞了唯一键：换 Key 和后面补的各样写入一起回滚");
+  assert.deepEqual(await repository.listSettlementStates([holder.id]), [], "别的绑定的重结请求也一起回滚");
   assert.deepEqual(await repository.changeRuleKey(rule.id, { before: ref, after: fresh, canonicalKey: `up:${fixture.tag}:x2`, windowStart: a, windowEnd: a + 1000 }, { extra }), { conflict: false, stale: false });
   assert.equal((await repository.getRule(rule.id)).tokenId, fresh.tokenId);
   const keys = (await repository.listDayKeys([rule.id], "2026-10-01", "2026-10-05"))[rule.id];
   assert.deepEqual(Object.fromEntries(Object.entries(keys).map(([day, list]) => [day, list.map((key) => key.tokenId).sort()])), { "2026-10-01": [ref.tokenId], "2026-10-02": [ref.tokenId, fresh.tokenId].sort() });
   const states = await repository.listSettlementStates([rule.id]);
   assert.deepEqual(states.map((row) => [row.billDate, row.resettleRequestedAt != null]).sort(), [["2026-10-03", true], ["2026-10-04", false]]);
+  assert.deepEqual((await repository.listSettlementStates([holder.id])).map((row) => [row.billDate, row.resettleReason]), [["2026-10-05", "key_owner"]], "别的绑定（先绑的那条）这天也写了重结请求，原因是 key_owner");
 });
 
 // 每个渠道每天用过哪几把 Key：记、读；已经记过的忽略；没记过的天不出现；按绑定、日期范围读

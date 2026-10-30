@@ -49,7 +49,7 @@ import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBill
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, RESETTLE_REASON_KEY_OWNER, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -806,7 +806,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 其他日子（普通请求日、RESETTLE_TOO_OLD 的日子）手动读取也照样判，读出来少了一半多先挡下、记 RESETTLE_SHRUNK
       const confirmShrink = origin === "manual" && confirmed === true && state?.manualReason === "RESETTLE_SHRUNK";
       // 程序自己发起的重结（以前按解绑那一刻切开的日子改成整天算，floorResettleRound）：旧数是切开的半天，新数本来就该少一块（收入记到后绑的那条上），不判「少一半以上」
-      const autoConfirm = state?.resettleReason === RESETTLE_REASON_FLOOR;
+      const autoConfirm = state?.resettleReason === RESETTLE_REASON_FLOOR || state?.resettleReason === RESETTLE_REASON_KEY_OWNER;
       result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, confirmedAfter, autoConfirm, trigger, priorState: state });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
@@ -1084,6 +1084,28 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return rows;
   }
 
+  // 这条绑定要把 tokenId 这把 Key 记到 [first, last] 这几天：同一个上游里比它先绑的别的绑定在这几天也记着这把 Key（没记的按它现在的那把）、
+  // 那几天已经固定（账本里有）、也没超过重算的最远天数的，返回 [{ ruleId, dates }]；这几天那条绑定的这把 Key 不再算
+  async function keyHolderResettles(rule, tokenId, first, last, now) {
+    const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && laterBound(rule, other)
+      && (() => { const range = bindingDayRange(other); return range.from <= last && range.to >= first; })());
+    if (!peers.length) return [];
+    const ids = peers.map((other) => other.id);
+    const [theirs, facts] = await Promise.all([repository.listDayKeys(ids, first, last).catch(() => ({})), repository.listLedgerDayFacts(ids, first, last).catch(() => [])]);
+    const fixed = new Set(facts.map((fact) => `${fact.ruleId}|${fact.billDate}`));
+    const result = [];
+    for (const other of peers) {
+      const range = bindingDayRange(other), dates = [];
+      for (let day = first; day <= last; day = shiftDayLabel(day, 1)) {
+        if (day < range.from || day > range.to || !fixed.has(`${other.id}|${day}`)) continue;
+        if (now - dayStartInTz(shiftDayLabel(day, 1), other.timezone) > RESETTLE_MAX_AGE_MS) continue;
+        if ((theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => Number(key.tokenId) === Number(tokenId))) dates.push(day);
+      }
+      if (dates.length) result.push({ ruleId: other.id, dates });
+    }
+    return result;
+  }
+
   // 换 Key 时找新 Key 哪天开始用的（D）：从今天往前一天一天查新 Key 在上游的用量，碰到第一个没用量的天就停，最多查 31 天，也不早于这条绑定的开始日；
   // 查到的最早有用量的那天是 D，一天都没有就是今天。今天本身没用量不算断（可能刚过零点、或上游账单还没到），从昨天接着查。只读上游，一天一个请求
   const SWAP_LOOKBACK_DAYS = 31;
@@ -1152,8 +1174,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       recomputed.add(state.billDate);
       return { billDate: state.billDate, state: settlementRecheck({ window, state, blocker: null, now }) };
     });
+    // 新 Key 这几天改记在这条绑定上：同一个上游里先绑的别的绑定这几天也记着这把 Key、而且这几天已经固定的，那几天重算（这把 Key 的成本拿掉，一把 Key 一天只算一次）
+    const resettleOthers = fromDay < today ? await keyHolderResettles(rule, ref.tokenId, fromDay, yesterday, now) : [];
     const extra = { now, fillDayKeys, replaceDayKeys: { dates: [...days, ...before.map((state) => state.billDate)], rows: [...dayRows, ...before.map((state) => ({ billDate: state.billDate, ...ref }))] },
-      resettleDates, recheckStates };
+      resettleDates, resettleOthers, recheckStates };
     let result;
     try { result = await repository.changeRuleKey(rule.id, built.plan, { detectedAt: now, extra }); } catch { throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试"); }
     if (result.conflict) throw codedError("KEY_ALREADY_BOUND", "这把 Key 已经在别的渠道算利润了");
@@ -1862,7 +1886,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       merged.set(tokenId, entry);
     };
     for (const part of keyParts) {
-      if (part.stats?.length) for (const stat of part.stats) add(stat.tokenId, stat.tokenName, stat.costUsd, stat.standardUsd);
+      if (Array.isArray(part.stats)) for (const stat of part.stats) add(stat.tokenId, stat.tokenName, stat.costUsd, stat.standardUsd);
       else add(Number(rule.tokenId), ownTokenName ?? rule.tokenName ?? null, Number.isFinite(part.amountUsd) ? part.amountUsd : null, part.standardUsd);
     }
     if (merged.size === 1 && totalUsd != null && Number.isFinite(totalUsd)) { const [only] = merged.values(); if (only.costUsd == null) only.costUsd = totalUsd; }
@@ -1886,6 +1910,28 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     });
   }
 
+  // ---- 一把 Key 一天只算在一个渠道上（用户 10-30 定）----
+  // 同一个上游里同一把 Key 同一天出现在两条绑定的每天 Key 里（读取服务挪 Key、解绑后同一天又绑到别的渠道、换 Key 回补……）：只算在后绑的那条上
+  // （后绑 = bound_at_ms 大，一样大 id 大的，和收入归属同一个比法），先绑的那条这天这把 Key 不算。没记每天 Key 的天按绑定现在的那把算（和取数一致）。
+  // 返回这条绑定输掉的 "tokenId|日期"。别的绑定读不到时抛错，不悄悄算两遍
+  const laterBound = (a, b) => boundAtOf(a) > boundAtOf(b) || (boundAtOf(a) === boundAtOf(b) && a.id > b.id);
+  async function lostKeyDays(rule, recorded, first, last) {
+    const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && laterBound(other, rule)
+      && (() => { const range = bindingDayRange(other); return range.from <= last && range.to >= first; })());
+    const lost = new Set();
+    if (!peers.length) return lost;
+    const theirs = await repository.listDayKeys(peers.map((other) => other.id), first, last);
+    for (let day = first; day <= last; day = shiftDayLabel(day, 1)) {
+      const mine = (recorded[day] || [{ tokenId: rule.tokenId }]).map((key) => String(key.tokenId));
+      for (const other of peers) {
+        const range = bindingDayRange(other);
+        if (day < range.from || day > range.to) continue;
+        for (const key of theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]) if (mine.includes(String(key.tokenId))) lost.add(`${key.tokenId}|${day}`);
+      }
+    }
+    return lost;
+  }
+
   function costOwnerFor(rule, canonicalKey, registry) {
     // 已解除、锚定过的：解除前这把 Key 只有它在用（active_token_key 唯一键保证），算唯一；账号换了人（身份对不上）就算不出
     if (rule.archivedAt) return rule.canonicalKey && canonicalKey === rule.canonicalKey
@@ -1905,24 +1951,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (unknown.length || !rule.enabled) return { state: "unknown", ownerId: null, ruleIds: unknown.length ? unknown.sort() : [rule.id] };
     matching.sort();
     return { state: matching.length > 1 ? "duplicate" : "unique", ownerId: matching[0] || rule.id, ruleIds: matching };
-  }
-
-  // 已解除的绑定补结某一天（C3）：这天里别的绑定（启用的，或最近也解除了、那段时间还占着的）也占着同一个渠道、或同一把 Key 时，
-  // 和启用时一样挡住（DUPLICATE_CHANNEL_ASSIGNMENT、CANONICAL_KEY_CONFLICT），不然同一个渠道的收入、同一把 Key 的成本会在账本里算两遍（审核 C3 中-1）
-  function archivedClash(rule, window, registry) {
-    // 这条绑定这天自己的区间：从它的核算起点到解除那天结束（整天算）
-    const start = Math.max(window.startMs, reconciliationAccountingStart(rule) ?? window.startMs);
-    const end = Math.min(window.endMs, shiftedDayStartInTz(Number(rule.archivedAtMs), 1, window.timezone));
-    const sharing = { channel: [], key: [] };
-    for (const other of registry.rules) {
-      if (other.id === rule.id) continue;
-      const otherStart = reconciliationAccountingStart(other) ?? Date.parse(other.createdAt);
-      const otherEnd = other.archivedAtMs == null ? Infinity : shiftedDayStartInTz(Number(other.archivedAtMs), 1, window.timezone);
-      if (!(otherStart < end && otherEnd > start)) continue;
-      // 同一个渠道同一天有两条绑定不再算冲突：收入只记在当天最后绑上的那条上（revenueLostDays）；同一把 Key 照旧是冲突
-      if (rule.canonicalKey && other.canonicalKey === rule.canonicalKey) sharing.key.push(other.id);
-    }
-    return sharing;
   }
 
   async function ownChannelsFor(station, { force = false } = {}) {
@@ -1972,10 +2000,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly }) {
     const first = dayKeyInTz(window.startMs, window.timezone), last = dayKeyInTz(Math.max(window.startMs, window.endMs - 1), window.timezone);
     const recorded = (await repository.listDayKeys([rule.id], first, last))[rule.id] || {};
+    // 一把 Key 一天只算在一个渠道上：同一天同一把 Key 还在别的（后绑的）绑定里，这天这把 Key 不算在这条上（lostKeyDays，结账和今天现读都走这里）
+    const lost = await lostKeyDays(rule, recorded, first, last);
     const daysOf = new Map(); // tokenId -> { key, days }
     for (let day = first; day <= last; day = shiftDayLabel(day, 1)) {
       // 一个渠道只对一个上游：Key 的上游一律取绑定现在的（合并重复上游以后表里记的还是旧上游的编号）
       for (const key of recorded[day] || [{ tokenId: rule.tokenId, tokenName: rule.tokenName }]) {
+        if (lost.has(`${key.tokenId}|${day}`)) continue;
         const entry = daysOf.get(String(key.tokenId)) || { key: { ...key, upstreamStationId: rule.upstreamStationId }, days: [] };
         entry.days.push(day);
         daysOf.set(String(key.tokenId), entry);
@@ -1989,6 +2020,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         pieces.push({ key, window: { ...window, startMs: Math.max(window.startMs, dayStartInTz(days[from], window.timezone)), endMs: Math.min(window.endMs, dayStartInTz(shiftDayLabel(days[to], 1), window.timezone)) } });
         from = to + 1;
       }
+    }
+    // 这个窗口里这条绑定的 Key 全都算在别的绑定上：成本 0，读全了（不去取数）
+    if (!pieces.length) {
+      const platform = upstream.type === "sub2api" || upstream.type === "sub2api-password" ? "sub2api" : "newapi";
+      const zero = { platform, state: "complete", complete: true, amountUsd: 0, knownAmountUsd: 0, actualCostUsd: 0, quotaUnits: platform === "newapi" ? 0 : null, quotaPerUnit: platform === "newapi" ? metadata?.quotaPerUnit ?? 1 : null,
+        window: { startMs: window.startMs, endMs: window.endMs, timezone: window.timezone }, observedAt: Date.now(), currency: "USD", billingTimezone: { state: "verified", timezone: window.timezone } };
+      Object.defineProperty(zero, "keyStats", { value: [], enumerable: false, configurable: true });
+      Object.defineProperty(zero, "keysLost", { value: true, enumerable: false, configurable: true }); // 全算在别的绑定上（不是 Key 没用量）
+      return zero;
     }
     const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId })));
     const total = results.length === 1 ? { ...results[0] } : sumKeyStats(results);
@@ -2688,11 +2728,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         detail: issueText("DUPLICATE_CHANNEL_ASSIGNMENT"), ruleIds: ownerRegistry.duplicateSales.get(rule.id), observedAt: Date.now() });
       const observedSource = sourceState(rule);
       if (observedSource.status !== "confirmed") issues.push({ code: "SOURCE_BINDING_UNCONFIRMED", scope: "source", detail: issueText("SOURCE_BINDING_UNCONFIRMED"), observedAt: Date.now() });
-      if (rule.archivedAt) {
-        const clash = archivedClash(rule, window, ownerRegistry);
-        if (clash.channel.length) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule", detail: issueText("DUPLICATE_CHANNEL_ASSIGNMENT"), ruleIds: [rule.id, ...clash.channel].sort(), observedAt: Date.now() });
-        if (clash.key.length) issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: [rule.id, ...clash.key].sort(), observedAt: Date.now() }));
-      }
       const costOwner = costOwnerFor(rule, canonicalKey, ownerRegistry);
       if (costOwner.state === "unknown") issues.push(upstreamSide({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: issueText("COST_OWNER_UNVERIFIED"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
@@ -2829,7 +2864,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             .catch((error) => ({ error })),
         ]);
         if (downstreamResult.staleFromIdleSkip) staleFromIdleSkip.push(true);
-        if (!upstreamResult.error) keyParts.push({ stats: upstreamResult.keyStats ?? null, standardUsd: upstreamResult.standardCostUsd ?? null, state: upstreamResult.state, amountUsd: upstreamResult.amountUsd });
+        if (!upstreamResult.error) keyParts.push({ stats: upstreamResult.keyStats ?? null, standardUsd: upstreamResult.standardCostUsd ?? null, state: upstreamResult.state, amountUsd: upstreamResult.amountUsd, keysLost: upstreamResult.keysLost === true });
         const segmentIssues = issues.filter((issue) => CALCULATION_BLOCKERS.has(issue.code));
         const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
         // 只有上游一侧的窗口或时区对不上时算上游侧问题；本站一侧对不上始终阻断。
@@ -2872,14 +2907,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           segmentIssues.push(upstreamSide({ code: "UPSTREAM_CAPABILITY_UNVERIFIED", scope: "upstream", detail: issueText("UPSTREAM_CAPABILITY_UNVERIFIED"), observedAt: Date.now() }));
         }
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;
-        if (!upstreamUnavailable && !downstreamUnavailable && upstreamUsd <= 0 && downstreamUsd > 0) {
+        // 这把 Key 这天全算在后绑的别的渠道上（一把 Key 一天只算在一个渠道上）：成本是 0 不是账单没到，也不是换了 Key
+        const keyLost = upstreamResult.keysLost === true;
+        if (!upstreamUnavailable && !downstreamUnavailable && upstreamUsd <= 0 && downstreamUsd > 0 && !keyLost) {
           // 今天（实时）照读到的数算、不加提醒（上游账单晚到几分钟很常见；满 1 小时才提示「可能换了 Key」，见下面 CHANNEL_KEY_IDLE_TODAY）；
           // 过去的天、别的窗口照旧：这是「用量还没到」的读取类问题，不算毛利
           if (window.preset !== "today") segmentIssues.push(upstreamSide({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: issueText("UPSTREAM_EMPTY_WITH_SALES"), observedAt: Date.now() }));
           // 渠道有收入而 Key 用量为 0：多半是换了 Key，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
-        if (isCompletedBillingWindow(window) && !downstreamUnavailable && downstreamUsd > 0 && (upstreamUnavailable || upstreamUsd === 0)) {
+        if (isCompletedBillingWindow(window) && !downstreamUnavailable && downstreamUsd > 0 && (upstreamUnavailable || upstreamUsd === 0) && !keyLost) {
           segmentIssues.push(upstreamSide({ code: "WAITING_FOR_BILL", scope: "upstream", detail: issueText("WAITING_FOR_BILL"), observedAt: Date.now() }));
         }
         const segmentHealth = healthWithIssues(segmentIssues);
@@ -2959,8 +2996,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 只看今天、用今天已经读到的收入和 Key 用量，不另读：没装读取服务、不是固定成本、今天渠道有收入、绑的 Key 今天上游成本是 0。
       // 上游账单可能晚到几分钟，所以要这个情况连着满 1 小时才提示（从这个进程第一次看到起算，重启重新计时）；Key 有了用量、收入没了、
       // 解绑再绑（规则换了），下一次实时读自己消失
+      // 这把 Key 这天全算在后绑的别的渠道上（一把 Key 一天只算在一个渠道上）：成本是 0 不是没用量，不判 CHANNEL_KEY_NO_USAGE / IDLE_TODAY
+      const keysLost = keyParts.length > 0 && keyParts.every((part) => part.keysLost);
       if (window.preset === "today" && !settle && !probe) {
-        const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own);
+        const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own) && !keysLost;
         const tracker = (rt._keyIdleSince ||= new Map()), seen = tracker.get(rule.id), dayKey = dayKeyInTz(Date.now(), rule.timezone);
         if (!idleNow) tracker.delete(rule.id);
         else {
@@ -3041,7 +3080,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 兜底（手动选 Key 的站点，没装读取服务）：这天有收入，可选的 Key 这一天一点用量都没有——多半是在 New API 里换了 Key、控制台还没改。
       // 这天先不固定，记成要人处理的 CHANNEL_KEY_NO_USAGE（按钮「选 Key」打开那一行的下拉框）；用户改了 Key，被挡住的几天按新 Key 重新算（changeRuleKeyManual）。
       // 只在结账（要固定的整天）时判；今天、固定成本的上游、收入是 0 的天不判
-      if (settle && billDayOf(window) && !probe && costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own)) {
+      if (settle && billDayOf(window) && !probe && costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own) && !keysLost) {
         return unavailable(health("CHANNEL_KEY_NO_USAGE", issueText("CHANNEL_KEY_NO_USAGE"), { channelId: rule.channels?.[0]?.channelId ?? null }), { metadata, token }, false);
       }
       const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
