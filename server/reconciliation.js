@@ -699,6 +699,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const todayLive = day === dayKeyInTz(now, tz) && w.endMs >= now;
       return { key: todayLive ? `today:${dayStart}` : `${start}:${end}`, input: todayLive ? { preset: "today" } : { preset: "custom", startMs: start, endMs: end, noCap: true }, full: todayLive || (start === dayStart && end === dayEnd) };
     };
+    // 按「渠道 × 天」算（用户 10-30 定）：同一个渠道同一天可能挂着几条绑定（同一天换上游：A 收入 0 + 成本，B 收入 + 成本），
+    // 这几条都固定了（或者都是今天现读到的）这一天才算进合计；只有一条有数的整天不算，不然会出现只有成本、没有收入的假亏损
+    const groupOf = (rule) => `${rule.ownStationId}|${(rule.channels || []).map((channel) => Number(channel.channelId)).sort((a, b) => a - b).join(",")}`;
+    const coversDay = ({ rule, tz, labels }, day) => {
+      const from = reconciliationAccountingStart(rule), to = rule.archivedAtMs == null ? null : dayKeyInTz(Number(rule.archivedAtMs), tz);
+      return day >= (Number.isFinite(from) ? dayKeyInTz(from, tz) : labels[0]) && (to == null || day <= to);
+    };
+    const peersOf = (item, day) => per.filter((other) => other.rule.id !== item.rule.id && groupOf(other.rule) === groupOf(item.rule) && coversDay(other, day));
     const plan = new Map();
     for (const item of per) {
       const { rule, labels, tz } = item, today = dayKeyInTz(now, tz), started = reconciliationAccountingStart(rule);
@@ -709,6 +717,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const stickyReason = sticky.get(rule.id)?.get(day), fact = facts.get(rule.id)?.get(day), request = requestFor(item, day);
         if (stickyReason === "KEY_IN_OTHER_UPSTREAM") continue; // 当天只要有一刻 Key 在别的上游，这天就是「—」，有账本行也不算
         if (request.full && day < today && fact) {
+          const missing = peersOf(item, day).filter((other) => !facts.get(other.rule.id)?.has(day));
+          if (missing.length) { if (missing.some((other) => !sticky.get(other.rule.id)?.get(day))) notCounted.push({ ruleId: rule.id, day, reason: "NOT_SETTLED" }); continue; }
           entry.ledger.income += fact.revenueUsd ?? 0;
           entry.ledger.cost += fact.costBasis === "fixed" ? 0 : fact.costUsd ?? 0; // 固定成本的上游那天上游成本记 0（毛利不扣 cost_usd）
           entry.ledger.days += 1;
@@ -740,6 +750,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const found = (answers.get(key) || answers.get(onlyAnswer))?.results.find((row) => row.rule.id === ruleId);
       return found || null;
     };
+    const liveUsable = (ruleId, live) => { const piece = resultAt(live.key, ruleId, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`); return !!piece && countsInSummary(piece); };
+    const dropLive = new Set(); // 今天：同渠道的另一条没读到，这条今天也不算
+    for (const item of per) for (const live of plan.get(item.rule.id).live) {
+      if (peersOf(item, live.day).some((other) => !plan.get(other.rule.id).live.some((entry) => entry.day === live.day && liveUsable(other.rule.id, entry)))) dropLive.add(`${item.rule.id}|${live.day}`);
+    }
     const rows = [];
     for (const item of per) {
       const { rule, w } = item, entry = plan.get(rule.id);
@@ -756,7 +771,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days;
       for (const live of entry.live) {
         const piece = resultAt(live.key, rule.id, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`);
-        if (!piece || !countsInSummary(piece)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
+        if (!piece || !countsInSummary(piece) || dropLive.has(`${rule.id}|${live.day}`)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
         const money = moneyOfResult(piece);
         income += money.income; cost += money.cost; counted += 1;
       }

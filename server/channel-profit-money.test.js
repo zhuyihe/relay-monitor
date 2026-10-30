@@ -832,3 +832,25 @@ test("每日利润页带上已解绑的绑定：解绑那天整天算、数留�
   const todayAfter = await f.rt.reconciliation.profitPage({ preset: "today" });
   assert.equal(todayAfter.rows.length, 0, "只看今天：昨天解绑的不带");
 });
+
+test("每日利润多天按「渠道 × 天」挡：同一个渠道同一天换上游挂着两条绑定，只固定了一条的那天整天不算，不出现只有成本没有收入的假亏损；两条都固定了才算", async (t) => {
+  const SWITCH = SH("2026-10-11T12:00:00");
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: { 1: 9 }, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] } });
+  await f.at("2026-10-10T10:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-11T11:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  f.channelKey[1] = 20; await f.round("2026-10-11T12:00:00");
+  await f.at("2026-10-11T14:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  await settle(f, LATER);
+  const range = { preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-12T00:00:00") };
+  const full = await f.rt.reconciliation.profitPage(range);
+  assert.deepEqual([full.notCountedDays.count, full.rows.length, full.rows[0].counted], [0, 1, true]);
+  const D = 24 * 3600, total = full.rows[0];
+  assert.deepEqual([total.incomeUsd, total.actualCostUsd], [4 * D, 2 * D], "10-10 一整天 + 10-11 两条各整天（Key 9 到 12 点、Key 20 从 12 点起）");
+  // 新建的那条 10-11 的账本行没了（比如还没固定）：10-11 整天不算，10-10 照算
+  const fresh = (await f.rt.reconciliation.listRules()).find((rule) => !rule.archivedAt);
+  f.repository.tables.ledger.splice(0, f.repository.tables.ledger.length, ...f.repository.tables.ledger.filter((row) => !(row.rule_id === fresh.id && row.bill_date === "2026-10-11")));
+  const half = await f.rt.reconciliation.profitPage(range);
+  assert.equal(half.notCountedDays.count, 1);
+  assert.deepEqual([half.rows[0].incomeUsd, half.rows[0].actualCostUsd], [2 * D, D], "只剩 10-10：没有 10-11 那条旧绑定的成本（不出现只有成本没有收入的亏损）");
+});
