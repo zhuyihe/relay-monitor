@@ -202,7 +202,9 @@ test("名字下面的小字：只有一把 Key 写「上游 · Key ×倍率」�
   assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("oai-16", { ratio: 1 })] })), "awsb · oai-16 ×1.0");
   assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("oai-16", { ratio: null })] })), "awsb · oai-16");
   const two = chan("甲", 1, 1, { keys: [KEY("a"), KEY("b", { state: "swapped" })] });
-  assert.equal(hasKeyRows(two), true); assert.equal(rowUpstream(two), "拼车团队", "两把以上只写上游名（行上的上游）");
+  assert.equal(hasKeyRows(two), true); assert.equal(rowUpstream(two), "awsb", "两把以上只写上游名：在用那把 Key 的上游");
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("a", { state: "swapped", upstream: { name: "云帆" } }), KEY("b", { state: "unbound" })] })), "拼车团队", "没有在用的（已解绑）写行上的上游");
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("n", { upstream: { name: "云帆" } }), KEY("o", { state: "swapped" })] })), "云帆", "换过上游：写在用那把的上游");
 });
 
 test("Key 行：名字「oai-16 ×0.5」，换过上游前面加上游名；标签看多天写日子（跨月写全）、看一天只写在用 / 已换掉；已解绑渠道的最后一把不标", () => {

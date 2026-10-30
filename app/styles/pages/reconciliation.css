@@ -78,7 +78,7 @@
 
 /* Key 行：缩进、灰一点 */
 .jy-profit-keyrow > td { padding-top: 6px; padding-bottom: 6px; color: var(--jy-ink-2); font-size: 12px; border-top: 1px dashed var(--jy-rule-soft); cursor: default; vertical-align: top; }
-.jy-profit-keyrow__name { padding-left: 24px !important; }
+.jy-profit-keyrow__name { padding-left: 40px !important; }
 .jy-profit-key-tag { margin-left: 8px; }
 .jy-profit-keys { margin: 8px 0 0 12px; padding: 0; list-style: none; border-left: 2px solid var(--jy-rule-soft); }
 .jy-profit-key { padding: 4px 0 4px 10px; color: var(--jy-ink-2); font-size: 13px; line-height: 20px; }

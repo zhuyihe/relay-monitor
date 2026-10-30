@@ -407,6 +407,10 @@ test("按 Key 算利润（近 7 天）：换过 Key 的渠道标签带日子；�
   assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C", "Rule D"], "绑着的按毛利排、已解绑最后");
   assert.deepEqual((await page.locator(".jy-profit-keyrow td:first-child").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), [
     "oai-16 ×0.5在用 · 6日起", "oai-01 ×0.8已换掉 · 用了 3日–6日", "云帆 · sk-new ×0.5在用 · 7日起", "Fixture upstream · sk-old ×0.5已换掉 · 用了 3日–7日"]);
+  await rowOf(page, "Rule C").locator("small").getByText("云帆", { exact: true }).waitFor(); // 换过上游：小字写在用那把 Key 的上游
+  const left = (locator) => locator.evaluate((node) => node.getBoundingClientRect().left);
+  const indent = (await left(page.locator(".jy-profit-keyrow__name span").first())) - (await left(rowOf(page, "Rule B").locator(".jy-profit-row__line strong")));
+  assert.ok(indent >= 14 && indent <= 18, `Key 行比渠道名缩进约 16px，实际 ${indent}`);
   assert.equal(await page.locator(".jy-profit-row.is-clickable").count(), 0);
   await page.mouse.move(5, 5);
   if (process.env.UI_SHOT_DIR) { await rowOf(page, "Rule D").scrollIntoViewIfNeeded(); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-7d-1440x900.png` }); }

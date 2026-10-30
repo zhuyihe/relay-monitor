@@ -153,7 +153,8 @@ export const isUnbound = (row: ProfitRow) => row.bound === false;
 export const hasKeyRows = (row: ProfitRow) => (row.keys?.length ?? 0) >= 2;
 const ratioPart = (ratio: number | null | undefined) => (finite(ratio) ? ` ×${ratioText(ratio)}` : "");
 export function rowUpstream(row: ProfitRow): string {
-  if (hasKeyRows(row)) return row.upstream?.name ?? UPSTREAM_GONE;
+  // 两把以上：只写上游名——在用那把 Key 的上游（换过上游也对）；没有在用的（已解绑）写行上的上游
+  if (hasKeyRows(row)) return row.keys!.find((key) => key.state === "active")?.upstream?.name ?? row.upstream?.name ?? UPSTREAM_GONE;
   const key = row.keys?.[0];
   const upstream = key?.upstream?.name ?? row.upstream?.name ?? UPSTREAM_GONE;
   return `${upstream} · ${key?.name ?? row.key?.name ?? EMPTY}${ratioPart(key ? key.ratio : row.key?.groupRatio)}`;
