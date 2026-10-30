@@ -1099,6 +1099,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return rows;
   }
 
+  // [first, last] 里哪些天 tokenId 这把 Key 在同一个上游里别的绑定的每天 Key 里（没记每天 Key 的天按那条绑定现在的 Key 算）：返回 (day) => boolean。
+  // 往前找新 Key 第一次有用量的那天、被挡住的天改给新 Key，都用它：这一天这把 Key 是别的渠道的，就不回补成这条绑定的。读不到抛错，不悄悄算两遍
+  async function keyHeldByOthers(rule, tokenId, first, last) {
+    const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && (() => { const range = bindingDayRange(other); return range.from <= last && range.to >= first; })());
+    let theirs = {};
+    if (peers.length) { try { theirs = await repository.listDayKeys(peers.map((other) => other.id), first, last); } catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); } }
+    return (day) => peers.some((other) => { const range = bindingDayRange(other); return day >= range.from && day <= range.to && (theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => Number(key.tokenId) === Number(tokenId)); });
+  }
+
   // 换 Key 时找新 Key 哪天开始用的（D）：从今天往前一天一天查新 Key 在上游的用量，碰到第一个没用量的天就停，最多查 31 天，也不早于这条绑定的开始日；
   // 查到的最早有用量的那天是 D，一天都没有就是今天。今天本身没用量不算断（可能刚过零点、或上游账单还没到），从昨天接着查。只读上游，一天一个请求
   const SWAP_LOOKBACK_DAYS = 31;
@@ -1112,10 +1121,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     };
     // 一把 Key 一天只算在一个渠道上：往前查碰到「这把 Key 那天在同一个上游里别的绑定的每天 Key 里」就停，那一天和更早的都不算进来
     // （查到的用量是那个渠道的，不能回补成这条绑定的；没记每天 Key 的天按那条绑定现在的 Key 算）
-    const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && (() => { const range = bindingDayRange(other); return range.from <= today && range.to >= startDay; })());
-    let theirs = {};
-    if (peers.length) { try { theirs = await repository.listDayKeys(peers.map((other) => other.id), startDay, today); } catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); } }
-    const heldByOther = (day) => peers.some((other) => { const range = bindingDayRange(other); return day >= range.from && day <= range.to && (theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => Number(key.tokenId) === Number(token?.id)); });
+    const heldByOther = await keyHeldByOthers(rule, token?.id, startDay, today);
     if (heldByOther(today)) return { fromDay: today, noRecentUsage: false };
     const usedToday = await readDay(today);
     let first = usedToday ? today : null, checked = 1;
@@ -1171,7 +1177,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
     }
     // 被挡住的几天：Key 集合换成新的一把（D 以后的已经换好），状态行标成「原因没了」，下一轮轮询按新 Key 结账固定
-    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
+    // 那天这把 Key 在同一个上游别的绑定的每天 Key 里（比如 Key 刚从别的渠道挪过来、那边照常固定着）：这一天不改给新 Key，继续挡着（还是需处理），不悄悄算两遍
+    const blockedAll = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
+    const heldBlocked = blockedAll.length ? await keyHeldByOthers(rule, token.id, blockedAll.map((state) => state.billDate).sort()[0], today) : () => false;
+    const blocked = blockedAll.filter((state) => !heldBlocked(state.billDate));
     const before = blocked.filter((state) => state.billDate < fromDay);
     const recheckStates = blocked.map((state) => {
       const window = { preset: "custom", startMs: dayStartInTz(state.billDate, rule.timezone), endMs: dayStartInTz(shiftDayLabel(state.billDate, 1), rule.timezone), timezone: rule.timezone };
