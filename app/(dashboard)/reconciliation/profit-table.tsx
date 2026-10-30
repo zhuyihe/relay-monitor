@@ -78,10 +78,10 @@ function Cells({ row, ctx }: { row: ProfitRow; ctx: Ctx }) {
 
 // Key 行（用过两把以上 Key 的渠道下面一直挂着，不能收起、不能点）：缩进、灰一点，列和渠道行一样；标签看一天只写「在用」「已换掉」，看多天带日子
 type KeyView = { singleDay: boolean; first: string; tz: string; now: number };
-const keyView = (page: ProfitPageResponse, ctx: Ctx): KeyView => ({ singleDay: isSingleDay(page), first: rangeDays(page).first, tz: ctx.tz, now: ctx.now });
+const keyView = (page: ProfitPageResponse, ctx: Ctx): KeyView => ({ singleDay: isSingleDay(page), first: rangeDays(page).first, tz: ctx.tz, now: ctx.now ?? Date.now() });
 function KeyTag({ keyRow, view }: { keyRow: ProfitKeyRow; view: KeyView }) {
   const tag = keyTag(keyRow, view.singleDay, view.first, view.tz, view.now);
-  return tag ? <em className={`jy-tag jy-tag--type jy-profit-key-tag${keyRow.state === "active" ? " is-active" : ""}`}>{tag}</em> : null;
+  return tag ? <em className={`jy-tag jy-profit-key-tag ${keyRow.state === "active" ? "jy-tag--info" : "jy-tag--type"}`}>{tag}</em> : null;
 }
 function KeyRowDesktop({ row, keyRow, ctx, view, detailDay }: { row: ProfitRow; keyRow: ProfitKeyRow; ctx: Ctx; view: KeyView; detailDay: string | null }) {
   const cells = keyCells(keyRow, row, ctx), loss = cells.gross != null && cells.gross < 0;
@@ -148,9 +148,9 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
               <strong>{name}</strong>
               {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
               <RowBang row={row} popKey={`m:${row.rowKey}`} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
-              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</b>
+              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</b>{detailDay ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
             </div>
-            <div className="jy-profit-card__sub"><span>{rowUpstream(row)}</span><span>{COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
+            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
             {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
               const cells = keyCells(key, row, ctx);
               return <li key={String(key.tokenId)} className="jy-profit-key">
@@ -158,7 +158,6 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
                 <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(fmtMoney(cells.income, ctx.currency), fmtMoney(cells.actual, ctx.currency))}</div>
               </li>;
             })}</ul> : null}
-            {detailDay ? <Button type="link" size="small" className="jy-profit-card__detail" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}</Button> : null}
           </li>;
         })}
       </ul>

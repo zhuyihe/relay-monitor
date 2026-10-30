@@ -149,11 +149,11 @@ export function gapReasonText(reason: string | null | undefined, missingModels: 
 // ---- 一行 ----
 export const rowName = (row: ProfitRow) => row.channels.map((channel) => channel.name || `渠道 ${channel.channelId}`).join("、") || EMPTY;
 export const isUnbound = (row: ProfitRow) => row.bound === false;
-// 这段时间用过两把以上 Key：下面一直挂着 Key 行；只有一把（或接口没给 keys）：名字下面小字写「上游 · Key ×倍率」
+// 这段时间用过两把以上 Key：下面一直挂着 Key 行；只有一把（或接口没给 keys）：名字下面小字写「上游 · Key ×倍率」；两把以上只写上游名
 export const hasKeyRows = (row: ProfitRow) => (row.keys?.length ?? 0) >= 2;
 const ratioPart = (ratio: number | null | undefined) => (finite(ratio) ? ` ×${ratioText(ratio)}` : "");
 export function rowUpstream(row: ProfitRow): string {
-  if (hasKeyRows(row)) return "";
+  if (hasKeyRows(row)) return row.upstream?.name ?? UPSTREAM_GONE;
   const key = row.keys?.[0];
   const upstream = key?.upstream?.name ?? row.upstream?.name ?? UPSTREAM_GONE;
   return `${upstream} · ${key?.name ?? row.key?.name ?? EMPTY}${ratioPart(key ? key.ratio : row.key?.groupRatio)}`;

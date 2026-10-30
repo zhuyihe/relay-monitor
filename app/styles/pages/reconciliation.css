@@ -49,7 +49,7 @@
 .jy-profit-row.is-clickable:hover > td { background: linear-gradient(var(--jy-cobalt-tint), var(--jy-cobalt-tint)), var(--jy-sheet); }
 .jy-profit-row__name { min-width: 240px; }
 .jy-profit-row__line { display: inline-flex; align-items: center; gap: 0; max-width: 100%; }
-.jy-profit-row__name small { display: block; margin-left: 20px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
+.jy-profit-row__name small { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
 .jy-profit-bang { display: inline-flex; }
 .jy-profit-neg { color: var(--jy-crit); }
 .jy-profit-totals > td { background: var(--jy-sunken); font-weight: 600; border-top: 1px solid var(--jy-rule); }
@@ -61,8 +61,13 @@
 .jy-profit-card:first-child { border-top: 0; }
 .jy-profit-card__head { display: flex; align-items: center; min-width: 0; }
 .jy-profit-card__gross { margin-left: auto; padding-left: 12px; font-size: 15px; line-height: 24px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.jy-profit-card__sub { display: flex; justify-content: space-between; gap: 12px; margin-top: 2px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
-.jy-profit-card__sub span:last-child { text-align: right; }
+.jy-profit-card__sub { display: flex; justify-content: space-between; gap: 12px; margin-top: 2px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-profit-card__sub span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-profit-card__sub span:last-child { text-align: right; white-space: nowrap; flex: none; }
+.jy-profit-card.is-clickable { cursor: pointer; }
+.jy-profit-card__chev { margin-left: 6px; color: var(--jy-ink-3); font-size: 18px; line-height: 24px; }
+.jy-profit-detail-cell { vertical-align: top; }
+.jy-profit-detail-cell .ant-btn { padding: 0; height: auto; line-height: inherit; font-size: inherit; font-weight: 400; vertical-align: top; }
 
 /* 分组标题行（只在「今天」）、已解绑标记、手机卡片的计算明细 */
 .jy-profit-group__title > td { padding: 6px 24px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
@@ -70,13 +75,11 @@
 .jy-profit-unbound-tag { margin-left: 8px; }
 .jy-profit-group__title--card { padding: 6px 14px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule-soft); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); }
 .jy-profit-unbound-tag, .jy-profit-key-tag { font-style: normal; }
-.jy-profit-card__detail { padding: 0; height: auto; min-height: 32px; font-size: 12px; }
 
 /* Key 行：缩进、灰一点 */
-.jy-profit-keyrow > td { padding-top: 6px; padding-bottom: 6px; background: var(--jy-sunken); color: var(--jy-ink-2); font-size: 13px; border-top: 1px solid var(--jy-rule-soft); cursor: default; }
-.jy-profit-keyrow__name { padding-left: 44px !important; }
+.jy-profit-keyrow > td { padding-top: 6px; padding-bottom: 6px; color: var(--jy-ink-2); font-size: 12px; border-top: 1px dashed var(--jy-rule-soft); cursor: default; vertical-align: top; }
+.jy-profit-keyrow__name { padding-left: 24px !important; }
 .jy-profit-key-tag { margin-left: 8px; }
-.jy-profit-key-tag.is-active { color: var(--jy-ink); }
 .jy-profit-keys { margin: 8px 0 0 12px; padding: 0; list-style: none; border-left: 2px solid var(--jy-rule-soft); }
 .jy-profit-key { padding: 4px 0 4px 10px; color: var(--jy-ink-2); font-size: 13px; line-height: 20px; }
 .jy-profit-key__head { display: flex; justify-content: space-between; gap: 12px; }
