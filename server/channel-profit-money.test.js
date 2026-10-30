@@ -16,7 +16,7 @@ const SH = (iso) => Date.parse(`${iso}+08:00`);
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 const DAY = 86400;
 
-async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1: 9, 2: 9, 3: 9, 4: 10, 5: 11, 6: 12 }, windows = {}, elsewhere = {}, rates = {}, noAgent = false, standardRatio = null }) {
+async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1: 9, 2: 9, 3: 9, 4: 10, 5: 11, 6: 12 }, windows = {}, elsewhere = {}, rates = {}, noAgent = false, standardRatio = null, tokenGroups = {}, groupRatios = { g1: 1 }, secondKeys = null }) {
   const state = { now: SH("2026-10-10T09:00:00") };
   t.mock.method(Date, "now", () => state.now);
   // windows[keyId] = [fromMs, toMs)：这把 Key 有用量的时段（每秒 1 美元）；没给就是一直在用
@@ -30,12 +30,13 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
     const url = new URL(String(input));
     requests.push(`${url.host}${url.pathname}`);
-    if (url.host === "up.test") {
+    if (url.host === "up.test" || (secondKeys && url.host === "up2.test")) {
+      const ids = url.host === "up.test" ? keys : secondKeys;
       if (fake) { const hit = fake.handle(url); if (hit) return hit; return reply({ code: 404 }, 404); }
       if (url.pathname === "/api/user/self") return reply({ success: true, data: { id: 42, quota: 100, used_quota: 1 } });
       if (url.pathname === "/api/status") return reply({ success: true, data: { quota_per_unit: 100 } });
-      if (url.pathname === "/api/user/self/groups") return reply({ success: true, data: { g1: { ratio: 1 } } });
-      if (url.pathname === "/api/token/") return reply({ success: true, data: { total: keys.length, items: keys.map((id) => ({ id, user_id: 42, name: `Key ${id}`, status: 1, group: "g1", cross_group_retry: false })) } });
+      if (url.pathname === "/api/user/self/groups") return reply({ success: true, data: Object.fromEntries(Object.entries(groupRatios).map(([group, ratio]) => [group, { ratio }])) });
+      if (url.pathname === "/api/token/") return reply({ success: true, data: { total: ids.length, items: ids.map((id) => ({ id, user_id: 42, name: `Key ${id}`, status: 1, group: tokenGroups[id] ?? "g1", cross_group_retry: false })) } });
       if (url.pathname === "/api/log/self/stat") {
         // 每把 Key 每秒 1 美元（quota_per_unit 100），一直在用；未来的秒不算
         const start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
@@ -66,6 +67,7 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
   const own = await store.add({ type: "newapi", baseUrl: "https://own.test", accessToken: "admin", isOwn: true, ...(noAgent ? {} : { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: KEY_AGENT_SECRET }) });
   const supplier = await store.add(upstreamType === "sub2api" ? { name: "Up", type: "sub2api", baseUrl: "https://up.test", accessToken: "jwt", accountUse: "only_mine" }
     : { name: "Up", type: "newapi", baseUrl: "https://up.test", accessToken: "pat", accountUse: "only_mine" });
+  const supplier2 = secondKeys ? await store.add({ name: "Up2", type: "newapi", baseUrl: "https://up2.test", accessToken: "pat2", accountUse: "only_mine" }) : null;
   const persisted = { catalogue: null, links: [] };
   const linkRepo = { getCatalogue: async () => persisted.catalogue, listLinks: async () => structuredClone(persisted.links),
     saveCatalogue: async (value) => { persisted.catalogue = structuredClone(value); },
@@ -83,7 +85,7 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
   const at = async (iso) => { state.now = SH(iso); inject(); await rt.channelOnboarding.sync(); };
   const round = async (iso) => { await at(iso); await rt.reconciliation.refreshDue(state.now); };
   const costOn = (day) => repository.tables.ledger.filter((row) => row.bill_date === day);
-  return { state, rt, store, own, supplier, repository, profit, at, round, costOn, requests, channelKey, used, elsewhere };
+  return { state, rt, store, own, supplier, supplier2, repository, profit, at, round, costOn, requests, channelKey, used, elsewhere };
 }
 
 for (const upstreamType of ["newapi", "sub2api"]) {
@@ -1021,4 +1023,59 @@ test("渠道 × 天按天挡：反过来旧绑定那天没固定、新绑定已�
   const noNew = await f.rt.reconciliation.profitPage(two);
   assert.deepEqual([noNew.rows[0].incomeUsd, noNew.rows[0].actualCostUsd], [2 * D, D]);
   assert.equal((await f.rt.reconciliation.profitPage(day11)).rows[0].counted, false);
+});
+
+// 两把 Key 分组不同、倍率不同（New API）：Key 9 在 g1（倍率 1，每秒 1 美元），Key 20 在 g2（倍率 2，每秒 3 美元）；10-12 15 点换 Key。
+// 收入按原价用量分：原价 = 成本 ÷ 倍率，不是按成本分
+test("每把 Key 分开记账（New API，两把 Key 分组不同、倍率不同）：倍率各自记、原价用量 = 成本 ÷ 倍率，收入按原价用量比例分，几项相加等于渠道合计", async (t) => {
+  const SWITCH = SH("2026-10-12T15:00:00");
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 }, tokenGroups: { 20: "g2" }, groupRatios: { g1: 1, g2: 2 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00"]) await f.round(iso);
+  await f.at("2026-10-13T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+  for (const iso of ["2026-10-13T11:00:00", "2026-10-13T12:00:00", "2026-10-13T23:00:00", "2026-10-14T01:00:00"]) await f.round(iso);
+  const H = 3600, rule = (await f.rt.reconciliation.listRules())[0];
+  const day12 = f.repository.tables.ledgerKeys.filter((row) => row.bill_date === "2026-10-12" && row.rule_id === rule.id).sort((a, b) => a.token_id - b.token_id);
+  assert.deepEqual(day12.map((row) => [Number(row.token_id), Number(row.cost_usd), Number(row.ratio), Number(row.raw_usd)]), [[9, 15 * H, 1, 15 * H], [20, 27 * H, 2, 13.5 * H]], "Key 20 的倍率 2：原价用量 = 27H ÷ 2");
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-12T00:00:00"), endMs: SH("2026-10-13T00:00:00") });
+  const [row] = page.rows, k9 = row.keys.find((key) => key.tokenId === 9), k20 = row.keys.find((key) => key.tokenId === 20);
+  const income = 2 * 24 * H;
+  assert.ok(Math.abs(k9.incomeUsd - income * 15 / 28.5) < 1e-6 && Math.abs(k20.incomeUsd - income * 13.5 / 28.5) < 1e-6, "按原价用量 15 : 13.5 分，不是按成本 15 : 27");
+  assert.deepEqual([k9.ratio, k20.ratio, k9.incomeBasis, k20.incomeBasis], [1, 2, "raw", "raw"]);
+  assert.ok(Math.abs(k9.incomeUsd + k20.incomeUsd - row.incomeUsd) < 1e-6);
+  assert.equal(k9.costUsd + k20.costUsd, row.actualCostUsd);
+  const detail = await f.rt.reconciliation.profitDetail({ ruleIds: row.ruleIds, day: "2026-10-12" });
+  assert.deepEqual([detail.keyChangeRatioDiffers, detail.split.basis], [true, "raw"]);
+});
+
+// 同一天真的换了上游：渠道 1 上午是上游 1 的 Key 9（到 10 点），解绑后 11 点绑到上游 2 的 Key 50，是两条不同的绑定
+test("同一天换上游（两条绑定）：这天收入记在后绑的那条上，成本各算各的 Key 整天，每日利润按 Key 分收入，计算明细标出换了上游", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], secondKeys: [50], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SH("2026-10-11T10:00:00")], 50: [SH("2026-10-11T11:00:00"), Infinity] }, rates: { 9: 1, 50: 2 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T23:00:00"); await f.round("2026-10-11T01:00:00");
+  await f.at("2026-10-11T10:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-11T11:00:00");
+  const moved = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier2.id, tokenId: 50 });
+  assert.equal(moved.reopened, undefined, "换了上游：新建一条，不重新打开");
+  for (const iso of ["2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
+  const H = 3600, D = 24 * H, rules = await f.rt.reconciliation.listRules({ includeArchived: true });
+  const oldRule = rules.find((rule) => rule.archivedAt), newRule = rules.find((rule) => !rule.archivedAt);
+  const rowOf = (rule) => f.costOn("2026-10-11").find((row) => row.rule_id === rule.id);
+  assert.deepEqual([Number(rowOf(oldRule).revenue_usd), Number(rowOf(oldRule).cost_usd)], [0, 10 * H], "先绑的：收入 0，Key 9 到 10 点的整天成本");
+  assert.deepEqual([Number(rowOf(newRule).revenue_usd), Number(rowOf(newRule).cost_usd)], [2 * D, 13 * H * 2], "后绑的：收入整天，Key 50 从 11 点起（每秒 2）");
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-11T00:00:00"), endMs: SH("2026-10-12T00:00:00") });
+  assert.equal(page.rows.length, 1, "一个渠道一行");
+  const [row] = page.rows;
+  assert.deepEqual([row.incomeUsd, row.actualCostUsd], [2 * D, 10 * H + 26 * H]);
+  const k9 = row.keys.find((key) => key.tokenId === 9), k50 = row.keys.find((key) => key.tokenId === 50);
+  assert.deepEqual([k9.upstream.name, k50.upstream.name, k9.state, k50.state], ["Up", "Up2", "swapped", "active"]);
+  // 原价用量 = 成本（倍率 1）：收入按 10H : 26H 分，两边的上游不同也分
+  assert.ok(Math.abs(k9.incomeUsd - 2 * D * 10 / 36) < 1e-6 && Math.abs(k50.incomeUsd - 2 * D * 26 / 36) < 1e-6);
+  const detail = await f.rt.reconciliation.profitDetail({ ruleIds: row.ruleIds, day: "2026-10-11" });
+  assert.deepEqual([detail.swappedUpstream, detail.split.basis, detail.keys.length], [true, "raw", 2]);
+  assert.ok(Math.abs(detail.keys.reduce((sum, key) => sum + key.incomeUsd, 0) - detail.income.usd) < 1e-6);
 });
