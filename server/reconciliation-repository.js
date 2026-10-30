@@ -2,9 +2,9 @@
 import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord,
-  ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
+  ledgerInsertValues, ledgerWriteDecision, LEDGER_KEY_COLUMNS, ledgerKeyValues, ledgerKeyFromRow } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql } from "../db/segment-keys.js";
-import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
@@ -75,6 +75,7 @@ export function ruleFromRow(row, channels = []) {
     scopeVersion: Number(row.scope_version || 1),
     billingEffectiveFrom: row.billing_effective_from_ms == null ? null : Number(row.billing_effective_from_ms),
     accountingFloorMs: row.accounting_floor_ms == null ? null : Number(row.accounting_floor_ms),
+    boundAtMs: row.bound_at_ms == null ? null : Number(row.bound_at_ms),
     costCoverage: row.cost_coverage || "unknown",
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
@@ -135,7 +136,7 @@ export function dayKeysFromRows(rows) {
   const out = {};
   for (const row of rows) {
     const days = (out[row.rule_id] ||= {});
-    (days[row.bill_date] ||= []).push({ upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), tokenName: row.token_name ?? null });
+    (days[row.bill_date] ||= []).push({ upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), tokenName: row.token_name ?? null, ...(Number(row.yielded) === 1 ? { yielded: true } : {}) });
   }
   return out;
 }
@@ -290,11 +291,11 @@ export class ReconciliationRepository {
   }
 
   // 最近解除的绑定（解除时刻 ≥ sinceMs）：只有锚定过的（有 canonicalKey，解除前这把 Key 只有它在用）才回看解除前的日子（计划 C3 4.1）
-  async listRecentlyArchivedRules(sinceMs) {
+  async listRecentlyArchivedRules(sinceMs, { anchoredOnly = true } = {}) {
     const [rows] = await this.pool.query(
       // enabled = 0 AND archived_at >= …：走 idx_reconciliation_enabled(enabled, archived_at)，不扫全表（已解除的行只增不减）；archived_at 是 DATETIME，
       // 多放宽一天免得时区偏差漏掉，精确的比较用毫秒那一列
-      "SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? AND canonical_key IS NOT NULL ORDER BY archived_at_ms DESC",
+      `SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? ${anchoredOnly ? "AND canonical_key IS NOT NULL" : ""} ORDER BY archived_at_ms DESC`,
       [Math.floor(sinceMs / 1000) - 86400, sinceMs]);
     if (!rows.length) return [];
     const [channelRows] = await this.pool.query(
@@ -369,29 +370,17 @@ export class ReconciliationRepository {
       await conn.beginTransaction();
       if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
       if (guard) guard(null, [], input);
-      // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3）
-      let accountingFloor = null;
-      if (isScopedBillingPolicy(input.billingPolicy) && Number.isFinite(input.billingEffectiveFrom)) {
-        const dayAgo = input.billingEffectiveFrom - 36 * 3600000;
-        const [oldRows] = await conn.query(
-          "SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? AND own_station_id = ?",
-          [Math.floor(dayAgo / 1000), dayAgo, input.ownStationId]);
-        let archivedPeers = [];
-        if (oldRows.some((row) => row.archived_at_ms != null)) {
-          const [oldChannels] = await conn.query("SELECT rule_id, channel_id, channel_name FROM reconciliation_rule_channels WHERE rule_id IN (?)", [oldRows.filter((row) => row.archived_at_ms != null).map((row) => row.id)]);
-          archivedPeers = oldRows.filter((row) => row.archived_at_ms != null).map((row) => ruleFromRow(row, oldChannels.filter((channel) => channel.rule_id === row.id)));
-        }
-        accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers);
-      }
+      // 不再按「解绑那一刻」切开：一个渠道一天的收入记在当天最后绑上的那条绑定上、各按整天算（reconciliation 的 revenueOwnerOf）；accounting_floor_ms 列留着，新建的写空
+      const accountingFloor = null;
       await conn.query(
         `INSERT INTO reconciliation_rules
           (id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled, active_token_key,
-           billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding, accounting_floor_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding, accounting_floor_ms, bound_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
           input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey,
           input.billingPolicy || "legacy-v3", input.scopeVersion || 1, input.billingEffectiveFrom ?? null,
-          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(serializeRuleSourceBinding(input)), accountingFloor]
+          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(serializeRuleSourceBinding(input)), accountingFloor, Date.now()]
       );
       if (input.channels.length) {
         await conn.query(
@@ -766,11 +755,15 @@ export class ReconciliationRepository {
   // plan：{ before: { upstreamStationId, tokenId }, after: { upstreamStationId, tokenId, tokenName }, canonicalKey, group?, ratio?, windowStart, windowEnd }
   // 落库那一刻规则现在的 Key 不是 plan.before（别处先换过了）、a 早于开着那段的起点、窗口倒挂：什么也不写，返回 { stale: true }；
   // 新 Key 已经在别的绑定里（唯一约束）：整体回滚，返回 { conflict: true }
-  async changeRuleKey(ruleId, plan, { detectedAt = Date.now() } = {}) {
+  // extra（换 Key 的这一批写操作和换 Key 同一个事务，半路失败整体回滚）：
+  //   fillDayKeys 补记没有记录的天（已有的忽略）、replaceDayKeys { dates, rows } 这几天的 Key 换成 rows、resettleDates 写重结请求、
+  //   recheckStates [{ billDate, state }] 把被挡住的日子的状态行标成「原因没了」；now 是这一批写的时刻
+  // reopen：这条绑定是最近解绑的，换 Key 的同一个事务里把它重新打开（取消归档、占上新 Key 和渠道的唯一键、清 optout）——不去占旧 Key，旧 Key 已经给了别处也没关系
+  async changeRuleKey(ruleId, plan, { detectedAt = Date.now(), extra = null, reopen = false } = {}) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+      const [ruleRows] = await conn.query(`SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS ${reopen ? "NOT NULL" : "NULL"} FOR UPDATE`, [ruleId]);
       if (!ruleRows[0]) throw repositoryError("RULE_NOT_FOUND");
       const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [ruleId]);
       if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
@@ -795,8 +788,15 @@ export class ReconciliationRepository {
       const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [plan.after.tokenId, plan.after.tokenName ?? rule.token_name, ruleActiveKey];
       if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
       if (plan.group !== undefined) { sets.push("fixed_group = ?"); params.push(plan.group); }
+      if (reopen) sets.push("enabled = 1", "archived_at = NULL", "archived_at_ms = NULL");
       await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
+      if (reopen) {
+        const [channels] = await conn.query("SELECT channel_id FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [ruleId]);
+        for (const channel of channels) await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = ? WHERE rule_id = ? AND channel_id = ?", [activeChannelKey({ enabled: true, ownStationId: rule.own_station_id }, channel.channel_id), ruleId, channel.channel_id]);
+        if (channels.length) await conn.query("DELETE FROM reconciliation_channel_optout WHERE own_station_id = ? AND channel_id IN (?)", [rule.own_station_id, channels.map((channel) => channel.channel_id)]);
+      }
       await refreshSegmentKeys(conn, ruleId);
+      if (extra) await this.#applyKeyChangeExtra(conn, ruleId, extra);
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -804,6 +804,24 @@ export class ReconciliationRepository {
       throw err;
     } finally { conn.release(); }
     return { conflict: false, stale: false };
+  }
+
+  async #applyKeyChangeExtra(conn, ruleId, extra) {
+    const now = extra.now ?? Date.now();
+    const rowsOf = (rows) => (rows || []).filter((row) => row?.billDate && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
+    const insertRows = async (rows, ignore) => {
+      const list = rowsOf(rows);
+      if (list.length) await conn.query(`INSERT ${ignore ? "IGNORE " : ""}INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name, yielded) VALUES ?`,
+        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null, row.yielded ? 1 : 0])]);
+    };
+    await insertRows(extra.fillDayKeys, true);
+    const dates = [...new Set((extra.replaceDayKeys?.dates || []).filter(Boolean))];
+    if (dates.length) {
+      await conn.query("DELETE FROM reconciliation_rule_day_keys WHERE rule_id = ? AND bill_date IN (?)", [ruleId, dates]);
+      await insertRows((extra.replaceDayKeys.rows || []).filter((row) => dates.includes(row?.billDate)), false);
+    }
+    if (extra.resettleDates?.length) await this.requestResettle(ruleId, extra.resettleDates, { now }, conn);
+    for (const item of extra.recheckStates || []) await this.recordSettlementState(ruleId, item.billDate, item.state, now, { conn });
   }
 
   // 每个渠道（绑定）每天用过哪几把 Key（reconciliation_rule_day_keys）：平时一把，换 Key 那天两把。上游成本 = 这几把 Key 当天整天的用量之和。
@@ -825,8 +843,8 @@ export class ReconciliationRepository {
       await conn.beginTransaction();
       await conn.query("DELETE FROM reconciliation_rule_day_keys WHERE rule_id = ? AND bill_date IN (?)", [ruleId, dates]);
       const list = (rows || []).filter((row) => dates.includes(row?.billDate) && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
-      if (list.length) await conn.query("INSERT INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name) VALUES ?",
-        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null])]);
+      if (list.length) await conn.query("INSERT INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name, yielded) VALUES ?",
+        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null, row.yielded ? 1 : 0])]);
       await conn.commit();
       return list.length;
     } catch (error) {
@@ -840,7 +858,7 @@ export class ReconciliationRepository {
     const ids = [...new Set((ruleIds || []).map(String))];
     if (!ids.length) return {};
     const [rows] = await this.pool.query(
-      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, upstream_station_id, token_id, token_name FROM reconciliation_rule_day_keys
+      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, upstream_station_id, token_id, token_name, yielded FROM reconciliation_rule_day_keys
         WHERE rule_id IN (?) AND bill_date BETWEEN ? AND ? ORDER BY rule_id, bill_date, token_id`, [ids, fromDate, toDate]);
     return dayKeysFromRows(rows);
   }
@@ -896,6 +914,34 @@ export class ReconciliationRepository {
       conn.release();
     }
     return result.affectedRows > 0;
+  }
+
+  // 重新打开最近解绑的绑定（撤销解绑）：同一个事务里取消归档、重新占上 Key 和渠道的唯一键、清掉「用户停的」记号。
+  // Key 或渠道已经被别的在算的绑定占了（唯一键冲突）：整体回滚，返回 { conflict: true }；这条没归档（或不存在）：RULE_NOT_FOUND
+  async reopenRule(id) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NOT NULL FOR UPDATE", [id]);
+      if (!rows.length) throw repositoryError("RULE_NOT_FOUND");
+      const rule = rows[0];
+      const [channels] = await conn.query("SELECT channel_id FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
+      const input = { enabled: true, canonicalKey: rule.canonical_key, upstreamStationId: rule.upstream_station_id, tokenId: rule.token_id, ownStationId: rule.own_station_id };
+      await conn.query("UPDATE reconciliation_rules SET enabled = 1, active_token_key = ?, archived_at = NULL, archived_at_ms = NULL WHERE id = ?", [activeTokenKey(input), id]);
+      for (const channel of channels) {
+        await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = ? WHERE rule_id = ? AND channel_id = ?", [activeChannelKey(input, channel.channel_id), id, channel.channel_id]);
+      }
+      await refreshSegmentKeys(conn, id);
+      if (channels.length) await conn.query("DELETE FROM reconciliation_channel_optout WHERE own_station_id = ? AND channel_id IN (?)", [rule.own_station_id, channels.map((channel) => channel.channel_id)]);
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      if (err?.code === "ER_DUP_ENTRY" || Number(err?.errno) === 1062) return { conflict: true };
+      throw err;
+    } finally {
+      conn.release();
+    }
+    return { conflict: false, rule: await this.getRule(id) };
   }
 
   async saveSnapshot(snapshot, executor = this.pool) {
@@ -994,6 +1040,8 @@ export class ReconciliationRepository {
         if (booked.write) {
           await conn.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
             ledgerInsertValues({ ...ledger.entry, ruleId, revision: booked.revision, source: booked.source }));
+          const keyRows = ledgerKeyValues(ledger.entry, { ruleId, revision: booked.revision });
+          if (keyRows.length) await conn.query(`INSERT INTO reconciliation_ledger_keys (${LEDGER_KEY_COLUMNS.join(", ")}) VALUES ?`, [keyRows]);
         }
       }
       if (settlement?.billDate) {
@@ -1101,24 +1149,37 @@ export class ReconciliationRepository {
     return rows.map(ledgerDayFactFromRow);
   }
 
+  // 每把 Key 分开记账：这些绑定在 [fromDate, toDate] 里每天最新一版账本的每把 Key 一行（只认最新版，旧版的行不读）；
+  // 账本行没有 Key 行（这个功能以前固定的日子）的天不出现。一条语句，按 (rule_id, bill_date, revision) 主键走
+  async listLedgerKeys(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT k.rule_id, DATE_FORMAT(k.bill_date, '%Y-%m-%d') AS bill_date, k.token_id, k.cost_usd, k.ratio, k.raw_usd FROM reconciliation_ledger_keys k
+       WHERE k.rule_id IN (?) AND k.bill_date >= ? AND k.bill_date <= ?
+         AND k.revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = k.rule_id AND m.bill_date = k.bill_date)
+       ORDER BY k.bill_date, k.rule_id, k.token_id`,
+      [ruleIds, fromDate, toDate]);
+    return rows.map(ledgerKeyFromRow);
+  }
+
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
   // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读；调用方读状态行时带着重结请求的日子除外
   // （requestedAt 不为空：账本里本来就有这天，重结没成要照样记下退避，不然每轮都再试一次——请求在不在由调用方手里的状态行说了算，
   // 不在这张表上再查一次：同表子查询会让并发写同一天死锁，审核 C2b 低-1）。
   // 取数期间又来了新的重结请求（行里的请求时刻和 requestedAt 不一样）：这次的失败状态不盖，新请求刚清零的记录留着（审核 C2b 低-5）。
-  async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null } = {}) {
+  async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null, conn = this.pool } = {}) {
     const values = settlementStateValues(state);
     // 调用方读到这一行带着重结请求：只更新这一行（请求时刻还一样才盖）。行已经没了（手动那次同时结成、删掉了）就什么也不做，
     // 不补插一行没有请求的孤儿行
     if (requestedAt != null) {
       const columns = [...SETTLEMENT_STATE_WRITE_COLUMNS, "updated_at_ms"];
-      await this.pool.query(
+      await conn.query(
         `UPDATE reconciliation_settlement_state SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms = ?`,
         [...values, now, ruleId, billDate, requestedAt]);
       return;
     }
     const keep = (column) => `${column} = IF(resettle_requested_at_ms <=> ?, VALUES(${column}), ${column})`;
-    await this.pool.query(
+    await conn.query(
       `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, ${SETTLEMENT_STATE_WRITE_COLUMNS.join(", ")}, updated_at_ms)
        SELECT ?, ?, ${SETTLEMENT_STATE_WRITE_COLUMNS.map(() => "?").join(", ")}, ? FROM DUAL
        WHERE NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
@@ -1141,6 +1202,16 @@ export class ReconciliationRepository {
          next_attempt_at_ms = NULL, first_failed_at_ms = NULL, last_detail = VALUES(last_detail), updated_at_ms = VALUES(updated_at_ms)`,
       billDates.flatMap((date) => [ruleId, date, now, reason, manualReason, manualReason == null ? null : now, detail, now]));
     return billDates.length;
+  }
+
+  // 一次性迁移的完成标记（meta 表，和 db/pool.js 的搬旧账同一个办法）
+  async getMigrationMark(key) {
+    const [rows] = await this.pool.query("SELECT v FROM meta WHERE k = ?", [key]);
+    return rows.length ? rows[0].v : null;
+  }
+
+  async setMigrationMark(key, value) {
+    await this.pool.query("INSERT INTO meta (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)", [key, JSON.stringify(value)]);
   }
 
   // 这天已经固定（账本里有）但状态行还在：删掉。结账成功时的删除在 saveSnapshotsForScope 的事务里做

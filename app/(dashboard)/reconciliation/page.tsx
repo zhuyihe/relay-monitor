@@ -26,7 +26,7 @@ import { ProfitSummary } from "./profit-summary";
 import { ProfitChart } from "./profit-chart";
 import { ProfitTable } from "./profit-table";
 import { ProfitDetail, detailTitle } from "./profit-detail";
-import { DEFAULT_SORT, footerNotes, nextSort, rangeCaption, rowName } from "./profit-format";
+import { footerNotes, isSingleDay, nextSort, rangeCaption, rangeDays, rowName } from "./profit-format";
 import type { Ctx, Sort, SortKey } from "./profit-format";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel, shiftedDayStartInTz } from "../../../lib/business-time";
 
@@ -42,8 +42,8 @@ export default function ReconciliationPage() {
   const compact = !Grid.useBreakpoint().md;
   const state = useProfitPage();
   const { config, data, loading, querying, error, preset, activeWindow, switching, retryingKeys, retryErrors, detail } = state;
-  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // null = 默认排法（看今天分三组，看别的范围按毛利排、已解绑的放最后）；点了表头才是按那一列排
+  const [sort, setSort] = useState<Sort | null>(null);
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
   const [workflowError, setWorkflowError] = useState("");
   const [destinationClosed, setDestinationClosed] = useState(false);
@@ -82,7 +82,7 @@ export default function ReconciliationPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 第一次读到数据后定位到链接指的那一行：日期还是链接那天就展开它、打开那天的计算明细；不是了写「这条已经变了」
+  // 第一次读到数据后定位到链接指的那一行：日期还是链接那天就打开那天的计算明细；不是了写「这条已经变了」
   const workflowRow = data?.rows.find((row) => destination?.ruleId && row.ruleIds.includes(destination.ruleId)) || null;
   useEffect(() => {
     if (!destination || destinationResolved.current || !data || workflowError) return;
@@ -92,13 +92,11 @@ export default function ReconciliationPage() {
       return;
     }
     if (!workflowRow) return;
-    setExpanded((previous) => new Set(previous).add(workflowRow.rowKey));
     requestAnimationFrame(() => document.querySelector(`[data-row-key="${CSS.escape(workflowRow.rowKey)}"]`)?.scrollIntoView({ block: "center" }));
     if (destination.action === "retry") void state.openDetail(workflowRow, dayKeyInTz(data.range.startMs, data.range.timezone));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination, data, workflowError]);
 
-  const toggleRow = (rowKey: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(rowKey)) next.delete(rowKey); else next.add(rowKey); return next; });
   const refresh = async () => { await state.refresh(); void loadWorkflowActions(true, ["bills"]); };
   const retryRow = async (row: ProfitRow) => { await state.retryRow(row); void loadWorkflowActions(true, ["bills"]); };
 
@@ -175,7 +173,7 @@ export default function ReconciliationPage() {
     {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitChart page={page} ctx={ctx} compact={compact} /></div> : null}
 
     <ProfitTable
-      page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} expanded={expanded} onToggle={toggleRow}
+      page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} detailDay={isSingleDay(page) ? rangeDays(page).first : null} hold={!!detail}
       onOpenDetail={(row, day) => void state.openDetail(row, day)} onRetry={(row) => void retryRow(row)} onRefresh={() => void refresh()}
       retryingKeys={retryingKeys} retryErrors={retryErrors} empty={emptyAction}
     />

@@ -201,6 +201,8 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "archived_at_ms", "BIGINT NULL");
   // 核算起点的下限（毫秒）：同一天里更早解除了一条占着同一个渠道（或同一把 Key）的 New API 绑定时，新绑定从那一刻起算，不从 0 点，免得重叠算两遍（C3）
   await addColumnIfMissing(pool, "reconciliation_rules", "accounting_floor_ms", "BIGINT NULL");
+  // 这条绑定「最后一次绑上」的时刻（建绑定时记下，重新打开不改）：一个渠道一天的收入只记在当天最后绑上的那条上。老绑定是空的，按 created_at 算
+  await addColumnIfMissing(pool, "reconciliation_rules", "bound_at_ms", "BIGINT NULL");
   await pool.query("UPDATE reconciliation_rules SET archived_at_ms = UNIX_TIMESTAMP(archived_at) * 1000 WHERE archived_at IS NOT NULL AND archived_at_ms IS NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "cost_coverage", "VARCHAR(24) NOT NULL DEFAULT 'unknown'");
   await addColumnIfMissing(pool, "reconciliation_rules", "provider", "VARCHAR(24) NULL");
@@ -243,6 +245,8 @@ export async function ensureSchema(pool) {
     token_name VARCHAR(160) NULL,
     PRIMARY KEY (rule_id, bill_date, upstream_station_id, token_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // yielded：这一天这把 Key 在别的绑定那边已经固定、算在那边（控制台滞后挪 Key 的几天），这条绑定这天这把 Key 的成本记 0、收入照算；不按绑定时刻判
+  await addColumnIfMissing(pool, "reconciliation_rule_day_keys", "yielded", "TINYINT NOT NULL DEFAULT 0");
   for (const { sql, params } of refreshSegmentKeysSql()) await pool.query(sql, params);
   await pool.query(`UPDATE reconciliation_snapshots s
     JOIN reconciliation_rule_segments g ON g.rule_id = s.rule_id
@@ -289,6 +293,17 @@ export async function ensureSchema(pool) {
     gap_reason VARCHAR(40) NULL,
     tokens BIGINT NULL,
     PRIMARY KEY (rule_id, bill_date, revision)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 每把 Key 分开记账：每个账本版本、每把 Key 一行，和账本行同一个事务写；不存分到的收入（读的时候按原价用量比例算）。不加外键，只插入不改
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_ledger_keys (
+    rule_id VARCHAR(32) NOT NULL,
+    bill_date DATE NOT NULL,
+    revision INT NOT NULL,
+    token_id BIGINT NOT NULL,
+    cost_usd DECIMAL(20,8) NULL,
+    ratio DECIMAL(12,6) NULL,
+    raw_usd DECIMAL(20,8) NULL,
+    PRIMARY KEY (rule_id, bill_date, revision, token_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 应付成本（V1-b）：账本多三列，旧账是 null
   await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");

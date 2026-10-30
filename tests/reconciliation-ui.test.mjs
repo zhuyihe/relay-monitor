@@ -196,8 +196,8 @@ async function openDailyPage(t, options = {}) {
 }
 // 页面上的字都来自 copy.ts（页面文件不能导出）和共用的常量，这里只填夹具的数
 const metricOf = (page, title) => page.locator(".jy-profit-metric").filter({ has: page.getByText(title, { exact: true }) });
-const rowOf = (page, name) => page.locator(`.jy-profit-row[data-row-key]`).filter({ has: page.locator(".jy-profit-row__toggle", { hasText: name }) });
-const cardOf = (page, name) => page.locator(".jy-profit-card").filter({ has: page.locator(".jy-profit-card__toggle", { hasText: name }) });
+const rowOf = (page, name) => page.locator(`.jy-profit-row[data-row-key]`).filter({ has: page.locator(".jy-profit-row__line strong", { hasText: name }) });
+const cardOf = (page, name) => page.locator(".jy-profit-card").filter({ has: page.locator(".jy-profit-card__head strong", { hasText: name }) });
 // 渠道名字后面的感叹号和点开的气泡
 const bangOf = (scope, name) => scope.getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}：`) });
 const presets = (page) => page.getByRole("group", { name: PROFIT_COPY.rangeLabel, exact: true });
@@ -214,15 +214,16 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   assert.deepEqual(await four(), [["收入", "$8.50"], ["上游成本", "$4.00"], ["毛利", "$4.50"], ["毛利率", "52.9%"]]);
   assert.equal(await page.locator(".jy-profit-chart").count(), 0, "只有今天：不画每天的毛利");
   const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), ["渠道", "收入", "上游成本", "毛利▼", "毛利率"]);
-  assert.deepEqual(await page.locator(".jy-profit-row__toggle strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C"], "默认按毛利从高到低");
-  // 名字下面只写上游名；没有 Key、分组、差额、选 Key
-  await rowOf(page, "Rule A").getByText("Fixture upstream", { exact: true }).waitFor();
+  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), ["渠道", "收入", "上游成本", "毛利", "毛利率", ""], "没点过表头不画箭头；看一天最后一列是「计算明细」（表头不写字）");
+  assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C"], "默认按毛利从高到低");
+  assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupIdle(3)], "今天分组：这几个渠道最近 1 小时都没收入");
+  // 名字下面小字写「上游 · Key ×倍率」；没有分组、差额、选 Key
+  await rowOf(page, "Rule A").getByText("Fixture upstream · Rule A ×1.0", { exact: true }).waitFor();
   assert.equal(await page.getByText(/Key|分组|差额|应付成本|对不上/).count(), 0);
   // 亏钱的毛利、毛利率标红
   assert.equal(await rowOf(page, "Rule C").locator(".jy-profit-neg").count(), 2); assert.equal(await rowOf(page, "Rule B").locator(".jy-profit-neg").count(), 0);
   const totals = page.locator(".jy-profit-totals");
-  assert.deepEqual((await totals.locator("td").allInnerTexts()).map((text) => text.trim()), [PROFIT_COPY.table.totals(3), "$8.50", "$4.00", "$4.50", "52.9%"]);
+  assert.deepEqual((await totals.locator("td").allInnerTexts()).map((text) => text.trim()), [PROFIT_COPY.table.totals(3), "$8.50", "$4.00", "$4.50", "52.9%", ""]);
   await page.locator(".jy-profit-notes").getByText(PROFIT_COPY.notice.unlinked(2), { exact: false }).waitFor();
   assert.equal(await page.locator(".jy-profit-notes").getByRole("link", { name: PROFIT_COPY.table.goUpstreams, exact: true }).getAttribute("href"), "/stations");
   // 没有以前的东西：每日记录按钮、选 Key、还没算利润的渠道
@@ -230,7 +231,7 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-today-1440x900.png` });
 });
 
-test("近 7 天：每天的毛利小柱状图（今天浅色、悬停看那天四个数）；点开一个渠道一天一行，点「计算明细」打开那天的明细（GET /profit/detail）；点表头换排法", async (t) => {
+test("近 7 天：每天的毛利小柱状图（今天浅色、悬停看那天四个数）；多天的行点不开；点表头换排法", async (t) => {
   const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 }), profitRow("rule-3", "Rule C", { income: 1, cost: 2 })];
   const { page, detailReads, profitReads } = await openDailyPage(t, { rows, pageOf: (body) => profitPage(rows, { preset: "7d", customPreset: body.preset }) });
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
@@ -246,27 +247,21 @@ test("近 7 天：每天的毛利小柱状图（今天浅色、悬停看那天�
   assert.deepEqual((await tip.locator(".t-row").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), ["收入 $6.00", "上游成本 $3.00", "毛利 $3.00", "毛利率 50.0%"]);
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-7d-1440x900.png` });
   await page.mouse.move(5, 5);
-  // 点开 Rule B：一天一行，新的在上；已固定写已固定、今天写实时
-  const rowB = rowOf(page, "Rule B"); await rowB.locator(".jy-profit-row__toggle").click();
-  const days = page.locator(".jy-profit-row__expanded .jy-profit-days tbody tr"); assert.equal(await days.count(), 7);
-  assert.deepEqual((await days.first().locator("td").allInnerTexts()).map((text) => text.trim()), ["10月9日 今天", "$5.00", "$1.00", "$4.00", "80.0%", "实时", "计算明细"]);
-  assert.deepEqual((await days.nth(1).locator("td").allInnerTexts()).map((text) => text.trim()), ["10月8日 周四", "$2.00", "$1.00", "$1.00", "50.0%", "已固定", "计算明细"]);
-  await days.nth(1).getByRole("button", { name: PROFIT_COPY.table.day.detail }).click();
-  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }); await drawer.waitFor();
-  assert.deepEqual(detailReads, [{ ruleIds: "rule-2", day: PROFIT_YESTERDAY }]);
-  if (process.env.UI_SHOT_DIR) { await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); await page.locator(".jy-profit-row__expanded").scrollIntoViewIfNeeded(); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-expand-1440x900.png` }); }
-  else { await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); }
-  // 点表头换排法：上游成本从大到小、再点从小到大；收起再展开不影响
-  const order = () => page.locator(".jy-profit-row__toggle strong").allInnerTexts();
+  // 多天：没有小表、没有「计算明细」，行点不了；没有分组标题
+  assert.equal(await page.locator(".jy-profit-row.is-clickable").count(), 0); assert.equal(await page.locator(".jy-profit-days").count(), 0);
+  assert.equal(await page.getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).count(), 0); assert.equal(await page.locator(".jy-profit-group__title").count(), 0);
+  await rowOf(page, "Rule B").click(); assert.equal(await page.getByRole("dialog").count(), 0); assert.deepEqual(detailReads, []);
+  // 点表头换排法：上游成本从大到小、再点从小到大；点了表头就是平铺排
+  const order = () => page.locator(".jy-profit-row__line strong").allInnerTexts();
   assert.deepEqual(await order(), ["Rule B", "Rule A", "Rule C"]);
   await page.locator(".jy-profit-table > thead").getByRole("button", { name: PROFIT_COPY.table.col.actual }).click();
   assert.deepEqual(await order(), ["Rule C", "Rule A", "Rule B"], "成本 2、1、1：C 在前，一样的按名字");
   await page.locator(".jy-profit-table > thead").getByRole("button", { name: new RegExp(PROFIT_COPY.table.col.actual) }).click();
   assert.equal(await page.locator(".jy-profit-table > thead th").filter({ hasText: PROFIT_COPY.table.col.actual }).getAttribute("aria-sort"), "ascending");
-  assert.equal(profitReads.length, 2, "排序、展开不再请求");
+  assert.equal(profitReads.length, 2, "排序不再请求");
 });
 
-test("需处理的渠道：名字后面一个感叹号（点它不展开这一行），点开写原因加按钮，按钮和文案从问题码来；收入照写、别的写「—」、不进合计；页顶一句点出有几个渠道没算进来；「重新读取」只读这一行再读整页", async (t) => {
+test("需处理的渠道：名字后面一个感叹号（点它不打开计算明细），点开写原因加按钮，按钮和文案从问题码来；收入照写、别的写「—」、不进合计；页顶一句点出有几个渠道没算进来；「重新读取」只读这一行再读整页", async (t) => {
   const attention = { code: "KEY_INVALID_OR_DENIED", title: reconciliationIssue("KEY_INVALID_OR_DENIED").title, detail: reconciliationIssue("KEY_INVALID_OR_DENIED").detail, action: workflowAction("update_authorization", { stationId: "upstream-1" }), fromDay: "2026-10-01", moreCount: 1 };
   const retryable = { ...attention, code: "OWN_BILLING_UNAVAILABLE", title: reconciliationIssue("OWN_BILLING_UNAVAILABLE").title, detail: "", action: workflowAction("retry_bill", { ruleId: "rule-3", window }, { code: "WAITING_FOR_BILL" }), moreCount: 0 };
   const rows = [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { attention }), profitRow("rule-3", "Rule C", { attention: retryable })];
@@ -282,7 +277,7 @@ test("需处理的渠道：名字后面一个感叹号（点它不展开这一�
   await bangOf(rowB, "Rule B").click();
   const pop = page.locator(".jy-issue-pop"); await pop.waitFor();
   if (process.env.UI_SHOT_DIR) { await page.setViewportSize({ width: 1440, height: 900 }); await page.mouse.move(700, 700); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-attention-1440x900.png` }); }
-  assert.equal(await rowB.locator(".jy-profit-row__toggle").getAttribute("aria-expanded"), "false");
+  assert.equal(await page.getByRole("dialog").count(), 0);
   assert.equal(await pop.locator("b").innerText(), attention.title); await pop.getByText(`${attention.detail}。${PROFIT_COPY.attention.more(1)}`, { exact: true }).waitFor();
   assert.equal(await pop.getByRole("link", { name: `${UPDATE_AUTH} Rule B`, exact: true }).getAttribute("href"), attention.action.href);
   await page.locator(".jy-profit-caption").click(); await pop.waitFor({ state: "hidden" });
@@ -318,20 +313,18 @@ test("表下面一行：没算进利润的上游成本、还没算利润的渠�
   const fresh = await openDailyPage(t, { ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 60000, behindMs: 60000 } }); await rowOf(fresh.page, "Rule A").waitFor(); assert.equal(await fresh.page.locator(".jy-profit-notes").count(), 0);
 });
 
-test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片（右上毛利、右下收入和毛利率）；点开一天一块、「计算明细」整屏；不横向滚动", async (t) => {
+test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片（右上毛利、右下收入和毛利率）；看一天时点整张卡片打开计算明细（整屏）；不横向滚动", async (t) => {
   const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
-  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 375, height: 812 }, pageOf: (body) => profitPage(rows, { preset: "7d", customPreset: body.preset }) });
+  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 375, height: 812 }, pageOf: (body) => profitPage(rows, { preset: body.preset === "yesterday" ? "yesterday" : "7d", customPreset: body.preset }) });
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
   await page.locator(".jy-profit-chart").waitFor(); assert.equal(await page.locator(".jy-profit-table").count(), 0);
   const metrics = await page.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; }));
   assert.equal(metrics[0][1], metrics[1][1], "第一排两个"); assert.equal(metrics[2][1], metrics[3][1], "第二排两个"); assert.ok(metrics[2][1] > metrics[0][1]);
-  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText(PROFIT_COPY.table.mobileLine("$5.00", "80.0%"), { exact: true }).waitFor(); await cardB.getByText("Fixture upstream", { exact: true }).waitFor();
-  assert.deepEqual(await page.locator(".jy-profit-card__toggle strong").allInnerTexts(), ["Rule B", "Rule A"], "按毛利从高到低");
-  await page.getByText(PROFIT_COPY.table.mobileSort(PROFIT_COPY.table.col.gross, true), { exact: true }).waitFor();
-  await cardB.locator(".jy-profit-card__toggle").click();
-  const days = cardB.locator(".jy-profit-days--cards li"); assert.equal(await days.count(), 7);
-  await days.first().getByText("10月9日 今天", { exact: true }).waitFor(); await days.first().getByText(PROFIT_COPY.table.day.live, { exact: true }).waitFor(); await days.first().getByText(PROFIT_COPY.table.mobileDay("$5.00", "$1.00"), { exact: true }).waitFor(); await days.first().getByText(PROFIT_COPY.table.mobileGross("$4.00"), { exact: true }).waitFor();
-  await days.nth(1).getByRole("button", { name: PROFIT_COPY.table.day.detail, exact: true }).click();
+  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText(PROFIT_COPY.table.mobileLine("$5.00", "80.0%"), { exact: true }).waitFor(); await cardB.getByText("Fixture upstream · Rule B ×1.0", { exact: true }).waitFor();
+  assert.deepEqual(await page.locator(".jy-profit-card__head strong").allInnerTexts(), ["Rule B", "Rule A"], "按毛利从高到低");
+    assert.equal(await page.getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).count(), 0, "多天：卡片上没有「计算明细」"); assert.equal(await page.locator(".jy-profit-card__chev").count(), 0, "多天：没有「›」、卡片点不开");
+  await pickPreset(page, PROFIT_COPY.presets.yesterday);
+  await cardOf(page, "Rule B").locator(".jy-profit-card__head strong").click(); // 看一天时点整张卡片
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }); await drawer.waitFor();
   assert.deepEqual(detailReads, [{ ruleIds: "rule-2", day: PROFIT_YESTERDAY }]);
   assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 374);
@@ -340,6 +333,88 @@ test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片�
   if (process.env.UI_SHOT_DIR) { await cardB.scrollIntoViewIfNeeded(); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-375x812-expand.png` }); await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-375x812.png` }); }
 });
 
+
+// ---- 按 Key 算利润（PR3 接口形状：渠道一行，keys[] 一把一项；夹具先写死，接口合并后换成真的）----
+const fixtureKey = (name, o = {}) => ({ tokenId: name, name, upstream: { stationId: "upstream-1", name: "Fixture upstream", provider: "newapi" }, state: "active", firstDay: PROFIT_TODAY, lastDay: PROFIT_TODAY, days: 1, ratio: 0.5, ratioKind: "group",
+  costUsd: 1, rawUsd: 2, incomeUsd: 2.5, incomeBasis: "single", grossProfitUsd: 1.5, grossMarginRate: 0.6, pendingDays: 0, ...o });
+const keyedRows = () => [
+  { ...profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), bound: true, activeNow: true, keys: [fixtureKey("oai-A")] },
+  // Rule B 今天用了两把 Key：原价用量 2 : 3，收入 6 按 40% / 60% 分，成本 = 原价用量 × 倍率
+  { ...profitRow("rule-2", "Rule B", { income: 6, cost: 3.4 }), bound: true, activeNow: false, keys: [fixtureKey("oai-16", { incomeUsd: 2.4, costUsd: 1, rawUsd: 2, grossProfitUsd: 1.4, incomeBasis: "raw" }), fixtureKey("oai-01", { state: "swapped", ratio: 0.8, incomeUsd: 3.6, costUsd: 2.4, rawUsd: 3, grossProfitUsd: 1.2, incomeBasis: "raw" })] },
+  { ...profitRow("rule-3", "Rule C", { income: 1, cost: 0.5 }), bound: false, unboundOn: PROFIT_TODAY, activeNow: false, keys: [fixtureKey("oai-C", { state: "unbound", incomeUsd: 1, costUsd: 0.5 })] },
+];
+const keyRowsBackground = (page) => page.locator(".jy-profit-keyrow td").first().evaluate((node) => getComputedStyle(node).backgroundColor);
+const keyedDetail = () => profitDetail({ day: PROFIT_TODAY, keyChangeRatioDiffers: true, swappedUpstream: false,
+  income: { usd: 6, adminUsage: { usd: 0, deducted: "all" }, byChannel: [{ channelId: 2, usd: 6 }] }, actual: { usd: 3.4, keyName: "oai-16" }, grossProfitUsd: 2.6,
+  keys: [fixtureKey("oai-16", { incomeUsd: 2.4, costUsd: 1, rawUsd: 2, grossProfitUsd: 1.4 }), fixtureKey("oai-01", { ratio: 0.8, incomeUsd: 3.6, costUsd: 2.4, rawUsd: 3, grossProfitUsd: 1.2 })], split: { basis: "raw", shares: [{ tokenId: "oai-16", percent: 40 }, { tokenId: "oai-01", percent: 60 }] } });
+
+test("按 Key 算利润（电脑）：今天分「有收入 / 没收入 / 已解绑」三组；只有一把 Key 的写小字、两把以上下面挂 Key 行（在用 / 已换掉）；已解绑的渠道最后一把不标；计算明细里一把 Key 一行", async (t) => {
+  const rows = keyedRows();
+  const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 1440, height: 900 }, detail: (route, params) => fulfill(route, keyedDetail()) });
+  assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupActive(1), PROFIT_COPY.table.groupIdle(1), PROFIT_COPY.table.groupUnbound(1)]);
+  assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule A", "Rule B", "Rule C"]);
+  await rowOf(page, "Rule A").getByText("Fixture upstream · oai-A ×0.5", { exact: true }).waitFor();
+  assert.equal(await rowOf(page, "Rule C").locator(".jy-profit-unbound-tag").innerText(), PROFIT_COPY.table.unboundTag);
+  await rowOf(page, "Rule B").getByText("Fixture upstream", { exact: true }).waitFor(); // 两把以上 Key：名字下面写上游名
+  assert.deepEqual(await page.locator(".jy-profit-key-tag").evaluateAll((nodes) => nodes.map((node) => node.className.includes("jy-tag--info"))), [true, false], "在用浅蓝、已换掉灰");
+  assert.equal(await keyRowsBackground(page), "rgba(0, 0, 0, 0)", "Key 行不加灰底");
+  const keyRows = page.locator(".jy-profit-keyrow");
+  assert.deepEqual((await keyRows.evaluateAll((nodes) => nodes.map((node) => node.querySelector("td").innerText.replace(/\s+/g, " ").trim()))), ["oai-16 ×0.5在用", "oai-01 ×0.8已换掉"]);
+  assert.equal(await keyRows.first().evaluate((node) => node.dataset.keyOf), "upstream-1:rule-2", "Key 行只挂在用过两把 Key 的渠道下面");
+  assert.equal(await page.locator(".jy-profit-row.is-clickable").count(), 3);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-today-1440x900.png` });
+  await rowOf(page, "Rule B").click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月9日"), exact: true }); await drawer.waitFor();
+  assert.deepEqual(detailReads, [{ ruleIds: "rule-2", day: PROFIT_TODAY }]);
+  await drawer.getByText(PROFIT_COPY.detail.keys.intro(2), { exact: true }).waitFor();
+  assert.deepEqual((await drawer.locator(".jy-profit-keystable thead th").allInnerTexts()).map((text) => text.trim()), Object.values(PROFIT_COPY.detail.keys.col));
+  assert.equal(await drawer.locator(".jy-profit-keystable tbody tr").count(), 2);
+  await drawer.getByText(PROFIT_COPY.detail.keys.splitRaw(2, "oai-16 分 40%，oai-01 分 60%"), { exact: true }).waitFor();
+  await drawer.getByText(PROFIT_COPY.detail.keys.from(2), { exact: true }).waitFor();
+  await drawer.getByText(PROFIT_COPY.detail.verify.keyRatioDiffers, { exact: true }).waitFor();
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(600); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-detail-1440x900.png` }); }
+});
+
+test("按 Key 算利润（手机 375）：分组小标题；卡片里 Key 两行小字（Key 和标签 + 毛利率、收入和成本）；页面不横向滚动", async (t) => {
+  const { page } = await openDailyPage(t, { rows: keyedRows(), viewport: { width: 375, height: 812 } });
+  assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupActive(1), PROFIT_COPY.table.groupIdle(1), PROFIT_COPY.table.groupUnbound(1)]);
+  const cardB = cardOf(page, "Rule B");
+  assert.deepEqual((await cardB.locator(".jy-profit-key__head").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), ["oai-16 ×0.5在用 58.3%", "oai-01 ×0.8已换掉 33.3%"]);
+  await cardB.getByText(PROFIT_COPY.table.mobileKeyLine("$2.40", "$1.00"), { exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px document root overflows horizontally");
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-today-375x812.png` });
+});
+
+test("按 Key 算利润（近 7 天）：换过 Key 的渠道标签带日子；换过上游的渠道 Key 行前面加上游名；已解绑的放最后、带「已解绑 · N」；行点不开", async (t) => {
+  const other = { stationId: "upstream-2", name: "云帆", provider: "newapi" };
+  const week = { firstDay: "2026-10-03", lastDay: PROFIT_TODAY };
+  const rows = [
+    { ...profitRow("rule-1", "Rule A", { income: 8, cost: 3 }), bound: true, keys: [fixtureKey("oai-A", { ...week, days: 7, incomeUsd: 8, costUsd: 3, rawUsd: 6, grossProfitUsd: 5 })] },
+    // 近 7 天里 10月6日换了 Key（换 Key 那天新旧两把都算，旧的最后一天 = 新的第一天）
+    { ...profitRow("rule-2", "Rule B", { income: 10, cost: 4 }), bound: true, keys: [
+      fixtureKey("oai-16", { firstDay: "2026-10-06", lastDay: PROFIT_TODAY, days: 4, incomeUsd: 6, costUsd: 2.4, rawUsd: 4.8, grossProfitUsd: 3.6, incomeBasis: "raw" }),
+      fixtureKey("oai-01", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-06", days: 4, ratio: 0.8, incomeUsd: 4, costUsd: 1.6, rawUsd: 2, grossProfitUsd: 2.4, incomeBasis: "raw" })] },
+    // 换过上游
+    { ...profitRow("rule-3", "Rule C", { income: 6, cost: 2 }), bound: true, keys: [
+      fixtureKey("sk-new", { upstream: other, firstDay: "2026-10-07", lastDay: PROFIT_TODAY, days: 3, incomeUsd: 3, costUsd: 1, rawUsd: 2, grossProfitUsd: 2, incomeBasis: "raw" }),
+      fixtureKey("sk-old", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-07", days: 5, incomeUsd: 3, costUsd: 1, rawUsd: 2, grossProfitUsd: 2, incomeBasis: "raw" })] },
+    { ...profitRow("rule-4", "Rule D", { income: 1, cost: 0.4 }), bound: false, unboundOn: "2026-10-05", keys: [fixtureKey("oai-D", { state: "unbound", firstDay: "2026-10-03", lastDay: "2026-10-05", days: 3, incomeUsd: 1, costUsd: 0.4, rawUsd: 0.8, grossProfitUsd: 0.6 })] },
+  ];
+  const { page } = await openDailyPage(t, { rows, viewport: { width: 1440, height: 900 }, pageOf: (body) => profitPage(rows, { preset: body.preset === "7d" ? "7d" : "today", customPreset: body.preset }) });
+  await pickPreset(page, PROFIT_COPY.presets["7d"]);
+  await page.locator(".jy-profit-caption").getByText(`10月3日–10月9日 · ${PROFIT_COPY.daysFixed(6)}，${PROFIT_COPY.todayLive}`, { exact: true }).waitFor();
+  assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupUnbound(1)], "多天只有「已解绑」一行");
+  assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C", "Rule D"], "绑着的按毛利排、已解绑最后");
+  assert.deepEqual((await page.locator(".jy-profit-keyrow td:first-child").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), [
+    "oai-16 ×0.5在用 · 6日起", "oai-01 ×0.8已换掉 · 用了 3日–6日", "云帆 · sk-new ×0.5在用 · 7日起", "Fixture upstream · sk-old ×0.5已换掉 · 用了 3日–7日"]);
+  await rowOf(page, "Rule C").locator("small").getByText("云帆", { exact: true }).waitFor(); // 换过上游：小字写在用那把 Key 的上游
+  const left = (locator) => locator.evaluate((node) => node.getBoundingClientRect().left);
+  const indent = (await left(page.locator(".jy-profit-keyrow__name span").first())) - (await left(rowOf(page, "Rule B").locator(".jy-profit-row__line strong")));
+  assert.ok(indent >= 14 && indent <= 18, `Key 行比渠道名缩进约 16px，实际 ${indent}`);
+  assert.equal(await page.locator(".jy-profit-row.is-clickable").count(), 0);
+  await page.mouse.move(5, 5);
+  if (process.env.UI_SHOT_DIR) { await rowOf(page, "Rule D").scrollIntoViewIfNeeded(); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-7d-1440x900.png` }); }
+});
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
@@ -383,13 +458,12 @@ async function fulfill(route, body) {
 const destinationAlert = (page, title) => page.locator(".ant-alert").filter({ has: page.getByText(title, { exact: true }) });
 const DESTINATION_EXPIRED = `${ERROR_CATEGORIES.expired.text}。`, DESTINATION_REMOVED = "这条绑定已解除";
 
-test("workflow retry destination opens the linked day, expands that row with its detail, and retries only that row before re-reading the page", async (t) => {
+test("workflow retry destination opens the linked day with that row's detail, and retries only that row before re-reading the page", async (t) => {
   const path = `/reconciliation?action=retry&ruleId=rule-1&startMs=${window.startMs}&endMs=${window.endMs}&timezone=Asia%2FShanghai`;
   const { page, profitReads, queries, detailReads } = await openDailyPage(t, { path, pageOf: (body) => profitPage(yesterdayRows(), { preset: "yesterday", customPreset: body.preset }) });
   assert.deepEqual(profitReads[0], { preset: "custom", startMs: window.startMs, endMs: window.endMs });
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor(); assert.deepEqual(detailReads, [{ ruleIds: "rule-1", day: PROFIT_YESTERDAY }]);
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-  assert.equal(await rowOf(page, "Rule A").locator(".jy-profit-row__toggle").getAttribute("aria-expanded"), "true");
   // 顶上写这条和链接那天，放「重新读取」
   await destinationAlert(page, `Rule A · ${formatZonedWindow(window)}`).getByRole("button", { name: RETRY, exact: true }).click();
   await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
@@ -422,11 +496,8 @@ test("按天挡：一个渠道中间一天需处理时，这一行照样写算�
   const rowA = rowOf(page, "Rule A");
   await rowA.getByText("$1.50", { exact: true }).waitFor(); assert.equal(await rowA.locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 0, "这一行有算进来的数，不写「—」");
   await bangOf(rowA, "Rule A").click(); await page.locator(".jy-issue-pop").getByRole("link", { name: /^去换 Key/ }).waitFor(); await page.locator(".jy-profit-caption").click(); await page.locator(".jy-issue-pop").waitFor({ state: "hidden" }); await page.waitForTimeout(400);
-  await rowA.locator(".jy-profit-row__toggle").click();
-  const blocked = page.locator('.jy-profit-days tr[data-day="2026-10-05"]');
-  assert.deepEqual((await blocked.locator("td").allInnerTexts()).map((text) => text.trim()).slice(0, 6), ["10月5日 周一", EMPTY, EMPTY, EMPTY, EMPTY, "需处理"]);
-  assert.deepEqual((await page.locator('.jy-profit-days tr[data-day="2026-10-04"] td').allInnerTexts()).map((text) => text.trim()).slice(1, 6), ["$2.00", "$1.00", "$1.00", "50.0%", "已固定"]);
-  if (process.env.UI_SHOT_DIR) { await page.locator(".jy-profit-row__expanded").scrollIntoViewIfNeeded(); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-per-day-block-1440x900.png` }); }
+  assert.equal((await rowA.getAttribute("class")).includes("is-clickable"), false, "多天的行点不开");
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-per-day-block-1440x900.png` });
 });
 
 test("计算明细：上面收入、上游成本、毛利三节；下面「核对上游扣费」可收起，右边一句结论；对不上的那天默认展开，对得上的收起；没有「改时间」", async (t) => {
@@ -434,8 +505,7 @@ test("计算明细：上面收入、上游成本、毛利三节；下面「核�
     detail: (route, params) => fulfill(route, params.ruleIds === "rule-2" ? profitDetail({ gap: { usd: 0.01, rate: 0.01, state: "within" } }) : profitDetail()) });
   await pickPreset(page, PROFIT_COPY.presets.yesterday);
   // 对不上（Rule A 多扣 $0.20）：默认展开，里面是应付成本、差额、倍率
-  await rowOf(page, "Rule A").locator(".jy-profit-row__toggle").click();
-  await page.locator(".jy-profit-row__expanded tbody tr").first().getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).click();
+  await rowOf(page, "Rule A").getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).click();
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
   await drawer.locator(".jy-profit-verify").waitFor();
   assert.deepEqual(await drawer.locator(".jy-profit-detail > .jy-profit-detail__sec h3").allInnerTexts(), [PROFIT_COPY.detail.income, PROFIT_COPY.detail.actual, PROFIT_COPY.detail.gross]);
@@ -449,8 +519,7 @@ test("计算明细：上面收入、上游成本、毛利三节；下面「核�
   await head.click(); await verify.locator(".jy-profit-models").waitFor();
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   // 对得上（Rule B）：默认收起，右边写「对得上」
-  await rowOf(page, "Rule B").locator(".jy-profit-row__toggle").click();
-  await page.locator("tbody.jy-profit-group").filter({ has: page.locator('[data-row-key="upstream-1:rule-2"]') }).locator(".jy-profit-days tbody tr").first().getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).click();
+  await rowOf(page, "Rule B").click(); // 点这一行也一样
   const drawerB = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule B", "10月8日"), exact: true }); await drawerB.waitFor();
   const verifyB = drawerB.locator(".jy-profit-verify"); assert.equal(await verifyB.getAttribute("data-open"), "0");
   await verifyB.getByText(PROFIT_COPY.detail.verify.match, { exact: true }).waitFor(); assert.equal(await verifyB.locator(".jy-profit-models").count(), 0);
@@ -2103,7 +2172,7 @@ test("上游资源：换好的提示——后台没带字段只写「已换成 x
     if (persistent) { await page.waitForTimeout(5500); assert.equal(await note.count(), 1, "5 秒以后还在"); await note.locator(".ant-notification-notice-close").click(); await note.waitFor({ state: "hidden" }); }
   };
   await run({}, "已换成 oai-16");
-  await run({ noRecentUsage: true }, "已换成 oai-16。新 Key 最近 31 天都没有用量，从今天起按新 Key 算");
+  await run({ noRecentUsage: true }, "已换成 oai-16。往前查没找到新 Key 的用量，从今天起按新 Key 算");
   await run({ fromDay: new Date().toLocaleDateString("sv", { timeZone: "Asia/Shanghai" }), recomputedDays: 0, tooOld: null }, "已换成 oai-16，从今天起按新 Key 算");
   await run({ fromDay: "2026-09-20", recomputedDays: 31, tooOld: { from: "2026-09-20", to: "2026-09-27" } },
     "已换成 oai-16，从 9月20日起按新 Key 算，补算了 31 天。9月20日–9月27日 在 31 天以前，没自动补算；要按新 Key 算，到每日利润选那天点「重新读取」。", { persistent: true });
@@ -2161,7 +2230,7 @@ test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂�
   const drawer = page.getByRole("dialog", { name: /主力上游的渠道/ }); await drawer.waitFor();
   await drawer.getByRole("button", { name: "解绑 高速 A", exact: true }).click();
   const confirm = page.getByRole("dialog", { name: "解绑「高速 A」？", exact: true });
-  await confirm.getByText("解绑后，「高速 A」不再挂在主力上游下面，以后可以再绑。", { exact: true }).waitFor();
+  await confirm.getByText("解绑后，「高速 A」不再挂在主力上游下面；今天的数照样算完，以前的数都留着。以后可以再绑。", { exact: true }).waitFor();
   await confirm.getByRole("button", { name: "解绑", exact: true }).click();
   for (let i = 0; i < 60 && !stops.length; i++) await page.waitForTimeout(100);
   assert.deepEqual(stops[0], { ownStationId: "own", channelIds: [1] });
@@ -2605,14 +2674,12 @@ test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 PO
   await advance(600000); await settle(); assert.equal(profitReads.length, before + 1, "已固定以后不再读");
 });
 
-test("手机 320：一个渠道一张卡片，点开一天一块、能看计算明细，页面不横向溢出", async (t) => {
-  const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 } });
+test("手机 320：一个渠道一张卡片，看一天时点「计算明细」整屏打开，页面不横向溢出", async (t) => {
+  const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 }, pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }) });
   assert.equal(await page.locator(".jy-profit-table").count(), 0);
+  await pickPreset(page, PROFIT_COPY.presets.yesterday);
   const card = cardOf(page, "Rule A"); await card.waitFor();
-  assert.equal(await page.locator(".jy-profit-card.is-open").count(), 0, "卡片默认收起，点头部才展开");
-  await card.locator(".jy-profit-card__toggle").click();
-  await card.locator(".jy-profit-days--cards li").first().waitFor();
-  await card.locator(".jy-profit-days--cards li").nth(1).getByRole("button", { name: PROFIT_COPY.table.day.detail, exact: true }).click();
+  await card.locator(".jy-profit-card__head strong").click();
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
   assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 319);
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });

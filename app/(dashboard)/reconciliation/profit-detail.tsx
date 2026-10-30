@@ -5,12 +5,12 @@ import { useState } from "react";
 import { Button } from "antd";
 import { Icon } from "../../components/icons";
 import { ErrorState, Skeleton } from "../../components/data-state";
-import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
+import type { ProfitDetailKey, ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
 import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime, formatZonedTime, OPTION_UNREADABLE_EXPECTED_NOTE, OPTION_UNREADABLE_SETTLED_NOTE } from "../../../lib/format";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { COPY } from "./copy";
-import { adminUsageText, fmtMoney, gapReasonText, groupText, modelUsageText, overUnderText, rateText, ratioLine, ratioText, signedMoney, toDisplay, unitPriceText, verifyView } from "./profit-format";
+import { adminUsageText, fmtMoney, gapReasonText, groupText, marginText, modelUsageText, overUnderText, rateText, ratioLine, ratioText, signedMoney, toDisplay, unitPriceText, verifyView } from "./profit-format";
 import type { Ctx } from "./profit-format";
 import type { DetailState } from "./use-profit-page";
 
@@ -36,6 +36,35 @@ function Verify({ summary, children }: { summary: { text: string; open: boolean;
   </section>;
 }
 
+// 这天用了不止一把 Key：一把一行（接口里在用的排前面），最后合计；下面写收入怎么分、成本从哪来
+function KeysTable({ detail, keys, income, cost, incomeRate, costRate, ctx }: { detail: ProfitDetailResponse; keys: ProfitDetailKey[]; income: (usd: number | null | undefined) => string; cost: (usd: number | null | undefined) => string; incomeRate: number | null; costRate: number | null; ctx: Ctx }) {
+  const text = COPY.detail.keys, withUpstream = !!detail.swappedUpstream;
+  const cells = keys.map((key) => {
+    const i = toDisplay(key.incomeUsd, incomeRate, ctx.currency), c = toDisplay(key.costUsd, costRate, ctx.currency), g = i != null && c != null ? i - c : null;
+    return { key, i, c, g };
+  });
+  const sum = (pick: (item: (typeof cells)[number]) => number | null) => cells.every((item) => pick(item) != null) ? cells.reduce((total, item) => total + pick(item)!, 0) : null;
+  const total = { i: sum((item) => item.i), c: sum((item) => item.c), g: sum((item) => item.g), raw: keys.every((key) => key.rawUsd != null) ? keys.reduce((t, key) => t + key.rawUsd!, 0) : null };
+  const shares = (detail.split?.shares || []).map((share) => text.share(keys.find((key) => String(key.tokenId) === String(share.tokenId))?.name ?? EMPTY, `${Math.round(share.percent)}%`)).join("，");
+  const money = (value: number | null) => fmtMoney(value, ctx.currency);
+  const split = detail.split?.basis === "raw" ? text.splitRaw(keys.length, shares) : detail.split?.basis === "cost" ? text.splitCost(keys.length, shares) : null;
+  return <>
+    <p>{text.intro(keys.length)}</p>
+    <table className="jy-profit-models jy-profit-keystable">
+      <thead><tr><th>{text.col.key}</th><th className="jy-profit-num">{text.col.ratio}</th><th className="jy-profit-num">{text.col.cost}</th><th className="jy-profit-num">{text.col.raw}</th><th className="jy-profit-num">{text.col.income}</th><th className="jy-profit-num">{text.col.gross}</th><th className="jy-profit-num">{text.col.margin}</th></tr></thead>
+      <tbody>{cells.map(({ key, i, c, g }) => <tr key={String(key.tokenId)}>
+        <td>{withUpstream ? `${key.upstream?.name ?? EMPTY} · ` : ""}{key.name}</td>
+        <td className="jy-profit-num">{key.ratio != null ? `×${ratioText(key.ratio)}` : EMPTY}{key.ratioKind === "actual_over_standard" ? <small>{text.ratioKind}</small> : null}</td>
+        <td className="jy-profit-num">{money(c)}</td><td className="jy-profit-num">{key.rawUsd != null ? fmtMoney(toDisplay(key.rawUsd, costRate, ctx.currency), ctx.currency) : EMPTY}</td>
+        <td className="jy-profit-num">{money(i)}</td><td className="jy-profit-num">{money(g)}</td><td className="jy-profit-num">{g == null ? EMPTY : marginText(g, i)}</td>
+      </tr>)}</tbody>
+      <tfoot><tr><td>{COPY.detail.total}</td><td /><td className="jy-profit-num">{money(total.c)}</td><td className="jy-profit-num">{total.raw != null ? fmtMoney(toDisplay(total.raw, costRate, ctx.currency), ctx.currency) : EMPTY}</td><td className="jy-profit-num">{money(total.i)}</td><td className="jy-profit-num">{money(total.g)}</td><td className="jy-profit-num">{total.g == null ? EMPTY : marginText(total.g, total.i)}</td></tr></tfoot>
+    </table>
+    {split ? <p>{split}</p> : null}
+    <p>{text.from(keys.length)}</p>
+  </>;
+}
+
 function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: ProfitRow; page: ProfitPageResponse; ctx: Ctx }) {
   const incomeRate = row.rates?.income ?? null, costRate = row.rates?.cost ?? null;
   const income = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, incomeRate, ctx.currency), ctx.currency);
@@ -53,14 +82,18 @@ function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: P
   // 换 Key 的时刻（KEY_CHANGE_RATIO_DIFFERS 的说明用）：定得出写「14:30」，两次读取之间写「15:19–16:05 之间」；带不到就不写时刻
   const keyChangeWhen = (change: { atMs: number | null; between: [number, number] | null } | null | undefined) => change?.between && change.between[0] !== change.between[1]
     ? `${formatZonedTime(change.between[0], ctx.tz)}–${formatZonedTime(change.between[1], ctx.tz)} 之间` : change?.atMs != null ? formatZonedTime(change.atMs, ctx.tz) : null;
-  const verify = verifyView(detail, page, ctx, costRate, keyChangeWhen(detail.expected.keyChange));
+  // 新旧倍率不一样（换 Key 那天）：这天不比差额，写新的一句
+  const verify = detail.keyChangeRatioDiffers ? { text: COPY.detail.verify.keyRatioDiffers, open: false, tone: null } : verifyView(detail, page, ctx, costRate, keyChangeWhen(detail.expected.keyChange));
+  const keys = detail.keys && detail.keys.length >= 2 ? detail.keys : null;
   return <div className="jy-profit-detail">
     <Section title={COPY.detail.income} value={income(detail.income.usd)}>
       <p>{many ? COPY.detail.incomeFromMany(row.channels.length) : COPY.detail.incomeFrom(channelName(row.channels[0]?.channelId))}{admin ? `，${admin}` : ""}。</p>
       {many && detail.income.byChannel?.length ? <ul className="jy-profit-detail__list">{detail.income.byChannel.map((item) => <li key={item.channelId}><span>{channelName(item.channelId)}</span><b>{income(item.usd)}</b></li>)}</ul> : null}
     </Section>
     <Section title={COPY.detail.actual} value={cost(detail.actual.usd)}>
-      {detail.unavailable ? <p>{[detail.unavailable.title, detail.unavailable.detail].filter(Boolean).join("。") || COPY.detail.unavailableUnknown}</p> : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
+      {detail.unavailable ? <p>{[detail.unavailable.title, detail.unavailable.detail].filter(Boolean).join("。") || COPY.detail.unavailableUnknown}</p>
+        : keys ? <KeysTable detail={detail} keys={keys} income={income} cost={cost} incomeRate={incomeRate} costRate={costRate} ctx={ctx} />
+          : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
     </Section>
     <Section title={COPY.detail.gross} value={detail.grossProfitUsd == null ? EMPTY : fmtMoney(toDisplay(detail.income.usd, incomeRate, ctx.currency)! - toDisplay(detail.actual.usd, costRate, ctx.currency)!, ctx.currency)}>
       <p>{COPY.detail.grossFormula}</p>

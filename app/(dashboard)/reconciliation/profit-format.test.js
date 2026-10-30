@@ -17,7 +17,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 
 const { COPY } = await import("./copy.ts");
 const {
-  attentionSuffix, chartDays, dayRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
+  attentionSuffix, arrangeRows, chartDays, keyCells, keyLabel, keyTag, rowUpstream, hasKeyRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
   marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
@@ -171,18 +171,58 @@ test("渠道表默认按毛利从高到低，亏钱的在后面；没算进利�
   assert.deepEqual(nextSort({ key: "gross", dir: "desc" }, "name"), { key: "name", dir: "asc" });
 });
 
-test("点开一个渠道：一天一行，新的在上；已固定写已固定、今天和还在读取写实时、需处理写需处理；没开始算、还没到的不列；亏钱标出来", () => {
-  const r = chan("甲", 100, 60, { daily: [day("10-22", "notStarted"), fixedDay("10-23", 20, 30), day("10-24", "attention", { reason: "OWN_CONSUME_LOG_GAP" }), fixedDay("10-25", 40, 25),
-    day("10-26", "today", { incomeUsd: 8, actualCostUsd: 5, grossUsd: 3 }), day("10-27", "future")] });
-  const rows = dayRows(r, weekPage({ rows: [r] }), ctx);
-  assert.deepEqual(rows.map((x) => [x.label.split(" ")[0], x.state, x.stateText, x.income, x.actual, x.gross, x.margin, x.negative]), [
-    ["10月26日", "live", "实时", "$8.00", "$5.00", "$3.00", "37.5%", false],
-    ["10月25日", "fixed", "已固定", "$40.00", "$25.00", "$15.00", "37.5%", false],
-    ["10月24日", "attention", "需处理", EMPTY, EMPTY, EMPTY, EMPTY, false],
-    ["10月23日", "fixed", "已固定", "$20.00", "$30.00", "−$10.00", "−50.0%", true],
+test("排法：看今天分「有收入 / 没收入 / 已解绑」三组，组内毛利从高到低再按名字；别的范围一张表、已解绑最后；点了表头就是平铺、不分组", () => {
+  const rows = [chan("丙", 10, 12, { activeNow: true }), chan("甲", 50, 20), chan("乙", 30, 10, { activeNow: true }), chan("丁", 5, 1, { bound: false }), chan("戊", 40, 5, { bound: false })];
+  const shape = (arranged) => arranged.groups.map((g) => [g.key, g.title, g.rows.map((r) => r.channels[0].name)]);
+  assert.deepEqual(shape(arrangeRows(rows, { today: true, sort: null }, ctx)), [
+    ["active", "最近 1 小时有收入 · 2", ["乙", "丙"]], ["idle", "最近 1 小时没收入 · 1", ["甲"]], ["unbound", "已解绑 · 2", ["戊", "丁"]],
   ]);
-  assert.match(rows[0].label, /今天$/, "今天写「今天」，别的天写周几");
-  assert.match(rows[1].label, /周[日一二三四五六]$/);
+  assert.deepEqual(shape(arrangeRows(rows, { today: false, sort: null }, ctx)), [
+    ["bound", null, ["甲", "乙", "丙"]], ["unbound", "已解绑 · 2", ["戊", "丁"]],
+  ], "多天：已绑定的按毛利排，已解绑放最后、有标题行");
+  assert.deepEqual(shape(arrangeRows(rows, { today: true, sort: { key: "income", dir: "desc" } }, ctx)), [["flat", null, ["甲", "戊", "乙", "丙", "丁"]]]);
+});
+
+test("排法：详情或感叹号气泡开着时顺序和分组不动，新来的接在自己那组后面；关了再按新数排", () => {
+  const first = arrangeRows([chan("甲", 50, 20), chan("乙", 30, 10)], { today: false, sort: null }, ctx);
+  const later = [chan("乙", 90, 10), chan("甲", 50, 20), chan("丙", 60, 0)];
+  const held = arrangeRows(later, { today: false, sort: null }, ctx, first.layout, true);
+  assert.deepEqual(held.groups[0].rows.map((r) => r.channels[0].name), ["甲", "乙", "丙"]);
+  const free = arrangeRows(later, { today: false, sort: null }, ctx, first.layout, false);
+  assert.deepEqual(free.groups[0].rows.map((r) => r.channels[0].name), ["乙", "丙", "甲"]);
+  const moved = arrangeRows([chan("甲", 50, 20, { activeNow: true })], { today: true, sort: null }, ctx, arrangeRows([chan("甲", 50, 20)], { today: true, sort: null }, ctx).layout, true);
+  assert.equal(moved.groups[0].key, "idle", "开着气泡时这行不跳组");
+});
+
+const KEY = (name, extra = {}) => ({ tokenId: name, name, upstream: { stationId: "u1", name: "awsb", provider: "newapi" }, state: "active", firstDay: D("10-27"), lastDay: D("10-27"), days: 1, ratio: 0.5, ratioKind: "group",
+  costUsd: 20, rawUsd: 40, incomeUsd: 40, incomeBasis: "raw", grossProfitUsd: 20, grossMarginRate: 0.5, pendingDays: 0, ...extra });
+
+test("名字下面的小字：只有一把 Key 写「上游 · Key ×倍率」（整数写 ×1.0、读不到倍率不写）；两把以上不写、下面挂 Key 行", () => {
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("oai-16")] })), "awsb · oai-16 ×0.5");
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("oai-16", { ratio: 1 })] })), "awsb · oai-16 ×1.0");
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("oai-16", { ratio: null })] })), "awsb · oai-16");
+  const two = chan("甲", 1, 1, { keys: [KEY("a"), KEY("b", { state: "swapped" })] });
+  assert.equal(hasKeyRows(two), true); assert.equal(rowUpstream(two), "awsb", "两把以上只写上游名：在用那把 Key 的上游");
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("a", { state: "swapped", upstream: { name: "云帆" } }), KEY("b", { state: "unbound" })] })), "拼车团队", "没有在用的（已解绑）写行上的上游");
+  assert.equal(rowUpstream(chan("甲", 1, 1, { keys: [KEY("n", { upstream: { name: "云帆" } }), KEY("o", { state: "swapped" })] })), "云帆", "换过上游：写在用那把的上游");
+});
+
+test("Key 行：名字「oai-16 ×0.5」，换过上游前面加上游名；标签看多天写日子（跨月写全）、看一天只写在用 / 已换掉；已解绑渠道的最后一把不标", () => {
+  assert.equal(keyLabel(KEY("oai-16"), false), "oai-16 ×0.5"); assert.equal(keyLabel(KEY("oai-16", { upstream: { name: "云帆" } }), true), "云帆 · oai-16 ×0.5");
+  const tag = (key, single) => keyTag(key, single, D("10-20"), TZ, NOW);
+  assert.equal(tag(KEY("a", { firstDay: D("10-26") }), false), "在用 · 26日起");
+  assert.equal(tag(KEY("a", { firstDay: D("10-01") }), false), "在用 · 20日起", "这段开始以前就在用：从这段的第一天写起");
+  assert.equal(tag(KEY("b", { state: "swapped", firstDay: D("10-23"), lastDay: D("10-25") }), false), "已换掉 · 用了 23日–25日");
+  assert.equal(keyTag(KEY("b", { state: "swapped", firstDay: D("09-29"), lastDay: D("10-02") }), false, D("09-20"), TZ, NOW), "已换掉 · 用了 9月29日–10月2日");
+  assert.equal(tag(KEY("a"), true), "在用"); assert.equal(tag(KEY("b", { state: "swapped" }), true), "已换掉"); assert.equal(tag(KEY("c", { state: "unbound" }), false), null);
+});
+
+test("Key 行的数：收入分到的、成本、毛利；收入读不到毛利写「—」；按人民币各按各自汇率", () => {
+  const r = chan("甲", 1, 1, { rates: { income: 7, cost: 7.2, costBasis: "usage" } });
+  assert.deepEqual(keyCells(KEY("a"), chan("甲", 1, 1), ctx), { income: 40, actual: 20, gross: 20, margin: 0.5 });
+  assert.equal(keyCells(KEY("a", { incomeUsd: null }), chan("甲", 1, 1), ctx).gross, null);
+  const cny = keyCells(KEY("a"), r, { ...ctx, currency: "CNY" });
+  assert.equal(Math.round(cny.income * 100) / 100, 280); assert.equal(Math.round(cny.actual * 100) / 100, 144);
 });
 
 test("每天的毛利：多天才有；一天 = 算进利润的渠道这天的数相加；今天和没固定的天浅色；需处理没算进来的渠道不加；一个数都没有的天不画", () => {
@@ -243,6 +283,7 @@ test("「核对上游扣费」的结论：对得上、多扣 / 少扣、换了 K
   assert.deepEqual(verifyView(base({ usd: 9.26, rate: 0.085, state: "over" }), p, ctx, null), { text: "多扣 $9.26，对不上", open: true, tone: "crit" });
   assert.deepEqual(verifyView(base({ usd: -0.7, rate: -0.05, state: "under" }), p, ctx, null), { text: "少扣 $0.70，对不上", open: true, tone: "crit" });
   assert.deepEqual(verifyView(base({ usd: 0.01, rate: 0, state: "within" }), p, ctx, null), { text: "对得上", open: false, tone: null });
+  assert.deepEqual(verifyView(base(null, { reason: "REVENUE_ON_LATER_BINDING" }), p, ctx, null), { text: "这天换了上游，这天不比差额", open: false, tone: null });
   assert.deepEqual(verifyView(base(null, { reason: "KEY_CHANGE_RATIO_DIFFERS" }), p, ctx, null), { text: "这天换了 Key，不比差额", open: false, tone: null });
   assert.deepEqual(verifyView(base(null, { reason: "KEY_SHARED" }), p, ctx, null), { text: "这把 Key 别处也在用", open: false, tone: null });
   assert.deepEqual(verifyView({ ...base(null), day: p.today }, p, ctx, null), { text: "明天出", open: false, tone: null });

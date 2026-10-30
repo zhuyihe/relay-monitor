@@ -2,10 +2,11 @@
 // 不含 JSX，页面组件和单元测试（profit-format.test.js，node 直接跑）共用；导入带 .js 后缀。
 // 钱：接口给美元原币，整页按 displayCurrency 换算——收入按自营站点的汇率、成本按这个上游的汇率（行上的 rates）；
 // 按美元显示时不换算。金额不写 0（算不出的写「—」），写法按 design/ui-copy-spec.md §5.7、§6、§7。
-import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow, ReconciliationCurrency } from "../../../lib/client";
+import type { ProfitDetailResponse, ProfitKeyRow, ProfitPageResponse, ProfitRow, ReconciliationCurrency } from "../../../lib/client";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view.js";
 import { EMPTY, MINUS, RATE_UNSET_USD, UPSTREAM_GONE, formatAsOfTime, formatCompact, formatDayKey, formatPct, formatUnitPrice, formatZonedTime, weekdayOfDayKey } from "../../../lib/format.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel, tzOffsetMs } from "../../../lib/business-time.js";
+import { keepOrder } from "../../../lib/keep-order.js";
 import { COPY } from "./copy"; // 同目录的 .ts 不带后缀（Turbopack 不认 "./copy.js"；node 跑测试时 profit-format.test.js 的 resolve 钩子补 .ts）
 
 // zoneOf：这一行上游算一天的时区（从绑定配置里取），只给 DAY_BOUNDARY_UNSUPPORTED 那一句写时差用
@@ -147,8 +148,37 @@ export function gapReasonText(reason: string | null | undefined, missingModels: 
 
 // ---- 一行 ----
 export const rowName = (row: ProfitRow) => row.channels.map((channel) => channel.name || `渠道 ${channel.channelId}`).join("、") || EMPTY;
-// 名字下面的小字只写上游名
-export const rowUpstream = (row: ProfitRow) => row.upstream?.name || UPSTREAM_GONE;
+export const isUnbound = (row: ProfitRow) => row.bound === false;
+// 这段时间用过两把以上 Key：下面一直挂着 Key 行；只有一把（或接口没给 keys）：名字下面小字写「上游 · Key ×倍率」；两把以上只写上游名
+export const hasKeyRows = (row: ProfitRow) => (row.keys?.length ?? 0) >= 2;
+const ratioPart = (ratio: number | null | undefined) => (finite(ratio) ? ` ×${ratioText(ratio)}` : "");
+export function rowUpstream(row: ProfitRow): string {
+  // 两把以上：只写上游名——在用那把 Key 的上游（换过上游也对）；没有在用的（已解绑）写行上的上游
+  if (hasKeyRows(row)) return row.keys!.find((key) => key.state === "active")?.upstream?.name ?? row.upstream?.name ?? UPSTREAM_GONE;
+  const key = row.keys?.[0];
+  const upstream = key?.upstream?.name ?? row.upstream?.name ?? UPSTREAM_GONE;
+  return `${upstream} · ${key?.name ?? row.key?.name ?? EMPTY}${ratioPart(key ? key.ratio : row.key?.groupRatio)}`;
+}
+// Key 行的名字「oai-16 ×0.5」；这段时间换过上游，前面加上游名「云帆 · oai-16 ×0.5」
+export const swappedUpstream = (row: ProfitRow) => new Set((row.keys || []).map((key) => key.upstream?.stationId)).size > 1;
+export const keyLabel = (key: { name: string; ratio: number | null; upstream: { name: string | null } }, withUpstream: boolean) =>
+  `${withUpstream ? `${key.upstream?.name ?? UPSTREAM_GONE} · ` : ""}${key.name}${ratioPart(key.ratio)}`;
+// Key 行的数：和渠道行同一套换算（收入按自营站点汇率、成本按这个上游的汇率）；读不到的写「—」
+export function keyCells(key: Pick<ProfitKeyRow, "incomeUsd" | "costUsd">, row: ProfitRow, ctx: Ctx) {
+  const income = toDisplay(key.incomeUsd, row.rates?.income, ctx.currency), actual = toDisplay(key.costUsd, row.rates?.cost, ctx.currency);
+  const gross = income != null && actual != null ? income - actual : null;
+  return { income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null };
+}
+// Key 行后面的标签：看多天写「在用 · 27日起」「已换掉 · 用了 23日–27日」（跨月写全）；看一天只写「在用」「已换掉」；已解绑渠道的最后一把不标
+export function keyTag(key: { state: ProfitKeyRow["state"]; firstDay: string; lastDay: string }, singleDay: boolean, rangeFirst: string, tz: string, now: number): string | null {
+  if (key.state === "unbound") return null;
+  if (singleDay) return key.state === "active" ? COPY.table.keyActive : COPY.table.keySwapped;
+  const first = key.firstDay < rangeFirst ? rangeFirst : key.firstDay;
+  const day = (value: string) => Number(value.slice(8, 10)) + "日";
+  const full = (value: string) => formatDayKey(value, tz, now);
+  if (key.state === "active") return COPY.table.keyActiveSince(first.slice(0, 7) === dayKeyInTz(now, tz).slice(0, 7) ? day(first) : full(first));
+  return COPY.table.keySwappedRange(first.slice(0, 7) === key.lastDay.slice(0, 7) ? `${day(first)}–${day(key.lastDay)}` : `${full(first)}–${full(key.lastDay)}`);
+}
 // 毛利率 = 毛利 ÷ 收入；收入是 0 或毛利算不出就不写
 export function marginText(gross: number | null | undefined, income: number | null | undefined): string {
   return gross != null && income != null && income > 0 ? formatPct(gross / income) : EMPTY;
@@ -160,8 +190,8 @@ export type SortDir = "asc" | "desc";
 export type Sort = { key: SortKey; dir: SortDir };
 export const DEFAULT_SORT: Sort = { key: "gross", dir: "desc" };
 // 点一列表头：已经按这一列排着就换方向，否则按这一列排（名字从小到大，数从大到小）
-export const nextSort = (current: Sort, key: SortKey): Sort =>
-  current.key === key ? { key, dir: current.dir === "desc" ? "asc" : "desc" } : { key, dir: key === "name" ? "asc" : "desc" };
+export const nextSort = (current: Sort | null, key: SortKey): Sort =>
+  current?.key === key ? { key, dir: current.dir === "desc" ? "asc" : "desc" } : { key, dir: key === "name" ? "asc" : "desc" };
 export function rowCells(row: ProfitRow, ctx: Ctx) {
   const money = rowMoney(row, ctx.currency);
   return {
@@ -180,18 +210,34 @@ export function sortRows(rows: ProfitRow[], sort: Sort, ctx: Ctx): ProfitRow[] {
   });
 }
 
-// 点开一个渠道：一天一行，新的在上。没开始算、还没到的日子不列
-export type DayState = "live" | "fixed" | "attention";
-export type DayRow = { day: string; label: string; income: string; actual: string; gross: string; margin: string; negative: boolean; state: DayState; stateText: string };
-export function dayRows(row: ProfitRow, page: ProfitPageResponse, ctx: Ctx): DayRow[] {
-  const dayLabel = (day: string) => `${formatDayKey(day, ctx.tz, ctx.now)} ${day === page.today ? COPY.table.day.today : weekdayOfDayKey(day)}`;
-  return [...row.daily].filter((cell) => cell.state !== "notStarted" && cell.state !== "future").reverse().map((cell) => {
-    const income = toDisplay(cell.incomeUsd, row.rates?.income, ctx.currency), actual = toDisplay(cell.actualCostUsd, row.rates?.cost, ctx.currency);
-    const gross = income != null && actual != null ? income - actual : null;
-    const state: DayState = cell.state === "fixed" ? "fixed" : cell.state === "attention" ? "attention" : "live";
-    return { day: cell.day, label: dayLabel(cell.day), income: fmtMoney(income, ctx.currency), actual: fmtMoney(actual, ctx.currency), gross: fmtMoney(gross, ctx.currency),
-      margin: marginText(gross, income), negative: gross != null && gross < 0, state, stateText: COPY.table.day[state] };
-  });
+// 渠道表怎么分组、怎么排（表格和手机卡片共用）：
+//   只在看「今天」时分三组：最近 1 小时有收入（activeNow）/ 没收入（包括今天一直没卖的、停用的）/ 已解绑（unbound），每组里按毛利从高到低、一样的按名字；
+//   看别的范围：绑着的渠道按毛利从高到低排成一张表，已解绑的放最后（前面一行「已解绑 · N」）；
+//   点了表头（sort 不是 null）：按那一列排，不分组、没有小标题。
+export type RowGroupKey = "active" | "idle" | "bound" | "unbound" | "flat";
+export type RowGroup = { key: RowGroupKey; title: string | null; rows: ProfitRow[] };
+const GROUP_ORDER: RowGroupKey[] = ["active", "idle", "bound", "unbound", "flat"];
+export function groupKeyOf(row: ProfitRow, today: boolean, sorted: boolean): RowGroupKey {
+  if (sorted) return "flat";
+  return isUnbound(row) ? "unbound" : today ? (row.activeNow ? "active" : "idle") : "bound";
+}
+const groupTitle = (key: RowGroupKey, rows: ProfitRow[]) => (key === "active" ? COPY.table.groupActive(channelCount(rows)) : key === "idle" ? COPY.table.groupIdle(channelCount(rows)) : key === "unbound" ? COPY.table.groupUnbound(channelCount(rows)) : null);
+export type RowLayout = { ids: string[]; groups: Record<string, RowGroupKey> };
+// prev + hold：开着计算明细或感叹号气泡时先别动——沿用上次的顺序和分组，新出现的行放在自己那组最后，没了的去掉（keepOrder，和上游列表同一个函数）；hold 为假就按新的排
+export function arrangeRows(rows: ProfitRow[], { today, sort }: { today: boolean; sort: Sort | null }, ctx: Ctx, prev: RowLayout | null = null, hold = false): { groups: RowGroup[]; layout: RowLayout } {
+  const sorted = !!sort;
+  const nextGroup: Record<string, RowGroupKey> = Object.fromEntries(rows.map((row) => [row.rowKey, groupKeyOf(row, today, sorted)]));
+  const byRowKey = new Map(rows.map((row) => [row.rowKey, row]));
+  const ordered: string[] = sorted ? sortRows(rows, sort!, ctx).map((row) => row.rowKey)
+    : GROUP_ORDER.flatMap((key) => sortRows(rows.filter((row) => nextGroup[row.rowKey] === key), DEFAULT_SORT, ctx).map((row) => row.rowKey));
+  const ids = prev && hold ? keepOrder(prev.ids, ordered, true) : ordered;
+  const groups: Record<string, RowGroupKey> = Object.fromEntries(ids.map((id) => [id, (prev && hold ? prev.groups[id] : undefined) ?? nextGroup[id]]));
+  const out: RowGroup[] = [];
+  for (const key of GROUP_ORDER) {
+    const list = ids.filter((id) => groups[id] === key).map((id) => byRowKey.get(id)!);
+    if (list.length) out.push({ key, title: groupTitle(key, list), rows: list });
+  }
+  return { groups: out, layout: { ids, groups } };
 }
 
 // ---- 每天的毛利（小柱状图，多天才有）----
