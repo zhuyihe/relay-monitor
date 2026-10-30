@@ -1148,7 +1148,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // D 那天新旧两把都算，D 之后只算新的
     const days = [];
     for (let day = fromDay; day <= today; day = shiftDayLabel(day, 1)) days.push(day);
-    const dayRows = days.flatMap((billDate) => (billDate === fromDay ? [old, ref] : [ref]).map((key) => ({ billDate, ...key })));
+    // D 那天新旧两把都算。重新打开的绑定：旧 Key 只算到解绑那天为止（解绑那一刻起它就不是这个渠道的了，可能已经给了别的渠道），
+    // 所以新 Key 第一次有用量的那天晚于解绑那天时，那天和以后只写新 Key
+    const archivedDay = reopen && rule.archivedAtMs != null ? dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) : null;
+    const dayRows = days.flatMap((billDate) => (billDate === fromDay && (archivedDay == null || fromDay <= archivedDay) ? [old, ref] : [ref]).map((key) => ({ billDate, ...key })));
     // D 到昨天里已经固定（账本里有）的天：写重结请求重算；超过 31 天的不动
     const recomputed = new Set(), tooOldDays = [], resettleDates = [];
     if (fromDay < today) {
