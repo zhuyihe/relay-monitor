@@ -49,7 +49,7 @@ import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBill
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, RESETTLE_REASON_KEY_OWNER, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -821,7 +821,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 其他日子（普通请求日、RESETTLE_TOO_OLD 的日子）手动读取也照样判，读出来少了一半多先挡下、记 RESETTLE_SHRUNK
       const confirmShrink = origin === "manual" && confirmed === true && state?.manualReason === "RESETTLE_SHRUNK";
       // 程序自己发起的重结（以前按解绑那一刻切开的日子改成整天算，floorResettleRound）：旧数是切开的半天，新数本来就该少一块（收入记到后绑的那条上），不判「少一半以上」
-      const autoConfirm = state?.resettleReason === RESETTLE_REASON_FLOOR || state?.resettleReason === RESETTLE_REASON_KEY_OWNER;
+      const autoConfirm = state?.resettleReason === RESETTLE_REASON_FLOOR;
       result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, confirmedAfter, autoConfirm, trigger, priorState: state });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
@@ -1099,28 +1099,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return rows;
   }
 
-  // 这条绑定要把 tokenId 这把 Key 记到 [first, last] 这几天：同一个上游里比它先绑的别的绑定在这几天也记着这把 Key（没记的按它现在的那把）、
-  // 那几天已经固定（账本里有）、也没超过重算的最远天数的，返回 [{ ruleId, dates }]；这几天那条绑定的这把 Key 不再算
-  async function keyHolderResettles(rule, tokenId, first, last, now) {
-    const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId && laterBound(rule, other)
-      && (() => { const range = bindingDayRange(other); return range.from <= last && range.to >= first; })());
-    if (!peers.length) return [];
-    const ids = peers.map((other) => other.id);
-    const [theirs, facts] = await Promise.all([repository.listDayKeys(ids, first, last).catch(() => ({})), repository.listLedgerDayFacts(ids, first, last).catch(() => [])]);
-    const fixed = new Set(facts.map((fact) => `${fact.ruleId}|${fact.billDate}`));
-    const result = [];
-    for (const other of peers) {
-      const range = bindingDayRange(other), dates = [];
-      for (let day = first; day <= last; day = shiftDayLabel(day, 1)) {
-        if (day < range.from || day > range.to || !fixed.has(`${other.id}|${day}`)) continue;
-        if (now - dayStartInTz(shiftDayLabel(day, 1), other.timezone) > RESETTLE_MAX_AGE_MS) continue;
-        if ((theirs[other.id]?.[day] || [{ tokenId: other.tokenId }]).some((key) => Number(key.tokenId) === Number(tokenId))) dates.push(day);
-      }
-      if (dates.length) result.push({ ruleId: other.id, dates });
-    }
-    return result;
-  }
-
   // 换 Key 时找新 Key 哪天开始用的（D）：从今天往前一天一天查新 Key 在上游的用量，碰到第一个没用量的天就停，最多查 31 天，也不早于这条绑定的开始日；
   // 查到的最早有用量的那天是 D，一天都没有就是今天。今天本身没用量不算断（可能刚过零点、或上游账单还没到），从昨天接着查。只读上游，一天一个请求
   const SWAP_LOOKBACK_DAYS = 31;
@@ -1200,10 +1178,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       recomputed.add(state.billDate);
       return { billDate: state.billDate, state: settlementRecheck({ window, state, blocker: null, now }) };
     });
-    // 新 Key 这几天改记在这条绑定上：同一个上游里先绑的别的绑定这几天也记着这把 Key、而且这几天已经固定的，那几天重算（这把 Key 的成本拿掉，一把 Key 一天只算一次）
-    const resettleOthers = fromDay < today ? await keyHolderResettles(rule, ref.tokenId, fromDay, yesterday, now) : [];
     const extra = { now, fillDayKeys, replaceDayKeys: { dates: [...days, ...before.map((state) => state.billDate)], rows: [...dayRows, ...before.map((state) => ({ billDate: state.billDate, ...ref }))] },
-      resettleDates, resettleOthers, recheckStates };
+      resettleDates, recheckStates };
     let result;
     try { result = await repository.changeRuleKey(rule.id, built.plan, { detectedAt: now, extra, reopen }); } catch { throw codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试"); }
     if (result.conflict) throw codedError("KEY_ALREADY_BOUND", "这把 Key 已经在别的渠道算利润了");
