@@ -9,7 +9,7 @@
 // 用法：const fake = createFakeSub2Api({ keys, dayUsageUsd }); 在 fetch 的假实现里 `const hit = fake.handle(url); if (hit) return hit;`
 import { dayKeyInTz } from "../../lib/business-time.js";
 
-export function createFakeSub2Api({ accountId = 42, keys, dayUsageUsd, now = () => Date.now() }) {
+export function createFakeSub2Api({ accountId = 42, keys, dayUsageUsd, standardUsd = null, now = () => Date.now() }) {
   const calls = [];
   const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status >= 300 ? status : 0, data }) });
   const byId = new Map(keys.map((key) => [Number(key.id), key]));
@@ -37,7 +37,9 @@ export function createFakeSub2Api({ accountId = 42, keys, dayUsageUsd, now = () 
         const ids = id != null ? [Number(id)] : [...byId.keys()];
         const days = datesBetween(url.searchParams.get("start_date"), url.searchParams.get("end_date"));
         const total = ids.reduce((sum, keyId) => sum + days.reduce((daySum, day) => daySum + (day > today ? 0 : Number(dayUsageUsd(keyId, day)) || 0), 0), 0);
-        return reply(200, { total_cost: total, total_actual_cost: total });
+        // standardUsd(keyId, day)：这天这把 Key 的标准计费（原价用量，total_cost）；不给就和实际扣除一样（倍率 1）；给 null 的就不返回这个字段（老部署）
+        const standard = standardUsd === false ? null : ids.reduce((sum, keyId) => sum + days.reduce((daySum, day) => daySum + (day > today ? 0 : Number((standardUsd || dayUsageUsd)(keyId, day)) || 0), 0), 0);
+        return reply(200, standard == null ? { total_actual_cost: total } : { total_cost: standard, total_actual_cost: total });
       }
       return reply(404, null);
     },

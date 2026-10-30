@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { identifyChannelsCached } from "./key-agent-identify.js";
 import { normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
-import { dayKeyInTz } from "../lib/business-time.js";
+import { dayKeyInTz, shiftDayLabel } from "../lib/business-time.js";
 import { BINDABLE_UPSTREAM_TYPES, hostOf } from "../lib/channel-binding.js";
 import { reconciliationAccountingStart } from "../lib/reconciliation-contract.js";
 import { matchCostStations } from "./own-helpers.js";
@@ -208,6 +208,18 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     }
     const upstream = rt.store.get(upstreamStationId);
     if (!upstream || upstream.isOwn || upstream.archivedAt || !BILLING_TYPES.has(upstream.type)) throw codedError("UPSTREAM_NOT_FOUND", "请先选这个渠道用的是哪个上游");
+    // 同一个上游、昨天或今天才解绑的：重新打开那条（等于撤销解绑），Key 不一样再走换 Key；更早解绑的、换了上游的：新建一条，从今天 0 点算（k 规格 §二.1）
+    let archived;
+    try { archived = await reconciliation().listRecentlyArchivedRules(now() - 3 * 24 * 3600 * 1000, { anchoredOnly: false }); } catch { throw codedError("HISTORY_UNAVAILABLE", "最近解绑的绑定暂时读不到，请稍后再试"); }
+    const stopped = archived.filter((item) => item.ownStationId === ownStationId && item.archivedAtMs != null && item.channels.some((member) => Number(member.channelId) === id))
+      .sort((x, y) => y.archivedAtMs - x.archivedAtMs)[0];
+    const yesterday = stopped ? shiftDayLabel(dayKeyInTz(now(), stopped.timezone), -1) : null;
+    if (stopped && stopped.upstreamStationId === upstream.id && stopped.channels.length === 1 && dayKeyInTz(stopped.archivedAtMs, stopped.timezone) >= yesterday) {
+      // 选的就是原来那把：重新打开（它被别处占了就是选的这把被占了，报错没错）；选的是另一把：重新打开和换 Key 一个事务，不去占旧 Key
+      if (Number(stopped.tokenId) === token) { await reconciliation().reopenRule(stopped.id); return { changed: true, ruleId: stopped.id, reopened: true }; }
+      const result = await reconciliation().changeRuleKeyManual(stopped.id, token, { reopen: true });
+      return { changed: true, ruleId: stopped.id, reopened: true, ...result };
+    }
     // 选 Key 就是在说这把 Key 只给这个渠道用：不再问「这把 Key 还给别处用吗」
     const declaration = normalizeCoverageDeclaration({ answer: "none" });
     const connected = await connectGroups(ownStationId, [{ groupKey: groupKeyOf(upstream.id, token), upstreamStationId: upstream.id, tokenId: token, channelIds: [id], declaration }], () => channel.revision);

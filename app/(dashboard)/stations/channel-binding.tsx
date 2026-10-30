@@ -146,8 +146,8 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
   const submit = async () => {
     setSaving(true);
     try {
-      await api("/api/reconciliation/channels/select-key", { body: { ownStationId, channelId: channel?.channelId, upstreamStationId: upstream.id, tokenId } });
-      message.success(CHANNEL_BINDING.done.bound(channel?.name ?? "", upstream.name));
+      const result: any = await api("/api/reconciliation/channels/select-key", { body: { ownStationId, channelId: channel?.channelId, upstreamStationId: upstream.id, tokenId } });
+      message.success(CHANNEL_BINDING.done.bound(channel?.name ?? "", upstream.name) + boundNote(result));
       onClose();
       await onDone();
     } catch (error: any) {
@@ -237,6 +237,15 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
     <p className="jy-swap-note"><Sym kind="info" /><span>{M.note}</span></p>
     {saving ? <p className="jy-caption jy-swap-working" role="status">{M.working}</p> : null}
   </Modal>;
+}
+
+// 绑定好以后，往前查到了新 Key 从哪天开始有用量（重新绑回最近解绑的渠道，后台返回 fromDay、recomputedDays）：后面接「，从 10月27日起按这把 Key 算，补算了 2 天」；
+// 没有 fromDay、从今天起、最近都没有用量时什么也不接
+export function boundNote(result: any): string {
+  const D = CHANNEL_BINDING.done;
+  if (!result?.fromDay || result.noRecentUsage || String(result.fromDay) === dayKeyInTz(Date.now(), DEFAULT_BUSINESS_TIME_ZONE)) return "";
+  const days = Array.isArray(result.recomputedDays) ? result.recomputedDays.length : Number(result.recomputedDays) || 0;
+  return D.boundFrom(formatDayKey(String(result.fromDay), DEFAULT_BUSINESS_TIME_ZONE)) + (days > 0 ? D.boundRecomputed(days) : "");
 }
 
 // 换好以后顶上的提示：后台返回 fromDay（新 Key 第一天有用量的那天，YYYY-MM-DD）、recomputedDays（补算的天，数或日期列表）、tooOld（31 天以前没自动重算的 { from, to }）、noRecentUsage；

@@ -114,15 +114,20 @@ export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" 
   incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null };
 // 差额的状态：over / under 对不上（多扣 / 少扣）、within 门槛以内、today 明天出、reading 还在读取、uncomputable 算不了（reason 给原因）、attention 需处理、notStarted 还没开始算
 export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" | "none";
+// 一行（一个渠道）范围里用过的每把 Key（用户 10-30 定）：收入是读的时候分的（只有一把全归它；几把按原价用量比例；读不到倍率按成本比例），不存
 export type ProfitKeyRow = {
-  tokenId: number | string; name: string; upstream: { stationId: string; name: string | null; provider: string | null };
-  // unbound：已解绑渠道的最后一把，不标「在用」也不标「已换掉」
+  tokenId: number; name: string;
+  upstream: { stationId: string; name: string | null; provider: "newapi" | "sub2api" | null };
+  // active 在绑的渠道现在用的那把；unbound 已解绑的渠道最后用的那把（不标标签）；swapped 已换掉的
   state: "active" | "swapped" | "unbound"; firstDay: string; lastDay: string; days: number;
+  // 倍率：New API 是分组倍率，Sub2API 是 实际扣除 ÷ 标准计费；读不到是 null。rawUsd 原价用量
   ratio: number | null; ratioKind: "group" | "actual_over_standard";
   costUsd: number | null; rawUsd: number | null; incomeUsd: number | null; incomeBasis: "single" | "raw" | "cost" | null;
-  grossProfitUsd: number | null; grossMarginRate: number | null; pendingDays: number;
+  grossProfitUsd: number | null; grossMarginRate: number | null;
+  // 范围里有几天这把 Key 的收入份额没分（这天还没固定、只有一边固定）：数不进 incomeUsd，成本照进 costUsd
+  pendingDays: number;
 };
-export type ProfitDetailKey = Pick<ProfitKeyRow, "tokenId" | "name" | "upstream" | "ratio" | "ratioKind" | "costUsd" | "rawUsd" | "incomeUsd" | "incomeBasis" | "grossProfitUsd" | "grossMarginRate">;
+export type ProfitDetailKey = Omit<ProfitKeyRow, "state" | "firstDay" | "lastDay" | "days" | "pendingDays">;
 export type ProfitRow = {
   rowKey: string; ruleIds: string[]; channels: { channelId: number; name: string | null }[];
   upstream: { stationId: string; name: string | null; provider: string | null };
@@ -130,6 +135,7 @@ export type ProfitRow = {
   // 页面换算用的汇率：收入按自营站点、成本按这个上游；没设置是 null（按美元显示）
   rates: { income: number | null; cost: number | null; costBasis: "usage" | "fixed" | null };
   startedOn: string | null; startedAt: number | null; counted: boolean;
+  // 一个渠道一行（rowKey `ch:<自营站点>:<渠道>`）：bound 在绑着的，unboundOn 已解绑的那天（整天算，之后不算）；毛利率 = 毛利 ÷ 收入，没收入是 null
   incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
   gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };
   // 提示类的感叹号（今天提醒换 Key）：这一行照读到的数算、进合计，不是需处理
@@ -139,9 +145,9 @@ export type ProfitRow = {
     shrunk: { side: "revenue" | "cost" | "both"; before: { revenueUsd: number | null; costUsd: number | null }; after: { revenueUsd: number | null; costUsd: number | null } } | null } | null;
   excludedDays: number; daily: ProfitDayCell[];
   // 一个渠道一行：现在还绑着吗、哪天解绑的（以前的数留在页面里）；渠道合计 = keys 相加；最近 1 小时有收入（只看今天时有，别的范围 null）
-  bound?: boolean; unboundOn?: string | null; grossMarginRate?: number | null; activeNow?: boolean | null; lastSaleAt?: number | null;
+  bound: boolean; unboundOn: string | null; grossMarginRate: number | null; activeNow: boolean | null; lastSaleAt: number | null;
   // 这段时间用过的每把 Key，在用的排最前
-  keys?: ProfitKeyRow[];
+  keys: ProfitKeyRow[];
   latestSettledGap: { day: string; usd: number | null; state: "over" | "under" | "within" | null; reason: string | null } | null;
 };
 export type ProfitPageResponse = {
@@ -172,8 +178,9 @@ export type ProfitDetailResponse = {
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
   // 固定这天时自营站点的设置一直读不到（R2）
   settingUnreadable?: boolean;
-  // 这天用了不止一把 Key：每把的数、收入怎么分、这天有没有换上游、新旧倍率是否不一样
-  keys?: ProfitDetailKey[]; split?: { basis: "single" | "raw" | "cost" | "pending"; shares: { tokenId: number | string; percent: number }[] };
+  // 这一天按 Key 分开的数；split 是收入怎么分的（pending：这天还没固定或没法分），swappedUpstream 这天用了不同上游的 Key，keyChangeRatioDiffers 这天几把 Key 倍率不一样
+  keys?: ProfitDetailKey[];
+  split?: { basis: "single" | "raw" | "cost" | "pending"; shares: { tokenId: number; percent: number }[] };
   swappedUpstream?: boolean; keyChangeRatioDiffers?: boolean;
 };
 export type WorkflowAction = {
