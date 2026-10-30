@@ -390,14 +390,14 @@ test("按 Key 算利润（近 7 天）：换过 Key 的渠道标签带日子；�
   const week = { firstDay: "2026-10-03", lastDay: PROFIT_TODAY };
   const rows = [
     { ...profitRow("rule-1", "Rule A", { income: 8, cost: 3 }), bound: true, keys: [fixtureKey("oai-A", { ...week, days: 7, incomeUsd: 8, costUsd: 3, rawUsd: 6, grossProfitUsd: 5 })] },
-    // 近 7 天里 10月5日换了 Key
+    // 近 7 天里 10月6日换了 Key（换 Key 那天新旧两把都算，旧的最后一天 = 新的第一天）
     { ...profitRow("rule-2", "Rule B", { income: 10, cost: 4 }), bound: true, keys: [
       fixtureKey("oai-16", { firstDay: "2026-10-06", lastDay: PROFIT_TODAY, days: 4, incomeUsd: 6, costUsd: 2.4, rawUsd: 4.8, grossProfitUsd: 3.6, incomeBasis: "raw" }),
-      fixtureKey("oai-01", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-05", days: 3, ratio: 0.8, incomeUsd: 4, costUsd: 1.6, rawUsd: 2, grossProfitUsd: 2.4, incomeBasis: "raw" })] },
+      fixtureKey("oai-01", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-06", days: 4, ratio: 0.8, incomeUsd: 4, costUsd: 1.6, rawUsd: 2, grossProfitUsd: 2.4, incomeBasis: "raw" })] },
     // 换过上游
     { ...profitRow("rule-3", "Rule C", { income: 6, cost: 2 }), bound: true, keys: [
       fixtureKey("sk-new", { upstream: other, firstDay: "2026-10-07", lastDay: PROFIT_TODAY, days: 3, incomeUsd: 3, costUsd: 1, rawUsd: 2, grossProfitUsd: 2, incomeBasis: "raw" }),
-      fixtureKey("sk-old", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-06", days: 4, incomeUsd: 3, costUsd: 1, rawUsd: 2, grossProfitUsd: 2, incomeBasis: "raw" })] },
+      fixtureKey("sk-old", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-07", days: 5, incomeUsd: 3, costUsd: 1, rawUsd: 2, grossProfitUsd: 2, incomeBasis: "raw" })] },
     { ...profitRow("rule-4", "Rule D", { income: 1, cost: 0.4 }), bound: false, unboundOn: "2026-10-05", keys: [fixtureKey("oai-D", { state: "unbound", firstDay: "2026-10-03", lastDay: "2026-10-05", days: 3, incomeUsd: 1, costUsd: 0.4, rawUsd: 0.8, grossProfitUsd: 0.6 })] },
   ];
   const { page } = await openDailyPage(t, { rows, viewport: { width: 1440, height: 900 }, pageOf: (body) => profitPage(rows, { preset: body.preset === "7d" ? "7d" : "today", customPreset: body.preset }) });
@@ -406,7 +406,7 @@ test("按 Key 算利润（近 7 天）：换过 Key 的渠道标签带日子；�
   assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupUnbound(1)], "多天只有「已解绑」一行");
   assert.deepEqual(await page.locator(".jy-profit-row__line strong").allInnerTexts(), ["Rule B", "Rule A", "Rule C", "Rule D"], "绑着的按毛利排、已解绑最后");
   assert.deepEqual((await page.locator(".jy-profit-keyrow td:first-child").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()), [
-    "oai-16 ×0.5在用 · 6日起", "oai-01 ×0.8已换掉 · 用了 3日–5日", "云帆 · sk-new ×0.5在用 · 7日起", "Fixture upstream · sk-old ×0.5已换掉 · 用了 3日–6日"]);
+    "oai-16 ×0.5在用 · 6日起", "oai-01 ×0.8已换掉 · 用了 3日–6日", "云帆 · sk-new ×0.5在用 · 7日起", "Fixture upstream · sk-old ×0.5已换掉 · 用了 3日–7日"]);
   assert.equal(await page.locator(".jy-profit-row.is-clickable").count(), 0);
   await page.mouse.move(5, 5);
   if (process.env.UI_SHOT_DIR) { await rowOf(page, "Rule D").scrollIntoViewIfNeeded(); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-7d-1440x900.png` }); }
