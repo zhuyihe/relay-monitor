@@ -753,8 +753,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     };
     const liveUsable = (ruleId, live) => { const piece = resultAt(live.key, ruleId, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`); return !!piece && countsInSummary(piece); };
     const dropLive = new Set(); // 今天：同渠道的另一条没读到，这条今天也不算
+    const unreadToday = new Set(); // 今天：已解绑的那条没读成、收入记在后绑的那条上（它读成了）：不拖垮整行，行上亮「成本可能少算了」
+    const usableToday = (item, day) => plan.get(item.rule.id).live.some((entry) => entry.day === day && liveUsable(item.rule.id, entry));
     for (const item of per) for (const live of plan.get(item.rule.id).live) {
-      if (peersOf(item, live.day).some((other) => !plan.get(other.rule.id).live.some((entry) => entry.day === live.day && liveUsable(other.rule.id, entry)))) dropLive.add(`${item.rule.id}|${live.day}`);
+      const group = [item, ...peersOf(item, live.day)];
+      const unusable = group.filter((other) => !usableToday(other, live.day));
+      if (!unusable.length) continue;
+      // 只在今天放宽（过去的天靠账本，不能出假亏损）：没读成的都是已解绑的、而且收入记在它上面的那条（后绑）读成了
+      const holder = group.reduce((best, other) => (laterBound(other.rule, best.rule) ? other : best));
+      if (unusable.every((other) => other.rule.archivedAtMs != null) && usableToday(holder, live.day)) { for (const other of unusable) unreadToday.add(`${other.rule.id}|${live.day}`); continue; }
+      dropLive.add(`${item.rule.id}|${live.day}`);
     }
     const rows = [];
     const liveKeys = new Map(); // 规则 -> 今天现读的每把 Key 的数（每把 Key 分开算，每日利润页的 keys 用）
@@ -770,9 +778,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           skeleton = answer.results.find((row) => row.rule.id === rule.id) || skeleton;
         }
       }
-      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days;
+      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days, costUnread = false;
       for (const live of entry.live) {
         const piece = resultAt(live.key, rule.id, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`);
+        if (unreadToday.has(`${rule.id}|${live.day}`)) { costUnread = true; continue; } // 已解绑的这条今天没读成：不记没算进来的天，页面按渠道亮提示
         if (!piece || !countsInSummary(piece) || dropLive.has(`${rule.id}|${live.day}`)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
         const money = moneyOfResult(piece);
         income += money.income; cost += money.cost; counted += 1;
@@ -788,6 +797,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           ? { ...skeleton, window: w, countedDays: counted, downstream: { ...skeleton.downstream, amountUsd: income, knownAmountUsd: income }, upstream: { ...skeleton.upstream, amountUsd: cost, knownAmountUsd: cost, countedAmountUsd: cost },
               calculation: { ...skeleton.calculation, profitUsd: income - cost } }
           : { ...skeleton, window: w };
+      if (costUnread) merged.todayCostUnread = true;
       rows.push(merged);
     }
     return { response, results: rows, stickyDays: sticky, notCounted, liveKeys };
