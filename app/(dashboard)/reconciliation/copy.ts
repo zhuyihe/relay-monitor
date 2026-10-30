@@ -58,8 +58,6 @@ export const COPY = Object.freeze({
     groupUnbound: (n: number) => `已解绑 · ${n}`,
     unboundTag: "已解绑",
     mobileLine: (income: string, margin: string) => `收入 ${income} · 毛利率 ${margin}`,
-    mobileDay: (income: string, actual: string) => `收入 ${income} · 成本 ${actual}`,
-    mobileGross: (gross: string) => `毛利 ${gross}`,
     totals: (n: number) => `合计（算进来的 ${n} 个渠道）`,
     // 已固定、又因为重算的事需处理、照算进了合计的行（设计 10-26 定）
     totalsHeld: (n: number, held: number) => `合计（算进来的 ${n} 个渠道；其中 ${held} 个还没重算，先按原来固定的数算）`,
@@ -67,8 +65,6 @@ export const COPY = Object.freeze({
     emptyDesc: "在上游资源里把渠道绑到上游，就能算出今天从 0 点到现在的毛利。",
     goUpstreams: "去上游资源",
     setupOwnStation: "设置自营站点",
-    expand: (name: string) => `展开 ${name}`,
-    collapse: (name: string) => `收起 ${name}`,
     issueTip: (name: string, title: string) => `${name}：${title}`,
     unreadable: "读不到",
   }),
