@@ -7160,6 +7160,25 @@ test("整天结账迁移：以前被「解绑那一刻」切开的日子（31 �
   assert.equal(f.state.ledgerWrites.length, writes);
 });
 
+test("整天结账迁移：同一天一把 Key 从一个渠道挪到另一个渠道（渠道不同、规范 Key 相同）的旧日子，新旧两条也配成一对、都写重结请求", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z");
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [2], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  row("rr_two").billing_effective_from_ms = archivedAt + 1800000; row("rr_two").canonical_key = row("rr_live").canonical_key;
+  await f.module.archiveRule("rr_live");
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  row("rr_two").accounting_floor_ms = archivedAt; // 当年按解绑那一刻切开
+  f.repository.migrationMarks.clear(); f.rt._reconciliationFloorResettleDone = false;
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  // 新绑定（渠道 2）这个夹具里没固定过账，所以只有旧绑定有请求；没有按 Key 配对时旧绑定一条请求也没有
+  assert.equal((await f.repository.getMigrationMark("reconciliation_floor_resettle_v1")).days, 1, "渠道不同、Key 相同也配对：旧绑定那天写了重结请求");
+});
+
 test("C3 审核二轮中-1：当天换绑两次（A→B→C），每条都按自己的核算起点判，不互相挡，三段首尾相接", async (t) => {
   const a = Date.parse("2026-10-08T02:00:00Z"), b = Date.parse("2026-10-08T06:00:00Z"); // 上海 10:00 和 14:00 换绑
   let now = b;

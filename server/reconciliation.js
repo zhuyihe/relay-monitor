@@ -3781,7 +3781,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (endMs > now || now - endMs > RESETTLE_MAX_AGE_MS) continue;
         const mine = new Set((rule.channels || []).map((channel) => Number(channel.channelId)));
         const olds = all.filter((other) => other.id !== rule.id && other.ownStationId === rule.ownStationId && other.archivedAtMs != null && other.archivedAtMs <= rule.accountingFloorMs + 1000
-          && dayKeyInTz(other.archivedAtMs, other.timezone) === day && (other.channels || []).some((channel) => mine.has(Number(channel.channelId))));
+          && dayKeyInTz(other.archivedAtMs, other.timezone) === day
+          // 以前切时刻是按「同一个渠道」或「同一把 Key」配对的：同一天一把 Key 从一个渠道挪到另一个渠道的也要配上
+          && ((other.channels || []).some((channel) => mine.has(Number(channel.channelId))) || (rule.canonicalKey != null && other.canonicalKey === rule.canonicalKey)));
         for (const item of [rule, ...olds]) { if (item.archivedAt && !archivedSettleable(item)) skipped += 1; else want(item, day); }
       }
       let requested = 0;
