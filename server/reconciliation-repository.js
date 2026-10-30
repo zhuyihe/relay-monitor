@@ -136,7 +136,7 @@ export function dayKeysFromRows(rows) {
   const out = {};
   for (const row of rows) {
     const days = (out[row.rule_id] ||= {});
-    (days[row.bill_date] ||= []).push({ upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), tokenName: row.token_name ?? null });
+    (days[row.bill_date] ||= []).push({ upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), tokenName: row.token_name ?? null, ...(Number(row.yielded) === 1 ? { yielded: true } : {}) });
   }
   return out;
 }
@@ -811,8 +811,8 @@ export class ReconciliationRepository {
     const rowsOf = (rows) => (rows || []).filter((row) => row?.billDate && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
     const insertRows = async (rows, ignore) => {
       const list = rowsOf(rows);
-      if (list.length) await conn.query(`INSERT ${ignore ? "IGNORE " : ""}INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name) VALUES ?`,
-        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null])]);
+      if (list.length) await conn.query(`INSERT ${ignore ? "IGNORE " : ""}INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name, yielded) VALUES ?`,
+        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null, row.yielded ? 1 : 0])]);
     };
     await insertRows(extra.fillDayKeys, true);
     const dates = [...new Set((extra.replaceDayKeys?.dates || []).filter(Boolean))];
@@ -843,8 +843,8 @@ export class ReconciliationRepository {
       await conn.beginTransaction();
       await conn.query("DELETE FROM reconciliation_rule_day_keys WHERE rule_id = ? AND bill_date IN (?)", [ruleId, dates]);
       const list = (rows || []).filter((row) => dates.includes(row?.billDate) && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
-      if (list.length) await conn.query("INSERT INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name) VALUES ?",
-        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null])]);
+      if (list.length) await conn.query("INSERT INTO reconciliation_rule_day_keys (rule_id, bill_date, upstream_station_id, token_id, token_name, yielded) VALUES ?",
+        [list.map((row) => [ruleId, row.billDate, row.upstreamStationId, Number(row.tokenId), row.tokenName ?? null, row.yielded ? 1 : 0])]);
       await conn.commit();
       return list.length;
     } catch (error) {
@@ -858,7 +858,7 @@ export class ReconciliationRepository {
     const ids = [...new Set((ruleIds || []).map(String))];
     if (!ids.length) return {};
     const [rows] = await this.pool.query(
-      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, upstream_station_id, token_id, token_name FROM reconciliation_rule_day_keys
+      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, upstream_station_id, token_id, token_name, yielded FROM reconciliation_rule_day_keys
         WHERE rule_id IN (?) AND bill_date BETWEEN ? AND ? ORDER BY rule_id, bill_date, token_id`, [ids, fromDate, toDate]);
     return dayKeysFromRows(rows);
   }

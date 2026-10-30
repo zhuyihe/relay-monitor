@@ -567,7 +567,7 @@ export class MemoryReconciliationRepository {
   #applyKeyChangeExtra(tx, ruleId, extra) {
     const now = extra.now ?? Date.now();
     const valid = (rows) => (rows || []).filter((row) => row?.billDate && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
-    const insert = (row) => this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null });
+    const insert = (row) => this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null, yielded: row.yielded ? 1 : 0 });
     const has = (row) => this.#rows("dayKeys", tx).some(({ row: item }) => item.rule_id === ruleId && item.bill_date === row.billDate && item.upstream_station_id === row.upstreamStationId && Number(item.token_id) === Number(row.tokenId));
     for (const row of valid(extra.fillDayKeys)) if (!has(row)) insert(row);
     const dates = new Set((extra.replaceDayKeys?.dates || []).filter(Boolean));
@@ -586,7 +586,7 @@ export class MemoryReconciliationRepository {
       let added = 0;
       for (const row of list) {
         if (this.#rows("dayKeys", tx).some(({ row: item }) => item.rule_id === ruleId && item.bill_date === row.billDate && item.upstream_station_id === row.upstreamStationId && Number(item.token_id) === Number(row.tokenId))) continue;
-        this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null });
+        this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null, yielded: 0 });
         added += 1;
       }
       return added;
@@ -602,7 +602,7 @@ export class MemoryReconciliationRepository {
       let added = 0;
       for (const row of rows || []) {
         if (!dates.has(row?.billDate) || row.upstreamStationId == null || !Number.isSafeInteger(Number(row.tokenId))) continue;
-        this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null });
+        this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null, yielded: row.yielded ? 1 : 0 });
         added += 1;
       }
       return added;

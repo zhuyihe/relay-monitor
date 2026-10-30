@@ -1843,6 +1843,22 @@ contract("changeRuleKey with reopen: an archived rule is re-opened and takes the
   assert.ok(taker.id);
 });
 
+contract("day keys with yielded: replaceDayKeys and changeRuleKey extra store the flag, listDayKeys returns it only when set (default rows keep the old shape)", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:yl`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(251), name: "Y" }], initialRatio: 1, fixedGroup: "g1" });
+  const key = (tokenId, extra = {}) => ({ upstreamStationId: rule.upstreamStationId, tokenId, tokenName: `K${tokenId}`, ...extra });
+  await repository.recordDayKeys(rule.id, [{ billDate: "2026-10-01", ...key(1) }]);
+  await repository.replaceDayKeys(rule.id, ["2026-10-02", "2026-10-03"], [{ billDate: "2026-10-02", ...key(2, { yielded: true }) }, { billDate: "2026-10-03", ...key(2) }]);
+  const listed = (await repository.listDayKeys([rule.id], "2026-10-01", "2026-10-05"))[rule.id];
+  assert.deepEqual(listed["2026-10-01"], [key(1)], "没标的行形状不变");
+  assert.deepEqual(listed["2026-10-02"], [key(2, { yielded: true })]);
+  assert.deepEqual(listed["2026-10-03"], [key(2)]);
+  const after = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(252), tokenName: "N" };
+  const a = EFFECTIVE_FROM + HOUR;
+  assert.deepEqual(await repository.changeRuleKey(rule.id, { before: { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }, after, canonicalKey: `up:${fixture.tag}:yl2`, windowStart: a, windowEnd: a + 1000 },
+    { extra: { now: Date.now(), replaceDayKeys: { dates: ["2026-10-04"], rows: [{ billDate: "2026-10-04", ...key(3, { yielded: true }) }] } } }), { conflict: false, stale: false });
+  assert.deepEqual((await repository.listDayKeys([rule.id], "2026-10-04", "2026-10-04"))[rule.id]["2026-10-04"], [key(3, { yielded: true })]);
+});
+
 // 每个渠道每天用过哪几把 Key：记、读；已经记过的忽略；没记过的天不出现；按绑定、日期范围读
 contract("recordDayKeys / listDayKeys: rows are stored once per rule, day and key; listing is scoped to the rules and the date range; an unknown rule or empty input gives {} / 0", async ({ repository, fixture }) => {
   const one = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:d1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(211), name: "D1" }] });

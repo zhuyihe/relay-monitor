@@ -245,6 +245,8 @@ export async function ensureSchema(pool) {
     token_name VARCHAR(160) NULL,
     PRIMARY KEY (rule_id, bill_date, upstream_station_id, token_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // yielded：这一天这把 Key 在别的绑定那边已经固定、算在那边（控制台滞后挪 Key 的几天），这条绑定这天这把 Key 的成本记 0、收入照算；不按绑定时刻判
+  await addColumnIfMissing(pool, "reconciliation_rule_day_keys", "yielded", "TINYINT NOT NULL DEFAULT 0");
   for (const { sql, params } of refreshSegmentKeysSql()) await pool.query(sql, params);
   await pool.query(`UPDATE reconciliation_snapshots s
     JOIN reconciliation_rule_segments g ON g.rule_id = s.rule_id
