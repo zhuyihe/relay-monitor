@@ -81,12 +81,17 @@ export function rangeText(page: ProfitPageResponse, ctx: Ctx) {
 export const channelCount = (rows: ProfitRow[]) => sum(rows.map((row) => row.channels?.length || 0));
 // 感叹号气泡里「查看详细原因」的原文：有需处理就只用需处理自己的（需处理可能在提示之后才设到这一行上，不能显示别的问题的原话），没有才用提示的
 export const bubbleDiagnostic = (row: ProfitRow): string | undefined => (row.attention ? row.attention.diagnostic : row.notice?.diagnostic) || undefined;
+// 这一行今天的数还没读到（后台还没轮到）、整行没算进来：格子写「还在读取」，不写「—」；多天范围里已固定的日子有数的行照常显示数
+export const readingText = (row: ProfitRow): string | null => (row.reading && !row.counted ? COPY.gap.reading : null);
 // 页顶一句后面接的：有需处理的渠道（这几天没算进来）有几个，多天时写没算进来的天数加起来（一个渠道「有 M 天」，几个渠道「共 M 天」）；有提示类的（照常算进来、只是成本可能少算了）再接一句，中间用「 · 」隔开；都没有是空字符串（用语规范 §4）
 export function attentionSuffix(page: ProfitPageResponse) {
   const out = page.rows.filter((row) => row.attention && (!row.counted || row.excludedDays > 0)), noticed = page.rows.filter((row) => row.notice && !out.includes(row));
   // 今天上游成本读不到的行整行没算进合计，单独一句；别的提示（成本可能少算了，照常算进来）一句
   const unread = noticed.filter((row) => row.notice?.code === "UPSTREAM_COST_UNREAD_TODAY"), notices = noticed.filter((row) => row.notice?.code !== "UPSTREAM_COST_UNREAD_TODAY");
   const parts: string[] = [];
+  // 今天的数还没读到的渠道（reading）：写在最前，读到就没了；它们没有提示、没有需处理，不会和下面几句重复
+  const reading = page.rows.filter((row) => row.reading);
+  if (reading.length) parts.push(COPY.caption.reading(channelCount(reading)));
   if (out.length) parts.push(isSingleDay(page) ? COPY.caption.attention(channelCount(out)) : COPY.caption.attentionDays(channelCount(out), Math.max(1, sum(out.map((row) => row.excludedDays || 0)))));
   if (unread.length) parts.push(COPY.caption.unread(channelCount(unread)));
   if (notices.length) parts.push(COPY.caption.notice(channelCount(notices)));
@@ -114,8 +119,11 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
 // 例外：不管选的哪个范围，当前结果里还有「还在读取」的日子（零点以后正在结账的那几个小时）就 5 分钟重读一次，没有了就停（审核 2 #128）。tz 是接口给的业务时区，没读到页面数据时用默认
 export const LIVE_POLL_MS = 30000;
 export const LIVE_POLL_LONG_MS = 300000;
-export function livePollMs(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null, reading = false): number | null {
+// 有渠道今天的数还没读到：10 秒再要一次整页（服务端只读缓存、不发外面的请求，后台轮询读到就补上），都读到了回到上面的节奏
+export const ROWS_READING_POLL_MS = 10000;
+export function livePollMs(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null, reading = false, rowsReading = false): number | null {
   const base = livePollBase(window, now, tz);
+  if (rowsReading) return base == null ? ROWS_READING_POLL_MS : Math.min(base, ROWS_READING_POLL_MS);
   return base ?? (reading ? LIVE_POLL_LONG_MS : null);
 }
 function livePollBase(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null): number | null {

@@ -141,7 +141,7 @@ export function useProfitPage() {
   const closeDetail = () => { detailRequestId.current += 1; setDetail(null); };
 
   // 截至现在的范围定时重读（只读）；选了「自定义」还没查询时暂停；切回前台时读一次
-  const pollMs = preset === activeWindow.preset ? livePollMs(activeWindow, Date.now(), data?.tz, (data?.dayCounts?.reading ?? 0) > 0) : null;
+  const pollMs = preset === activeWindow.preset ? livePollMs(activeWindow, Date.now(), data?.tz, (data?.dayCounts?.reading ?? 0) > 0, !!data?.rows?.some((row) => row.reading)) : null;
   useEffect(() => {
     if (!pollMs || !config) return;
     const timer = setInterval(() => void load(activeWindow), pollMs);

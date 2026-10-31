@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../db/store.js";
-import { createReconciliationModule } from "./reconciliation.js";
+import { createReconciliationModule, startReconciliationPolling } from "./reconciliation.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
@@ -1627,3 +1627,173 @@ for (const [label, reply, expectDiag] of [
     assert.equal((await todayRow(ok)).notice, null);
   });
 }
+
+// ===== 每日利润页「先出页面」：页面只读缓存，读取只在后台轮询那一路 =====
+async function twoUpstreams(t) {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], secondKeys: [50], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity], 50: [-Infinity, Infinity] }, rates: { 9: 1, 50: 2 } });
+  await f.at("2026-10-30T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier2.id, tokenId: 50 });
+  await f.round("2026-10-30T10:05:00");
+  return f;
+}
+const cachedPage = (f, input = { preset: "today" }) => f.rt.reconciliation.profitPage(input, { cacheOnly: true });
+// 收入这一项不比：后台轮询在自营站点没有新消费时沿用上一轮的渠道收入（P1a），和页面以前每次现读不总是同一刻
+const moneyOf = (page) => page.rows.map((row) => [row.counted, row.actualCostUsd]);
+
+test("页面只读缓存：轮询刚读过时数和现读一样；一个外面的请求都不发", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T10:10:00");
+  const before = f.requests.length;
+  const cached = await cachedPage(f);
+  assert.equal(f.requests.length, before, "页面只读缓存：没有任何外面的请求（含自营站点）");
+  assert.equal(f.rt._reconciliationLastTodayViewAt.at, f.state.now, "页面来看今天，算「有人在看」：后台轮询不放慢");
+  assert.deepEqual(cached.rows.map((row) => row.reading), [false, false]);
+  const live = await f.rt.reconciliation.profitPage({ preset: "today" });
+  assert.deepEqual(moneyOf(cached), moneyOf(live), "全部正常：数和以前现读的一样");
+  assert.ok(cached.rows.every((row) => row.counted && row.notice == null && row.attention == null));
+});
+
+test("页面只读缓存：轮询的结果太旧或还没读过，这一行是「还在读取」（不是读不到、没有提示、没有需处理），页面照样出来；零请求", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T10:10:00");
+  await f.at("2026-10-30T10:30:00"); // 距离上一轮 20 分钟，超过两个轮询间隔 + 2 分钟
+  const before = f.requests.length;
+  const page = await cachedPage(f);
+  assert.equal(f.requests.length, before);
+  assert.equal(page.rows.length, 2);
+  for (const row of page.rows) {
+    assert.deepEqual([row.reading, row.counted, row.notice, row.attention, row.incomeUsd, row.actualCostUsd], [true, false, null, null, null, null]);
+  }
+  assert.equal(page.pageTotals.grossProfitUsd, null);
+});
+
+test("一个上游的统计接口一直不回：页面马上返回；它那一行「还在读取」，别的行有数；读失败后下一次是「读不到」（有提示），不再是「还在读取」", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T10:10:00");
+  await f.at("2026-10-30T10:30:00");
+  const inner = globalThis.fetch;
+  const hung = [];
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "up2.test" && url.pathname === "/api/log/self/stat") { f.requests.push("hung"); return new Promise((resolve) => hung.push(() => resolve({ status: 503, text: async () => "upstream busy" }))); }
+    return inner(input, init);
+  });
+  const poll = f.rt.reconciliation.refreshDue(f.state.now); // 后台轮询：Up2 的统计挂着
+  for (let i = 0; i < 40 && !hung.length; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(hung.length, 1, "后台轮询在读 Up2");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const before = f.requests.length;
+  const started = performance.now();
+  const page = await cachedPage(f);
+  assert.ok(performance.now() - started < 1000, "页面不等挂着的上游");
+  assert.equal(f.requests.length, before, "页面没有发请求");
+  const byChannel = (name) => page.rows.find((row) => row.channels.some((channel) => channel.channelId === name));
+  assert.deepEqual([byChannel(1).reading, byChannel(1).counted], [false, true], "Up 的轮询读完了：有数");
+  assert.deepEqual([byChannel(2).reading, byChannel(2).counted, byChannel(2).notice, byChannel(2).attention], [true, false, null, null], "Up2 还在读");
+  for (const release of hung) release();
+  await poll;
+  const after = await cachedPage(f);
+  const up2 = after.rows.find((row) => row.channels.some((channel) => channel.channelId === 2));
+  assert.deepEqual([up2.reading, up2.counted, up2.notice?.code, up2.attention], [false, false, "UPSTREAM_COST_UNREAD_TODAY", null], "真读过、读失败：是「上游成本这会儿读不到」，不是还在读取");
+});
+
+test("页面只读缓存发现有没读到的行：踢一下后台轮询；都读到了不踢", async (t) => {
+  const f = await twoUpstreams(t);
+  let kicks = 0;
+  f.rt._reconciliationPollKick = () => { kicks += 1; };
+  await f.round("2026-10-30T10:10:00");
+  await cachedPage(f);
+  assert.equal(kicks, 0);
+  await f.at("2026-10-30T10:30:00");
+  await cachedPage(f);
+  assert.equal(kicks, 1);
+});
+
+test("多天范围的页面只读缓存：今天那一格还在读取时，已固定的日子照样有数、不算「没读成」，行标还在读取；读到以后和现读一样", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T12:00:00", "2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-11T15:00:00");
+  const reading = await cachedPage(f, { preset: "7d" });
+  assert.deepEqual([reading.rows[0].reading, reading.rows[0].incomeUsd, reading.notCountedDays.count], [true, 2 * 86400, 0]);
+  await f.round("2026-10-11T15:00:00");
+  const done = await cachedPage(f, { preset: "7d" });
+  const live = await f.rt.reconciliation.profitPage({ preset: "7d" });
+  assert.equal(done.rows[0].reading, false);
+  assert.deepEqual(moneyOf(done), moneyOf(live));
+});
+
+test("目录读失败的上游：后台轮询按退避重读（不是每轮都读），读成功就恢复", async (t) => {
+  const f = await twoUpstreams(t);
+  const inner = globalThis.fetch;
+  let down = true;
+  let reads = 0;
+  const up2Reads = () => reads;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "up2.test") reads += 1;
+    if (down && url.host === "up2.test") return { status: 500, text: async () => "{}" };
+    return inner(input, init);
+  });
+  f.rt.reconciliation.invalidateSources(); // 目录缓存清掉，下一轮要真读
+  await f.round("2026-10-30T10:06:00");
+  const first = up2Reads();
+  assert.ok(first > 0, "第一次读了、失败");
+  await f.round("2026-10-30T10:06:30");
+  assert.equal(up2Reads(), first, "半分钟后：退避期里，不再读 Up2 的目录和身份");
+  await f.round("2026-10-30T10:07:30");
+  assert.ok(up2Reads() > first, "退避过了：再读一次");
+  const second = up2Reads();
+  await f.round("2026-10-30T10:08:30");
+  assert.equal(up2Reads(), second, "第二次失败后退避加倍：一分钟后还在退避");
+  down = false;
+  await f.round("2026-10-30T10:10:00");
+  assert.ok(up2Reads() > second, "退避过了、上游好了：读成功");
+  await f.round("2026-10-30T10:11:00");
+  const page = await cachedPage(f);
+  assert.ok(page.rows.every((row) => row.counted && !row.reading), "恢复以后两行都有数");
+});
+
+test("踢后台轮询：没在跑、离上一轮开始已满一个轮询间隔才踢；在跑、刚跑过都不踢（页面再怎么催，两轮的间隔也不会比刷新间隔短）", async (t) => {
+  const f = await twoUpstreams(t);
+  let calls = 0, release = () => {};
+  t.mock.method(f.rt.reconciliation, "refreshDue", async () => { calls += 1; await new Promise((resolve) => { release = resolve; }); });
+  f.rt.autoVerify = { verifyDue: async () => {} };
+  const settle = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
+  startReconciliationPolling(f.rt);
+  await settle();
+  assert.equal(calls, 1);
+  assert.equal(f.rt._reconciliationPollKick(), false, "正在跑");
+  release();
+  await settle();
+  assert.equal(f.rt._reconciliationPollKick(), false, "离上一轮开始不满一个轮询间隔（60 秒）");
+  f.state.now += 30000;
+  assert.equal(f.rt._reconciliationPollKick(), false, "半个间隔也不踢");
+  f.state.now += 31000;
+  assert.equal(f.rt._reconciliationPollKick(), true);
+  await settle();
+  assert.equal(calls, 2, "踢了就马上跑一轮");
+  assert.equal(f.rt._reconciliationPollKick(), false, "又在跑");
+  release();
+  await settle();
+  clearTimeout(f.rt._reconciliationPollTimer);
+});
+
+test("今天解绑的绑定：页面只读缓存先给「还在读取」；后台轮询顺带读它今天一次以后，和现读一样、数留在页面里", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T12:00:00");
+  await f.at("2026-10-10T15:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  const before = await cachedPage(f);
+  assert.deepEqual([before.rows.length, before.rows[0].reading, before.rows[0].counted], [1, true, false]);
+  await f.round("2026-10-10T15:00:00");
+  const done = await cachedPage(f);
+  const live = await f.rt.reconciliation.profitPage({ preset: "today" });
+  assert.deepEqual([done.rows[0].reading, done.rows[0].counted, done.rows[0].bound, done.rows[0].unboundOn, done.rows[0].actualCostUsd],
+    [false, true, false, "2026-10-10", live.rows[0].actualCostUsd]);
+  assert.equal(done.rows[0].actualCostUsd, 15 * 3600);
+});

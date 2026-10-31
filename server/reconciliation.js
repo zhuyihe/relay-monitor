@@ -158,6 +158,11 @@ const OWN_LOG_FIRST_LOOKBACK_SEC = 2 * 3600;
 // 轮询按这个读；出了异常的上游下一轮马上全部重读（staleMetadata）；页面「刷新」照旧强制重读
 const CATALOGUE_TTL_MS = 5 * 60000;
 const IDENTITY_TTL_MS = 30 * 60000;
+// 每日利润页只读缓存：轮询写的「今天」结果超过「两个轮询间隔 + 2 分钟」就不用了，页面给「还在读取」，等下一轮；
+const TODAY_RESULT_GRACE_MS = 2 * 60000;
+// 目录 / 身份读失败的上游，轮询重读的退避：第 n 次失败后等 min(60 秒 × 2^(n-1), 10 分钟) 才再读，读成功清零
+const METADATA_BACKOFF_BASE_MS = 60000;
+const METADATA_BACKOFF_MAX_MS = 10 * 60000;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -589,6 +594,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
   // 出了异常、下一轮要把分组、Key 目录和身份全部重读的上游：Key 账单报错、渠道有收入而 Key 用量为 0、目录里找不到绑定的 Key
   const staleMetadata = (rt._reconciliationStaleMetadata ||= new Set());
+  // 每日利润页「先出页面」：页面只读缓存（cacheOnly），不等外面的读取。
+  //   latestToday：每条绑定「今天」最近一次真读到的结果（后台轮询写，页面读）——resultCache 一分钟就清，装不下轮询间隔的结果，所以单独存一份；
+  //   metadataFailures：目录 / 身份读失败的上游，轮询按时间退避着重读（失败不进 metadataCache，不退避就每轮都重读一遍）
+  const latestToday = (rt._reconciliationLatestToday ||= new Map());
+  const metadataFailures = (rt._reconciliationMetadataFailures ||= new Map());
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
@@ -672,7 +682,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const cost = result.rates?.costBasis === "fixed" ? 0 : Number(Object.hasOwn(upstream, "countedAmountUsd") ? upstream.countedAmountUsd : upstream.knownAmountUsd ?? upstream.amountUsd);
     return { income: Number.isFinite(income) ? income : 0, cost: Number.isFinite(cost) ? cost : 0 };
   };
-  async function dailyProfitResults(input, rules, now) {
+  async function dailyProfitResults(input, rules, now, { cacheOnly = false } = {}) {
     const archivedRuleIds = rules.filter((rule) => rule.archivedAt).map((rule) => rule.id);
     const per = [];
     for (const rule of rules) {
@@ -750,7 +760,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const answers = new Map(); // key -> response
     const run = async (key, requestInput, only) => {
       const key2 = only ? `${key}|${[...only].sort().join(",")}` : key;
-      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", accountUsage: false, noLivePast: true, archivedRuleIds }));
+      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", accountUsage: false, noLivePast: true, archivedRuleIds, cacheOnly }));
       return answers.get(key2);
     };
     for (const [key, request] of requests) await run(key, request.input, request.ruleIds);
@@ -786,10 +796,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           skeleton = answer.results.find((row) => row.rule.id === rule.id) || skeleton;
         }
       }
-      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days, costUnread = false;
+      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days, costUnread = false, readingToday = false;
       for (const live of entry.live) {
         const piece = resultAt(live.key, rule.id, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`);
         if (unreadToday.has(`${rule.id}|${live.day}`)) { costUnread = true; continue; } // 已解绑的这条今天没读成：不记没算进来的天，页面按渠道亮提示
+        if (piece?.todayReading) { readingToday = true; continue; } // 今天这一格还在读取：不算「没读成」，页面给「还在读取」
         if (!piece || !countsInSummary(piece) || dropLive.has(`${rule.id}|${live.day}`)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
         const money = moneyOfResult(piece);
         income += money.income; cost += money.cost; counted += 1;
@@ -808,9 +819,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
               calculation: { ...skeleton.calculation, profitUsd: income - cost } }
           : { ...skeleton, window: w, ...(liveAllDropped ? { calculation: { ...skeleton.calculation, profitUsd: null } } : {}) };
       if (costUnread) merged.todayCostUnread = true;
+      if (readingToday) merged.todayReading = true;
       rows.push(merged);
     }
     return { response, results: rows, stickyDays: sticky, notCounted, liveKeys };
+  }
+
+  // 每日利润页只读缓存：这条绑定轮询最近一次读到的「今天」（同一天、口径没变、没超过两个轮询间隔 + 2 分钟）；不合格返回 null
+  function todayFromPoll(rule, window) {
+    const stored = latestToday.get(rule.id);
+    if (!stored || window.preset !== "today") return null;
+    const pollMs = Math.max(60, Number(rt.store.settings?.refreshIntervalSec) || 60) * 1000;
+    const value = stored.value;
+    if (Date.now() - stored.at >= 2 * pollMs + TODAY_RESULT_GRACE_MS || stored.sourceCredential !== currentSourceCredential(rule)
+      || value.window?.startMs !== window.startMs || canonicalTimeZone(value.window?.timezone) !== canonicalTimeZone(window.timezone)
+      || reconciliationScopeFingerprint(rule, value.transitionSegments || []) !== reconciliationScopeFingerprint(value.rule, value.transitionSegments || [])) return null;
+    return value;
+  }
+  // 「还在读取」：这一行还没轮到读、读还在路上（页面用 todayReading 区分它和「读不到」，后者是真读过、读失败了，带原因）
+  function readingResult(rule, window) {
+    return { ...pendingResult(rule, window, issueText("PENDING")), todayReading: true };
   }
 
   function serializeWrite(write) {
@@ -874,6 +902,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     invalidatePeerRules(); // 绑定变了（建、解绑、重新打开、换 Key）：同渠道的「最后绑上的那条」要重新找
     ruleGenerations.set(ruleId, (ruleGenerations.get(ruleId) || 0) + 1);
     const prefix = `${ruleId}:`;
+    latestToday.delete(ruleId);
     for (const key of resultCache.keys()) {
       if (key.startsWith(prefix)) resultCache.delete(key);
     }
@@ -1281,12 +1310,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 这一版还不算利润的渠道（只提示、不进需处理）：用的 Key 在两个上游里都有（用户的接法里只有这一种）。
   // 问渠道利润模块要（识别结果有 4 分钟缓存，读取服务连不上就当没有）；写在每日利润表下面那一句里
   const UNSUPPORTED_REASONS = new Set(["KEY_IN_OTHER_UPSTREAM"]);
-  async function unsupportedChannels() {
+  async function unsupportedChannels({ cacheOnly = false } = {}) {
     if (!rt.channelOnboarding) return [];
     const profit = (rt.channelProfit ||= createChannelProfitModule(rt));
     const out = [];
     for (const own of rt.store.list().filter((station) => station.isOwn && station.type === "newapi" && !station.archivedAt && keyAgentConfigOf(station))) {
-      const state = await profit.status(own.id).catch(() => null);
+      const state = await profit.status(own.id, cacheOnly ? { cacheOnly: true } : {}).catch(() => null);
       if (!state?.ok) continue;
       for (const channel of state.channels) {
         // 在算的渠道 Key 换到了另一个已经加了的上游里（movedToUpstreamId），和 Key 在两个上游里都有的（blocked），都是「这一版还不算」
@@ -1301,7 +1330,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
   // 轮询（poll）按时间重读：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟（自营站点的身份也是 30 分钟）；
   // 记在 staleMetadata 里的上游这一轮强制全部重读：出了异常的、这一轮要结账的（refreshDue 放进来），读成功才清掉记号。
-  async function ownerRegistryFor(rules, selected, { observe = true, poll = false } = {}) {
+  // cacheOnly（每日利润页）：一个请求都不发，目录和身份只取缓存里的（不管多旧，轮询会按时刷新），缓存里没有就当读不到；不核对 Key 识别
+  async function ownerRegistryFor(rules, selected, { observe = true, poll = false, cacheOnly = false } = {}) {
     // expectedOwnerState 是全部绑定的指纹，只用来作结果缓存的版本；写快照时核对、加锁只看这条绑定同一把 Key 的那一组（ownerScopeFor）
     const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules), ownerRules: rules };
     const selectedIds = new Set(selected.map((rule) => rule.id));
@@ -1317,6 +1347,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!station) throw codedError("COST_OWNER_UNVERIFIED", issueText("COST_OWNER_UNVERIFIED"));
         const timezone = selected.find((rule) => rule.upstreamStationId === id)?.timezone
           || participants.find((rule) => rule.upstreamStationId === id)?.timezone || "Asia/Shanghai";
+        if (cacheOnly) {
+          const credential = credentialFingerprint(station), peek = metadataCache.get(`${id}:${canonicalTimeZone(timezone)}`), peekIdentity = identityCache.get(id);
+          const metadata = peek?.credential === credential ? peek.value : null;
+          const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
+            : peekIdentity?.credential === credential ? peekIdentity.value : null;
+          return [id, Object.freeze({ station, resourceVersion, metadata, identity: identity && Object.freeze(identity), identityReused: true, error: identity ? null : metadataFailures.get(id)?.error ?? codedError("PENDING", issueText("PENDING")) })];
+        }
+        // 轮询：这个上游目录 / 身份刚读失败过，退避期里不再读（沿用上次的失败原因），免得慢的上游每轮都让这一轮多等一次超时
+        const failure = poll ? metadataFailures.get(id) : null;
+        if (failure && failure.credential === credentialFingerprint(station) && Date.now() < failure.retryAt) return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, identityReused: false, error: failure.error })];
         const force = observe && (!poll || staleMetadata.has(id));
         reused = poll && !force;
         const read = billingStation(station) ? await readMetadata(station, { force, timezone, reuseIdentity: poll }) : null;
@@ -1324,8 +1364,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
           : await identityFor(station, { force, maxAgeMs: poll ? IDENTITY_TTL_MS : CATALOGUE_TTL_MS });
         if (force) staleMetadata.delete(id);
+        metadataFailures.delete(id);
         return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), identityReused: poll && !!read?.identityReused, error: null })];
       } catch (error) {
+        if (station && poll) {
+          const count = (metadataFailures.get(id)?.count || 0) + 1;
+          metadataFailures.set(id, { count, error, credential: credentialFingerprint(station), retryAt: Date.now() + Math.min(METADATA_BACKOFF_BASE_MS * 2 ** (count - 1), METADATA_BACKOFF_MAX_MS) });
+        }
         // 轮询拿沿用的身份读失败（比如账号换了、目录归属对不上）：下一轮全部重读，不要每轮拿旧身份再失败
         if (reused) staleMetadata.add(id);
         return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, identityReused: reused, error })];
@@ -3170,7 +3215,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           && currentSourceCredential(rule) === request.sourceCredential && billingSourceState().version === billingSource.version) {
           // 这份结果里有渠道收入是沿用的（没人看、放慢）：不进 resultCache，免得页面来看时（evaluate 模式不管 cached.observed，
           // TTL 内照样信任缓存）拿到沿用的数——留着旧的那份（更早、但是现读的）等它自然过期，或者等下一次现读覆盖（总指挥 10-26 定）
-          if (value.health.code !== "PENDING" && !value.staleFromIdleSkip) cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
+          if (value.health.code !== "PENDING" && !value.staleFromIdleSkip) {
+            cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
+            // 每日利润页只读缓存用：「今天」整天窗口最近一次真读到的结果（读失败也算，页面据此亮「读不到」，不是「还在读取」）
+            if (window.preset === "today") {
+              const stored = latestToday.get(ruleId);
+              if (!stored || String(stored.value.generatedAt) <= String(value.generatedAt)) latestToday.set(ruleId, { at: Date.now(), value, sourceCredential: request.sourceCredential });
+            }
+          }
           return value;
         }
         if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
@@ -4071,7 +4123,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
-    async profitPage(rawInput = {}) {
+    async profitPage(rawInput = {}, { cacheOnly = false } = {}) {
       const input = await sinceInput(rawInput);
       // 多天范围逐天相加（dailyProfitResults）；一天的范围（今天、昨天、选一天）照旧整窗读一次
       // 在绑的绑定 + 范围里解绑的（解绑那天在范围的第一天或以后）：解绑后以前的数留在页面里、算进合计（用户 10-30 定）
@@ -4083,13 +4135,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) >= dayKeyInTz(w.startMs, rule.timezone) && (reconciliationAccountingStart(rule) ?? 0) < w.endMs;
       });
       const archivedRuleIds = archivedInRange.map((rule) => rule.id);
-      const daily = await dailyProfitResults(input, [...allRules.filter((rule) => !rule.archivedAt && rule.enabled), ...archivedInRange], nowMs);
+      const daily = await dailyProfitResults(input, [...allRules.filter((rule) => !rule.archivedAt && rule.enabled), ...archivedInRange], nowMs, { cacheOnly });
       // 「没算进利润的上游成本」只在单天范围显示：多天范围只读得到现读那几天，和页面别处对不上
-      const response = daily ? daily.response : await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: true, noLivePast: true, archivedRuleIds });
+      const response = daily ? daily.response : await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: true, noLivePast: true, archivedRuleIds, cacheOnly });
       const now = Date.parse(response.generatedAt), tz = response.tz;
       const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
       const labels = dayLabelsOf(window, tz, now);
       const results = daily ? daily.results : response.results;
+      // 有没读到的行：让后台轮询早点轮到它们（轮询没在跑、离上一轮开始满 30 秒才踢；读取本身还是只在后台轮询那一路）
+      if (cacheOnly && results.some((row) => row.todayReading)) rt._reconciliationPollKick?.();
       // 多天范围里没算进来的天（没固定、今天现读失败、半天）：页面写一句，不悄悄算少
       const notCountedDays = { count: daily ? new Set(daily.notCounted.map((item) => item.day)).size : 0 };
       const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
@@ -4147,7 +4201,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unaccountedUpstreamCostUsd,
         unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
-        unsupportedChannels: await unsupportedChannels(), notCountedDays,
+        unsupportedChannels: await unsupportedChannels({ cacheOnly }), notCountedDays,
         rateUnset, fixedOffProfitStations: response.fixedOffProfitStations || [] };
     },
     // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有
@@ -4253,7 +4307,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const input = await sinceInput(rawInput);
       // 减压 PR：页面来读实时窗口（今天/近 7 天/本月），就是「有人在看」的信号——不额外发请求，借用页面本来就有的轮询；
       // 空闲后第一次又来，at 刷成现在，下一轮轮询就不再当没人看，所有渠道都现问
-      if (options.origin === "page" && isLiveReconciliationPreset(input.preset)) {
+      if ((options.origin === "page" || options.cacheOnly) && isLiveReconciliationPreset(input.preset)) {
         const now = Date.now();
         lastTodayViewAt.at = now;
       }
@@ -4266,11 +4320,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const selected = [...((Array.isArray(ruleIds) && ruleIds.length)
           ? rules.filter((rule) => rule.enabled && ruleIds.includes(rule.id))
           : rules.filter((rule) => rule.enabled)), ...archivedPick];
-        const ownerRegistry = await ownerRegistryFor(rules, selected, { observe: options.mode !== "evaluate" });
+        const ownerRegistry = await ownerRegistryFor(rules, selected, { observe: options.mode !== "evaluate", cacheOnly: options.cacheOnly === true });
         const billingSource = ownerRegistry.billingSource;
         const now = Date.now();
         // 页面全量读取才附带账号级对比（true 复用缓存，"refresh" 是页面「刷新」，重新读上游用量）；按关联重试和后台观测不需要。
-        const accountUsage = [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
+        // 只读缓存（每日利润页先出页面）不发请求，账号级对比要读上游用量，这一路不附带
+        const accountUsage = !options.cacheOnly && [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
         if (accountUsage && attempt === 1 && selected.length) warmAccountUsage(selected.filter((rule) => !rule.archivedAt), input, now, options.accountUsage === "refresh");
         const respond = async (rows) => {
           await syncOptionUnreadableSince(rules, { observe: options.mode !== "evaluate" });
@@ -4305,6 +4360,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
                 state: states.find((item) => item.ruleId === rule.id && item.billDate === billDayOf(window)) || null }))
               .catch((err) => { if (err?.code === "RULE_NOT_FOUND") return null; throw err; });
           }
+          // 只读缓存：不去读，拿轮询最近一次读到的「今天」；没有（还没轮到、读还在路上、太旧）就给「还在读取」，页面过一会儿再来要
+          if (options.cacheOnly) return Promise.resolve(window.preset !== "today" ? pendingResult(rule, window, issueText("PENDING")) : todayFromPoll(rule, window) || readingResult(rule, window));
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
             // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
             if (err?.code === "RULE_NOT_FOUND") return null;
@@ -4339,13 +4396,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 已解除的绑定只有这一轮真有要结、要重判的日子才进（读它们上游的元数据和身份、判重复占用）；没有就不多读（审核 C3 低-4）
       const archivedIds = new Set(archivedRules.map((rule) => rule.id));
       const archivedUsed = [...plan.yesterday, ...plan.older, ...plan.recheck].some((item) => archivedIds.has(item.rule.id));
-      const ownerRegistry = await ownerRegistryFor(allRules, [...rules, ...(archivedUsed ? archivedRules : [])], { observe: true, poll: true });
+      // 今天解绑的绑定：每日利润页把它今天的数留在页面里（只读缓存），所以轮询顺带只读计算它今天一次（不写库），和页面以前现读的是同一次读取
+      const archivedToday = archivedSince.filter((rule) => rule.archivedAtMs != null && dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) === dayKeyInTz(now, rule.timezone));
+      const registryRules = new Map([...rules, ...(archivedUsed ? archivedRules : []), ...archivedToday].map((rule) => [rule.id, rule]));
+      const ownerRegistry = await ownerRegistryFor(allRules, [...registryRules.values()], { observe: true, poll: true });
       await markQuietOwnStations(rules, ownerRegistry);
       await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
         // 规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻。
         const at = now + Math.max(0, Date.now() - startedAt);
         await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
           .catch(() => null);
+      });
+      await mapWithConcurrency(archivedToday, MAX_CONCURRENT_RULES, async (rule) => {
+        const at = now + Math.max(0, Date.now() - startedAt);
+        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry }).catch(() => null);
       });
       await syncOptionUnreadableSince(rules, { observe: true }); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
       await settleDue(plan, ownerRegistry);
@@ -4394,6 +4458,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     invalidateSources() {
       metadataCache.clear();
       identityCache.clear();
+      metadataFailures.clear();
+      latestToday.clear();
       // P1a 的两张表也清：渠道收费的沿用和「今天」快照的跳写都要从现读重新开始
       ownRevenueCache.clear();
       ownChannelActivity.clear(); // 减压 PR 沿用的渠道净额度记录也跟着清，不然清缓存以后还会沿用旧数据
@@ -4414,11 +4480,23 @@ export function startReconciliationPolling(rt, options = {}) {
     rt._reconciliationPollTimer = setTimeout(tick, delayMs);
     rt._reconciliationPollTimer.unref?.();
   };
+  let running = false, lastStartAt = 0;
   const tick = async () => {
+    running = true;
+    lastStartAt = Date.now();
     try { await module.refreshDue(); } catch { /* 下一轮重试 */ }
     // 系统自己试读上游（身份、完整账单、时区）：到点的才读，失败按退避
     try { await (rt.autoVerify ||= createAutoVerifier(rt)).verifyDue(); } catch { /* 下一轮重试 */ }
+    running = false;
     schedule(Math.max(60, Number(rt.store.settings?.refreshIntervalSec) || 60) * 1000);
+  };
+  // 每日利润页发现还有没读到的行：不等等待间隔走完，早点跑一轮。只在没在跑、离上一轮开始已满一个轮询间隔时踢——
+  // 两轮的间隔不会比设置的刷新间隔更短，页面再怎么催、有一行一直读不到，也不会让后台多读
+  rt._reconciliationPollKick = () => {
+    if (running || Date.now() - lastStartAt < Math.max(60, Number(rt.store.settings?.refreshIntervalSec) || 60) * 1000) return false;
+    clearTimeout(rt._reconciliationPollTimer);
+    schedule(0);
+    return true;
   };
   schedule(0);
   return module;

@@ -1,12 +1,12 @@
 // POST /api/reconciliation/profit —— 每日利润页 A（设计稿 #118 §9）整页一次读：body 同 /api/reconciliation/query（preset、startMs、endMs）。
-// 只读：evaluate 不写库；「刷新」和单行「重新读取」照旧走 /query 带 observe。
+// 只读：evaluate 不写库；整页只读缓存（cacheOnly）：不等上游、不发外面的请求，没读到的行给「还在读取」，读取只在后台轮询那一路；「刷新」和单行「重新读取」照旧走 /query 带 observe。
 import { withAuth, json } from "../../../../lib/api.js";
 import { createReconciliationModule, reconciliationErrorResponse } from "../../../../server/reconciliation.js";
 
 export const POST = withAuth(async (request, rt) => {
   const body = await request.json().catch(() => ({}));
   try {
-    return json(await (rt.reconciliation ||= createReconciliationModule(rt)).profitPage({ preset: body?.preset, startMs: body?.startMs, endMs: body?.endMs }));
+    return json(await (rt.reconciliation ||= createReconciliationModule(rt)).profitPage({ preset: body?.preset, startMs: body?.startMs, endMs: body?.endMs }, { cacheOnly: true }));
   } catch (error) {
     const failure = reconciliationErrorResponse(error);
     if (!failure) throw error;
