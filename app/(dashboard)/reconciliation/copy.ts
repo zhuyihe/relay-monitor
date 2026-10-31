@@ -23,6 +23,8 @@ export const COPY = Object.freeze({
     attentionDays: (channels: number, days: number) => channels === 1 ? `其中 1 个渠道有 ${days} 天需处理，没算进来` : `其中 ${channels} 个渠道共 ${days} 天需处理，没算进来`,
     // 提示类的（今天提醒换 Key）：这一行照常算进来，只提醒
     notice: (channels: number) => `其中 ${channels} 个渠道成本可能少算了`,
+    // 今天上游成本读不到、整行没算进合计（UPSTREAM_COST_UNREAD_TODAY）：和「成本可能少算了」分开说，两种都有时先写这一句
+    unread: (channels: number) => `其中 ${channels} 个渠道上游成本读不到，没算进来`,
   }),
   // 顶上四个数
   summary: Object.freeze({ income: "收入", actual: "上游成本", gross: "毛利", margin: "毛利率" }),

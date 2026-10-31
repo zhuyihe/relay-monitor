@@ -13,7 +13,7 @@ import { ErrorDetail, noteOf } from "../../components/error-detail";
 import type { ProfitKeyRow, ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
 import { EMPTY } from "../../../lib/format";
 import { COPY } from "./copy";
-import { DEFAULT_SORT, arrangeRows, fmtMoney, isTodayView, marginText, hasKeyRows, isSingleDay, isUnbound, keyCells, keyLabel, keyTag, rangeDays, rowCells, rowMoney, rowName, rowUpstream, swappedUpstream, totalsRow } from "./profit-format";
+import { DEFAULT_SORT, arrangeRows, bubbleDiagnostic, fmtMoney, isTodayView, marginText, hasKeyRows, isSingleDay, isUnbound, keyCells, keyLabel, keyTag, rangeDays, rowCells, rowMoney, rowName, rowUpstream, swappedUpstream, totalsRow } from "./profit-format";
 import type { Ctx, RowGroup, RowLayout, Sort, SortKey } from "./profit-format";
 
 type Props = {
@@ -61,7 +61,7 @@ function RowBang({ row, popKey, open, onOpenChange, ...props }: { row: ProfitRow
       <IssuePop tone={tone} title={title} note={note} actions={<ActionButton action={action} row={row} onRetry={props.onRetry} onRefresh={props.onRefresh} retrying={props.retryingKeys.has(row.rowKey)} />}>
         {retryError ? <Alert type="error" showIcon title={COPY.attention.retryFailed} description={<ErrorDetail raw={noteOf(retryError).raw} />} /> : null}
         {/* 读上游失败（被拒、读不到、超时）时上游回的原话（服务端脱敏过）：和上游列表、重新读取报错同一个「查看详细原因」 */}
-        {attention?.diagnostic || notice?.diagnostic ? <ErrorDetail raw={attention?.diagnostic ?? notice?.diagnostic} /> : null}
+        {bubbleDiagnostic(row) ? <ErrorDetail raw={bubbleDiagnostic(row)} /> : null}
       </IssuePop>
     </IssueBang>
   </span>;

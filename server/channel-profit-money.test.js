@@ -1616,7 +1616,7 @@ for (const [label, reply, expectDiag] of [
     const f = await failingUpstreamFixture(t, reply);
     const row = await todayRow(f);
     assert.deepEqual([row.counted, row.incomeUsd, row.actualCostUsd, row.attention], [false, null, null, null], "收入落进没算进来的，成本「—」");
-    assert.deepEqual([row.notice.code, row.notice.text, row.notice.detail, row.notice.action], ["UPSTREAM_COST_UNREAD_TODAY", "上游成本这会儿读不到", "这把 Key 今天的用量上游没回过来，这一行先不算进合计；读到以后会自动补上。", null]);
+    assert.deepEqual([row.notice.code, row.notice.text, row.notice.detail, row.notice.action], ["UPSTREAM_COST_UNREAD_TODAY", "上游成本这会儿读不到", "这把 Key 今天的用量上游没回过来，今天先不算进合计；读到以后会自动补上。", null]);
     assert.match(row.notice.diagnostic, expectDiag);
     assert.ok(!row.notice.diagnostic.includes(SECRET_TOKEN));
     // 多天范围里今天那一格：同样亮
