@@ -114,7 +114,8 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
         {group.title ? <tr className={`jy-profit-group__title is-${group.key}`}><td colSpan={columns}>{group.key === "active" ? <i className="jy-profit-group__dot" aria-hidden="true" /> : null}{group.title}</td></tr> : null}
         {group.rows.map((row) => {
           const name = rowName(row);
-          return <Fragment key={row.rowKey}><tr className={`jy-profit-row${detailDay ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={detailDay ? () => onOpenDetail(row, detailDay) : undefined}>
+          const openable = detailDay != null && !row.reading; // 还在读取的行没有计算明细，读到以后自己出现
+          return <Fragment key={row.rowKey}><tr className={`jy-profit-row${openable ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={openable ? () => onOpenDetail(row, detailDay) : undefined}>
             <td className="jy-profit-row__name">
               <span className="jy-profit-row__line">
                 <strong>{name}</strong>
@@ -124,7 +125,7 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
               {rowUpstream(row) ? <small>{rowUpstream(row)}</small> : null}
             </td>
             <Cells row={row} ctx={ctx} />
-            {detailDay ? <td className="r jy-profit-detail-cell"><Button type="link" size="small" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}</Button></td> : null}
+            {detailDay ? <td className="r jy-profit-detail-cell">{openable ? <Button type="link" size="small" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}</Button> : null}</td> : null}
           </tr>{hasKeyRows(row) ? row.keys!.map((key) => <KeyRowDesktop key={String(key.tokenId)} row={row} keyRow={key} ctx={ctx} view={view} detailDay={detailDay} />) : null}</Fragment>;
         })}
       </tbody>)}
@@ -144,20 +145,20 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
       <ul className="jy-profit-cards">
         {group.rows.map((row) => {
           const name = rowName(row), money = rowMoney(row, ctx.currency), cells = rowCells(row, ctx);
-          const loss = cells.gross != null && cells.gross < 0;
-          return <li key={row.rowKey} className={`jy-profit-card${detailDay ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={detailDay ? () => onOpenDetail(row, detailDay) : undefined}>
+          const loss = cells.gross != null && cells.gross < 0, openable = detailDay != null && !row.reading; // 还在读取：点不开、不带箭头
+          return <li key={row.rowKey} className={`jy-profit-card${openable ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={openable ? () => onOpenDetail(row, detailDay) : undefined}>
             <div className="jy-profit-card__head">
               <strong>{name}</strong>
               {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
               <RowBang row={row} popKey={`m:${row.rowKey}`} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
-              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : readingText(row) ?? EMPTY}</b>{detailDay ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
+              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : readingText(row) ?? EMPTY}</b>{openable ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
             </div>
-            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{COPY.table.mobileLine(cells.income == null && readingText(row) ? readingText(row)! : fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : readingText(row) ?? EMPTY)}</span></div>
+            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{readingText(row) ? null : COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
             {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
               const cells = keyCells(key, row, ctx);
               return <li key={String(key.tokenId)} className="jy-profit-key">
-                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span><b>{readingText(row) ?? (cells.gross == null ? EMPTY : marginText(cells.gross, cells.income))}</b></div>
-                <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(readingText(row) ?? fmtMoney(cells.income, ctx.currency), readingText(row) ?? fmtMoney(cells.actual, ctx.currency))}</div>
+                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span>{readingText(row) ? null : <b>{cells.gross == null ? EMPTY : marginText(cells.gross, cells.income)}</b>}</div>
+                {readingText(row) ? null : <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(fmtMoney(cells.income, ctx.currency), fmtMoney(cells.actual, ctx.currency))}</div>}
               </li>;
             })}</ul> : null}
           </li>;

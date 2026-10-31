@@ -416,6 +416,31 @@ test("按 Key 算利润（近 7 天）：换过 Key 的渠道标签带日子；�
   if (process.env.UI_SHOT_DIR) { await rowOf(page, "Rule D").scrollIntoViewIfNeeded(); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-keys-7d-1440x900.png` }); }
 });
 
+test("每日利润小毛病：人民币时顶上四个数不折行、四格一样高；还在读取的行没有「计算明细」（电脑不出链接，手机点不开、没有「›」），手机上只写一次「还在读取」", async (t) => {
+  const cny = { income: 7, cost: 7, costBasis: "usage" };
+  const rows = [{ ...profitRow("rule-1", "Rule A", { income: 178.78, cost: 61.2 }), rates: cny }, { ...profitRow("rule-2", "Rule B", { income: 5, cost: 1 }), rates: cny, reading: true, counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null }];
+  const pageOf = () => ({ ...profitPage(rows), displayCurrency: "CNY" });
+  const { page } = await openDailyPage(t, { rows, pageOf, viewport: { width: 1440, height: 900 } });
+  const boxes = () => page.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().height)));
+  const heights = await boxes(); assert.equal(new Set(heights).size, 1, `四格一样高：${heights}`);
+  const lines = await page.locator(".jy-profit-metric__value").evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight))));
+  assert.deepEqual(lines, [1, 1, 1, 1], "每个数一行");
+  assert.equal(await page.locator(".jy-profit-metric__value").first().innerText(), "¥1,251.46");
+  assert.equal(await rowOf(page, "Rule B").getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).count(), 0, "读取中的行没有「计算明细」");
+  assert.equal((await rowOf(page, "Rule B").getAttribute("class")).includes("is-clickable"), false);
+  assert.equal(await rowOf(page, "Rule A").getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).count(), 1, "读好的行照旧有");
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-small-1440x900.png` });
+  const phone = await openDailyPage(t, { rows, pageOf, viewport: { width: 375, height: 812 } }).then((opened) => opened.page);
+  const phoneBoxes = () => phone.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().height)));
+  const cardB = cardOf(phone, "Rule B"); await cardB.waitFor();
+  assert.equal(await cardB.getByText(PROFIT_COPY.gap.reading, { exact: true }).count(), 1, "手机上只写一次");
+  assert.equal(await cardB.locator(".jy-profit-card__chev").count(), 0); assert.equal((await cardB.getAttribute("class")).includes("is-clickable"), false);
+  assert.equal(await cardOf(phone, "Rule A").locator(".jy-profit-card__chev").count(), 1);
+  assert.equal(new Set(await phoneBoxes()).size <= 2, true, "手机两排各自一样高");
+  assert.ok(await phone.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px document root overflows horizontally");
+  if (process.env.UI_SHOT_DIR) await phone.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-small-375x812.png` });
+});
+
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
 const onboardingRequests = new WeakMap();
