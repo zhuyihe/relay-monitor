@@ -13,7 +13,7 @@ import { ErrorDetail, noteOf } from "../../components/error-detail";
 import type { ProfitKeyRow, ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
 import { EMPTY } from "../../../lib/format";
 import { COPY } from "./copy";
-import { DEFAULT_SORT, arrangeRows, bubbleDiagnostic, fmtMoney, isTodayView, marginText, hasKeyRows, isSingleDay, isUnbound, keyCells, keyLabel, keyTag, rangeDays, rowCells, rowMoney, rowName, rowUpstream, swappedUpstream, totalsRow } from "./profit-format";
+import { DEFAULT_SORT, arrangeRows, bubbleDiagnostic, fmtMoney, isTodayView, marginText, hasKeyRows, isSingleDay, isUnbound, keyCells, keyLabel, keyTag, rangeDays, readingText, rowCells, rowMoney, rowName, rowUpstream, swappedUpstream, totalsRow } from "./profit-format";
 import type { Ctx, RowGroup, RowLayout, Sort, SortKey } from "./profit-format";
 
 type Props = {
@@ -69,12 +69,12 @@ function RowBang({ row, popKey, open, onOpenChange, ...props }: { row: ProfitRow
 
 function Cells({ row, ctx }: { row: ProfitRow; ctx: Ctx }) {
   const money = rowMoney(row, ctx.currency), cells = rowCells(row, ctx);
-  const loss = cells.gross != null && cells.gross < 0;
+  const loss = cells.gross != null && cells.gross < 0, reading = readingText(row) ?? EMPTY;
   return <>
-    <td className="jy-profit-num">{fmtMoney(cells.income, ctx.currency)}</td>
-    <td className="jy-profit-num">{row.counted ? fmtMoney(money.actual, ctx.currency) : EMPTY}</td>
-    <td className="jy-profit-num">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</td>
-    <td className="jy-profit-num">{row.counted ? neg(loss, marginText(money.gross, money.income)) : EMPTY}</td>
+    <td className="jy-profit-num">{cells.income == null ? reading : fmtMoney(cells.income, ctx.currency)}</td>
+    <td className="jy-profit-num">{row.counted ? fmtMoney(money.actual, ctx.currency) : reading}</td>
+    <td className="jy-profit-num">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : reading}</td>
+    <td className="jy-profit-num">{row.counted ? neg(loss, marginText(money.gross, money.income)) : reading}</td>
   </>;
 }
 
@@ -86,13 +86,13 @@ function KeyTag({ keyRow, view }: { keyRow: ProfitKeyRow; view: KeyView }) {
   return tag ? <em className={`jy-tag jy-profit-key-tag ${keyRow.state === "active" ? "jy-tag--info" : "jy-tag--type"}`}>{tag}</em> : null;
 }
 function KeyRowDesktop({ row, keyRow, ctx, view, detailDay }: { row: ProfitRow; keyRow: ProfitKeyRow; ctx: Ctx; view: KeyView; detailDay: string | null }) {
-  const cells = keyCells(keyRow, row, ctx), loss = cells.gross != null && cells.gross < 0;
+  const cells = keyCells(keyRow, row, ctx), loss = cells.gross != null && cells.gross < 0, reading = readingText(row); // 渠道整行还在读取：Key 行的数字格也写「还在读取」，Key 名、标签照常
   return <tr className="jy-profit-keyrow" data-key-of={row.rowKey}>
     <td className="jy-profit-keyrow__name"><span>{keyLabel(keyRow, swappedUpstream(row))}</span><KeyTag keyRow={keyRow} view={view} /></td>
-    <td className="jy-profit-num">{fmtMoney(cells.income, ctx.currency)}</td>
-    <td className="jy-profit-num">{fmtMoney(cells.actual, ctx.currency)}</td>
-    <td className="jy-profit-num">{cells.gross == null ? EMPTY : neg(loss, fmtMoney(cells.gross, ctx.currency))}</td>
-    <td className="jy-profit-num">{cells.gross == null ? EMPTY : neg(loss, marginText(cells.gross, cells.income))}</td>
+    <td className="jy-profit-num">{reading ?? fmtMoney(cells.income, ctx.currency)}</td>
+    <td className="jy-profit-num">{reading ?? fmtMoney(cells.actual, ctx.currency)}</td>
+    <td className="jy-profit-num">{reading ?? (cells.gross == null ? EMPTY : neg(loss, fmtMoney(cells.gross, ctx.currency)))}</td>
+    <td className="jy-profit-num">{reading ?? (cells.gross == null ? EMPTY : neg(loss, marginText(cells.gross, cells.income)))}</td>
     {detailDay ? <td /> : null}
   </tr>;
 }
@@ -150,14 +150,14 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
               <strong>{name}</strong>
               {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
               <RowBang row={row} popKey={`m:${row.rowKey}`} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
-              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</b>{detailDay ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
+              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : readingText(row) ?? EMPTY}</b>{detailDay ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
             </div>
-            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
+            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{COPY.table.mobileLine(cells.income == null && readingText(row) ? readingText(row)! : fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : readingText(row) ?? EMPTY)}</span></div>
             {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
               const cells = keyCells(key, row, ctx);
               return <li key={String(key.tokenId)} className="jy-profit-key">
-                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span><b>{cells.gross == null ? EMPTY : marginText(cells.gross, cells.income)}</b></div>
-                <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(fmtMoney(cells.income, ctx.currency), fmtMoney(cells.actual, ctx.currency))}</div>
+                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span><b>{readingText(row) ?? (cells.gross == null ? EMPTY : marginText(cells.gross, cells.income))}</b></div>
+                <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(readingText(row) ?? fmtMoney(cells.income, ctx.currency), readingText(row) ?? fmtMoney(cells.actual, ctx.currency))}</div>
               </li>;
             })}</ul> : null}
           </li>;

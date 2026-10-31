@@ -135,6 +135,8 @@ export type ProfitRow = {
   // 页面换算用的汇率：收入按自营站点、成本按这个上游；没设置是 null（按美元显示）
   rates: { income: number | null; cost: number | null; costBasis: "usage" | "fixed" | null };
   startedOn: string | null; startedAt: number | null; counted: boolean;
+  // 今天这一格后台还没读到（还没轮到、读还在路上）：页面写「还在读取」，读到会自己补上；和「读不到」（notice UPSTREAM_COST_UNREAD_TODAY，真读过、读失败）不是一回事
+  reading: boolean;
   // 一个渠道一行（rowKey `ch:<自营站点>:<渠道>`）：bound 在绑着的，unboundOn 已解绑的那天（整天算，之后不算）；毛利率 = 毛利 ÷ 收入，没收入是 null
   incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
   gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };

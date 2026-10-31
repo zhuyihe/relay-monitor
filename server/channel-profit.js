@@ -50,12 +50,12 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
 
   // 每个渠道现在的样子。state：running 在算 / startable 认出了 Key、可以开始 / blocked 不能开始（reason 说为什么）；
   // optedOut：用户停过（以后不自动开始，点「开始算利润」才开始）。groups：能开始的渠道按 Key 连成的组，一组一个勾、一起算或一起不算（3.3）
-  async function status(ownStationId, { fresh = false } = {}) {
+  async function status(ownStationId, { fresh = false, cacheOnly = false } = {}) {
     const own = ownStationOf(ownStationId);
     if (!keyAgentConfigOf(own)) return { ok: false, code: "KEY_AGENT_NOT_CONFIGURED" };
     const catalogue = onboarding()?.getSourceCatalogue?.();
     if (!catalogue?.ownSource || catalogue.stale) return { ok: false, code: "CHANNEL_CATALOGUE_STALE" };
-    const identified = await identify(rt, own, { fresh });
+    const identified = await identify(rt, own, { fresh, cacheOnly });
     if (!identified.ok) return { ok: false, code: identified.code || "KEY_AGENT_UNAVAILABLE" };
     if (!identified.channels) return { ok: false, code: "KEY_AGENT_UNAVAILABLE" };
     const [rules, optouts] = await Promise.all([reconciliation().listRules(), reconciliation().listChannelOptouts(ownStationId)]);

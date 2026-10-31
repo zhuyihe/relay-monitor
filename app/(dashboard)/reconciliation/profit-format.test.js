@@ -18,7 +18,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 const { COPY } = await import("./copy.ts");
 const {
   attentionSuffix, bubbleDiagnostic, arrangeRows, chartDays, keyCells, keyLabel, keyTag, rowUpstream, hasKeyRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
-  marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
+  marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, ROWS_READING_POLL_MS, readingText, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
 const { EMPTY, RATE_UNSET_USD } = await import("../../../lib/format.js");
@@ -321,4 +321,29 @@ test("感叹号气泡里的详细原因：有需处理就只用需处理自己�
   assert.equal(bubbleDiagnostic(row({ notice, attention })), undefined, "需处理自己没有详细原因：不显示今天超时那份");
   assert.equal(bubbleDiagnostic(row({ notice, attention: { ...attention, diagnostic: "HTTP 403 · /api/x" } })), "HTTP 403 · /api/x");
   assert.equal(bubbleDiagnostic(row({})), undefined);
+});
+
+test("还在读取：页顶写「其中 N 个渠道还在读取」排在最前；格子写「还在读取」不写「—」；有数的行照常；和「读不到」「需处理」分开数", () => {
+  const reading = row({ rowKey: "r1", reading: true, counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, notice: null, attention: null });
+  const unread = row({ rowKey: "r2", counted: false, incomeUsd: null, notice: { code: "UPSTREAM_COST_UNREAD_TODAY", text: "t", detail: null, action: null } });
+  assert.equal(attentionSuffix(page({ rows: [reading, row()] })), "其中 1 个渠道还在读取");
+  assert.equal(attentionSuffix(page({ rows: [reading, reading, unread] })), "其中 2 个渠道还在读取 · 其中 1 个渠道上游成本读不到，没算进来");
+  const out = row({ rowKey: "r3", counted: false, incomeUsd: null, attention: { code: "KEY_INVALID_OR_DENIED", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null } });
+  const less = row({ rowKey: "r4", notice: { code: "COST_UNREAD_TODAY", text: "t", detail: null, action: null } });
+  assert.equal(attentionSuffix(page({ rows: [less, unread, reading, out] })),
+    "其中 1 个渠道需处理，没算进来 · 其中 1 个渠道还在读取 · 其中 1 个渠道上游成本读不到，没算进来 · 其中 1 个渠道成本可能少算了", "顺序：需处理 → 还在读取 → 读不到 → 成本可能少算了");
+  assert.equal(attentionSuffix(page({ rows: [row()] })), "", "没有还在读取的：没有这一句");
+  assert.equal(readingText(reading), "还在读取");
+  assert.equal(readingText(row()), null);
+  assert.equal(readingText(unread), null, "读不到不是还在读取");
+  // 多天范围里今天还在读取、已固定的日子有数：行已经算进来（counted），格子照常显示数
+  assert.equal(readingText(row({ reading: true, counted: true })), null);
+});
+
+test("还在读取时页面 10 秒再要一次整页（服务端只读缓存），都读到了回到原来的节奏", () => {
+  assert.equal(livePollMs({ preset: "today" }, NOW, TZ, false, true), ROWS_READING_POLL_MS);
+  assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ, false, true), ROWS_READING_POLL_MS, "昨天不含今天，也不会有行还在读取；有就按 10 秒");
+  assert.equal(livePollMs({ preset: "7d" }, NOW, TZ, false, true), ROWS_READING_POLL_MS, "近 7 天本来 5 分钟，还在读取时 10 秒");
+  assert.equal(livePollMs({ preset: "today" }, NOW, TZ, false, false), LIVE_POLL_MS);
+  assert.equal(livePollMs({ preset: "7d" }, NOW, TZ, false, false), LIVE_POLL_LONG_MS);
 });

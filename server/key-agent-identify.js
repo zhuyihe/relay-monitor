@@ -193,6 +193,11 @@ const unresolvedCount = (result) => (result?.channels || []).reduce((total, chan
 // 缓存分两份：result 是最近一次问的结果（失败了也记，4 分钟内不重复问）；lastGood 是最近一次读成功的结果、etag、原始渠道列表，
 // 失败结果不会覆盖它——一次 503 之后恢复回 304 时，沿用的还是失败之前认出的 channels，不是 null
 export async function identifyChannelsCached(rt, ownStation, options = {}) {
+  // cacheOnly（每日利润页）：只看有没有缓存好的，不发请求；没有就当读取服务读不到
+  if (options.cacheOnly) {
+    const cache = rt._keyAgentIdentifyCache;
+    return cache && cache.stationId === ownStation.id ? cache.result : { ok: false, code: "KEY_AGENT_UNAVAILABLE" };
+  }
   // 同一个自营站点同时来几个调用（轮询、页面查询、报告）：合并成一次，别各读一遍上游目录（缓存在 await 之后才写，挡不住同时进来的）
   const inflight = (rt._keyAgentIdentifyInflight ||= new Map());
   if (inflight.has(ownStation.id)) return inflight.get(ownStation.id);
