@@ -1647,7 +1647,7 @@ test("页面只读缓存：轮询刚读过时数和现读一样；一个外面�
   const before = f.requests.length;
   const cached = await cachedPage(f);
   assert.equal(f.requests.length, before, "页面只读缓存：没有任何外面的请求（含自营站点）");
-  assert.equal(f.rt._reconciliationLastTodayViewAt.at, f.state.now, "页面来看今天，算「有人在看」：后台轮询不放慢");
+  assert.equal(f.rt._reconciliationLastTodayViewAt.at, f.state.now - 10 * 60000 + 90000, "页面来看今天，算「有人在看」，只维持 90 秒（不是 10 分钟）：页面只开一会儿就关，轮询不会因此多快速读");
   assert.deepEqual(cached.rows.map((row) => row.reading), [false, false]);
   const live = await f.rt.reconciliation.profitPage({ preset: "today" });
   assert.deepEqual(moneyOf(cached), moneyOf(live), "全部正常：数和以前现读的一样");
@@ -1807,4 +1807,41 @@ test("页面只读缓存：「数据截至」写那份数真实的时刻（轮�
   assert.equal(Date.parse((await f.rt.reconciliation.profitPage({ preset: "today" })).asOf), SH("2026-10-30T10:12:00"));
   await f.at("2026-10-30T10:30:00"); // 太旧、都在读取：没有真实时刻可写，用现在
   assert.equal(Date.parse((await cachedPage(f)).asOf), SH("2026-10-30T10:30:00"));
+});
+
+test("只含今天的范围（自选今天、开始算以来都在今天、每月 1 号的本月）：和今天一样取轮询的结果，有数、不是「—」；结果太旧时「还在读取」", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T10:10:00");
+  const todayStart = SH("2026-10-30T00:00:00");
+  const ranges = [{ preset: "custom", startMs: todayStart, endMs: f.state.now }, { preset: "since" }];
+  for (const input of ranges) {
+    const cached = await cachedPage(f, input);
+    assert.deepEqual(cached.rows.map((row) => [row.counted, row.reading]), [[true, false], [true, false]], input.preset);
+    assert.deepEqual(moneyOf(cached), moneyOf(await f.rt.reconciliation.profitPage(input)), `${input.preset}：数和现读一样`);
+  }
+  await f.at("2026-10-30T10:30:00");
+  assert.deepEqual((await cachedPage(f, { preset: "custom", startMs: todayStart, endMs: f.state.now })).rows.map((row) => [row.counted, row.reading]), [[false, true], [false, true]], "太旧：还在读取，不是「—」");
+  // 每月 1 号的「本月」只含今天
+  const g = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+  await g.at("2026-11-01T10:00:00");
+  await g.profit.selectKey({ ownStationId: g.own.id, channelId: 1, upstreamStationId: g.supplier.id, tokenId: 9 });
+  await g.round("2026-11-01T10:05:00");
+  const month = await cachedPage(g, { preset: "month" });
+  assert.deepEqual([month.rows[0].counted, month.rows[0].reading], [true, false]);
+});
+
+test("多天范围的「数据截至」：只取这一行今天那块实际用的结果；前一天停掉的绑定留着的旧结果不会把整页的时间拖回昨天", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T12:00:00");
+  await f.at("2026-10-10T15:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.round("2026-10-10T16:00:00"); // 轮询顺带读了这条今天停掉的绑定，留下一份今天的结果
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-11T10:00:30");
+  for (const preset of ["7d", "month"]) {
+    const page = await cachedPage(f, { preset });
+    assert.equal(Date.parse(page.asOf), f.state.now, `${preset}：不是昨天 16:00`);
+  }
 });

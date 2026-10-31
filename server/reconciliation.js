@@ -796,11 +796,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           skeleton = answer.results.find((row) => row.rule.id === rule.id) || skeleton;
         }
       }
-      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days, costUnread = false, readingToday = false;
+      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days, costUnread = false, readingToday = false, todayReadAt = Infinity;
       for (const live of entry.live) {
         const piece = resultAt(live.key, rule.id, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`);
         if (unreadToday.has(`${rule.id}|${live.day}`)) { costUnread = true; continue; } // 已解绑的这条今天没读成：不记没算进来的天，页面按渠道亮提示
         if (piece?.todayReading) { readingToday = true; continue; } // 今天这一格还在读取：不算「没读成」，页面给「还在读取」
+        if (piece?.todayReadAtMs != null) todayReadAt = Math.min(todayReadAt, piece.todayReadAtMs);
         if (!piece || !countsInSummary(piece) || dropLive.has(`${rule.id}|${live.day}`)) { notCounted.push({ ruleId: rule.id, day: live.day, reason: "READ_FAILED" }); continue; }
         const money = moneyOfResult(piece);
         income += money.income; cost += money.cost; counted += 1;
@@ -820,6 +821,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           : { ...skeleton, window: w, ...(liveAllDropped ? { calculation: { ...skeleton.calculation, profitUsd: null } } : {}) };
       if (costUnread) merged.todayCostUnread = true;
       if (readingToday) merged.todayReading = true;
+      if (Number.isFinite(todayReadAt)) merged.todayReadAtMs = todayReadAt; else delete merged.todayReadAtMs; // 这一行今天那块实际用的结果的读取时刻，不是别的天的
       rows.push(merged);
     }
     return { response, results: rows, stickyDays: sticky, notCounted, liveKeys };
@@ -828,13 +830,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 每日利润页只读缓存：这条绑定轮询最近一次读到的「今天」（同一天、口径没变、没超过两个轮询间隔 + 2 分钟）；不合格返回 null
   function todayFromPoll(rule, window) {
     const stored = latestToday.get(rule.id);
-    if (!stored || window.preset !== "today") return null;
+    if (!stored) return null;
     const pollMs = Math.max(60, Number(rt.store.settings?.refreshIntervalSec) || 60) * 1000;
     const value = stored.value;
     if (Date.now() - stored.at >= 2 * pollMs + TODAY_RESULT_GRACE_MS || stored.sourceCredential !== currentSourceCredential(rule)
       || value.window?.startMs !== window.startMs || canonicalTimeZone(value.window?.timezone) !== canonicalTimeZone(window.timezone)
       || reconciliationScopeFingerprint(rule, value.transitionSegments || []) !== reconciliationScopeFingerprint(value.rule, value.transitionSegments || [])) return null;
+    value.todayReadAtMs ??= value.window.endMs; // 这份数真实的读取时刻（页顶「数据截至」用），不是现在
     return value;
+  }
+  // 每日利润页来看今天：只让「有人在看」维持一小会儿（两次页面刷新的时间），不是 OWN_VIEWER_IDLE_MS 那么久——页面只开一会儿就关，轮询不能因此多快速读十分钟
+  const PAGE_VIEW_HOLD_MS = 90000;
+  function markPageViewing() {
+    lastTodayViewAt.at = Math.max(lastTodayViewAt.at ?? 0, Date.now() - OWN_VIEWER_IDLE_MS + PAGE_VIEW_HOLD_MS);
   }
   // 「还在读取」：这一行还没轮到读、读还在路上（页面用 todayReading 区分它和「读不到」，后者是真读过、读失败了，带原因）
   function readingResult(rule, window) {
@@ -4197,7 +4205,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
       // 只读缓存：范围里有今天时，「数据截至」写那份数真实的时刻（轮询读它的截止点，没人看时可能是几分钟前），不写现在；还在读取的行不算
-      const readAts = cacheOnly && labels.includes(dayKeyInTz(now, tz)) ? results.filter((row) => !row.todayReading).map((row) => latestToday.get(row.rule.id)?.value.window?.endMs).filter(Number.isFinite) : [];
+      const readAts = cacheOnly && labels.includes(dayKeyInTz(now, tz)) ? results.filter((row) => !row.todayReading).map((row) => row.todayReadAtMs).filter(Number.isFinite) : [];
       return { ...page, asOf: readAts.length ? new Date(Math.min(now, ...readAts)).toISOString() : response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
@@ -4309,7 +4317,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const input = await sinceInput(rawInput);
       // 减压 PR：页面来读实时窗口（今天/近 7 天/本月），就是「有人在看」的信号——不额外发请求，借用页面本来就有的轮询；
       // 空闲后第一次又来，at 刷成现在，下一轮轮询就不再当没人看，所有渠道都现问
-      if ((options.origin === "page" || options.cacheOnly) && isLiveReconciliationPreset(input.preset)) {
+      if (options.origin === "page" && isLiveReconciliationPreset(input.preset)) {
         const now = Date.now();
         lastTodayViewAt.at = now;
       }
@@ -4363,7 +4371,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
               .catch((err) => { if (err?.code === "RULE_NOT_FOUND") return null; throw err; });
           }
           // 只读缓存：不去读，拿轮询最近一次读到的「今天」；没有（还没轮到、读还在路上、太旧）就给「还在读取」，页面过一会儿再来要
-          if (options.cacheOnly) return Promise.resolve(window.preset !== "today" ? pendingResult(rule, window, issueText("PENDING")) : todayFromPoll(rule, window) || readingResult(rule, window));
+          if (options.cacheOnly) {
+            // 只含今天的范围（今天、每月 1 号的本月、绑定都是今天才绑的开始算以来、只选今天的自选）都按今天处理；别的没有可取的缓存
+            const todayWindow = resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, Math.max(now, Date.now()));
+            if (window.startMs !== todayWindow.startMs || window.endMs < Date.now() - 120000) return Promise.resolve(pendingResult(rule, window, issueText("PENDING")));
+            markPageViewing();
+            return Promise.resolve(todayFromPoll(rule, todayWindow) || readingResult(rule, window));
+          }
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
             // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
             if (err?.code === "RULE_NOT_FOUND") return null;
