@@ -347,3 +347,26 @@ test("还在读取时页面 10 秒再要一次整页（服务端只读缓存）�
   assert.equal(livePollMs({ preset: "today" }, NOW, TZ, false, false), LIVE_POLL_MS);
   assert.equal(livePollMs({ preset: "7d" }, NOW, TZ, false, false), LIVE_POLL_LONG_MS);
 });
+
+test("人民币：接口按天换好的数（incomeCny / actualCostCny）优先，没给的退回按这一行现在的汇率；Key 行、小格同理", () => {
+  const base = row({ incomeUsd: 10, actualCostUsd: 6, grossProfitUsd: 4, rates: { income: 7, cost: 10, costBasis: "usage" } });
+  const plain = rowMoney(base, "CNY");
+  assert.deepEqual([plain.income, plain.actual, plain.gross], [70, 60, 10], "没给按这一行现在的汇率");
+  const exact = rowMoney({ ...base, incomeCny: 70, actualCostCny: 51.6 }, "CNY");
+  assert.deepEqual([exact.income, exact.actual, exact.gross], [70, 51.6, 70 - 51.6]);
+  assert.equal(rowMoney({ ...base, incomeCny: 70, actualCostCny: 51.6 }, "USD").actual, 6, "美元不受影响");
+  const key = keyCells({ incomeUsd: 5, costUsd: 3, incomeCny: 35, costCny: 25.8 }, base, { currency: "CNY" });
+  assert.deepEqual([key.income, key.actual], [35, 25.8]);
+  assert.deepEqual([keyCells({ incomeUsd: 5, costUsd: 3 }, base, { currency: "CNY" }).actual], [30]);
+});
+
+test("看过去的一天页头：固定了写「已固定」；有渠道还在读取时只写日期加那一句，不连着写两次「还在读取」；没固定又没有渠道在读取时仍写「还在读取」", () => {
+  const ctx = { tz: TZ, currency: "USD", now: NOW };
+  const reading = row({ rowKey: "r1", reading: true, counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, notice: null, attention: null });
+  const fixed = rangeCaption(page({ rows: [row()] }), ctx);
+  assert.match(fixed, /^10月25日 .* · 已固定$/);
+  const day = rangeCaption(page({ dayCounts: { fixed: 0, reading: 1, today: 0 }, rows: [row(), reading] }), ctx);
+  assert.match(day, /^10月25日 周\S · 其中 1 个渠道还在读取$/, day);
+  assert.equal(day.split("还在读取").length - 1, 1, "「还在读取」只出现一次");
+  assert.match(rangeCaption(page({ dayCounts: { fixed: 0, reading: 1, today: 0 }, rows: [row()] }), ctx), /^10月25日 周\S · 还在读取$/);
+});
