@@ -79,11 +79,16 @@ export function rangeText(page: ProfitPageResponse, ctx: Ctx) {
   return first === last ? day(first) : `${day(first)}–${day(last)}`;
 }
 export const channelCount = (rows: ProfitRow[]) => sum(rows.map((row) => row.channels?.length || 0));
+// 感叹号气泡里「查看详细原因」的原文：有需处理就只用需处理自己的（需处理可能在提示之后才设到这一行上，不能显示别的问题的原话），没有才用提示的
+export const bubbleDiagnostic = (row: ProfitRow): string | undefined => (row.attention ? row.attention.diagnostic : row.notice?.diagnostic) || undefined;
 // 页顶一句后面接的：有需处理的渠道（这几天没算进来）有几个，多天时写没算进来的天数加起来（一个渠道「有 M 天」，几个渠道「共 M 天」）；有提示类的（照常算进来、只是成本可能少算了）再接一句，中间用「 · 」隔开；都没有是空字符串（用语规范 §4）
 export function attentionSuffix(page: ProfitPageResponse) {
-  const out = page.rows.filter((row) => row.attention && (!row.counted || row.excludedDays > 0)), notices = page.rows.filter((row) => row.notice && !out.includes(row));
+  const out = page.rows.filter((row) => row.attention && (!row.counted || row.excludedDays > 0)), noticed = page.rows.filter((row) => row.notice && !out.includes(row));
+  // 今天上游成本读不到的行整行没算进合计，单独一句；别的提示（成本可能少算了，照常算进来）一句
+  const unread = noticed.filter((row) => row.notice?.code === "UPSTREAM_COST_UNREAD_TODAY"), notices = noticed.filter((row) => row.notice?.code !== "UPSTREAM_COST_UNREAD_TODAY");
   const parts: string[] = [];
   if (out.length) parts.push(isSingleDay(page) ? COPY.caption.attention(channelCount(out)) : COPY.caption.attentionDays(channelCount(out), Math.max(1, sum(out.map((row) => row.excludedDays || 0)))));
+  if (unread.length) parts.push(COPY.caption.unread(channelCount(unread)));
   if (notices.length) parts.push(COPY.caption.notice(channelCount(notices)));
   return parts.join(" · ");
 }

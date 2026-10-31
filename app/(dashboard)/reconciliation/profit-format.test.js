@@ -17,7 +17,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 
 const { COPY } = await import("./copy.ts");
 const {
-  attentionSuffix, arrangeRows, chartDays, keyCells, keyLabel, keyTag, rowUpstream, hasKeyRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
+  attentionSuffix, bubbleDiagnostic, arrangeRows, chartDays, keyCells, keyLabel, keyTag, rowUpstream, hasKeyRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
   marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
@@ -299,4 +299,26 @@ test("运营总览的毛利一格（grossMetric）：今天、已固定、近 7 
   assert.equal(grossMetric(page({ fixedCostUsd: null, netProfitUsd: null }), ctx).lines[2], "固定成本算不出，净利先不算");
   const cny = { currency: "CNY", tz: TZ, now: NOW };
   assert.equal(grossMetric(page({ rows: [row({ rates: { income: 7, cost: 6, costBasis: "usage" } })] }), cny).lines[2], "扣固定成本 ≈ ¥16.31 后，净利 ≈ ¥" + (14.6 * 7 - 9.2 * 6 - 2.33 * 7).toFixed(2));
+});
+
+test("页顶一句：今天上游成本读不到的行整行没算进合计，单独一句「其中 N 个渠道上游成本读不到，没算进来」；不算在「成本可能少算了」那个数里；单天、多天、两种提示同时有、再加需处理都对", () => {
+  const unread = chan("辛", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, channels: [{ channelId: 5, name: "辛" }],
+    notice: { code: "UPSTREAM_COST_UNREAD_TODAY", text: "上游成本这会儿读不到", detail: null, action: null, diagnostic: "HTTP 524 · /api/log/self/stat" } });
+  const less = row({ notice: { code: "COST_UNREAD_TODAY", text: "t", detail: null, action: null } });
+  const idle = row({ notice: { code: "CHANNEL_KEY_IDLE_TODAY", text: "t", detail: null, action: null } });
+  const out = chan("丙", null, null, { counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, excludedDays: 1, attention: { code: "OWN_BILLING_UNAVAILABLE", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null } });
+  assert.equal(attentionSuffix(page({ rows: [unread] })), "其中 1 个渠道上游成本读不到，没算进来", "单天");
+  assert.equal(attentionSuffix(weekPage({ rows: [unread] })), "其中 1 个渠道上游成本读不到，没算进来", "多天");
+  assert.equal(attentionSuffix(page({ rows: [unread, less, idle] })), "其中 1 个渠道上游成本读不到，没算进来 · 其中 2 个渠道成本可能少算了", "两种提示同时有：先写读不到的，成本可能少算了的数里不含它");
+  assert.equal(attentionSuffix(page({ rows: [out, unread, less] })), "其中 1 个渠道需处理，没算进来 · 其中 1 个渠道上游成本读不到，没算进来 · 其中 1 个渠道成本可能少算了");
+  assert.equal(attentionSuffix(page({ rows: [less] })), "其中 1 个渠道成本可能少算了");
+});
+
+test("感叹号气泡里的详细原因：有需处理就只用需处理自己的，需处理没有就不显示（不能显示提示里别的问题的原话）；没有需处理才用提示的", () => {
+  const notice = { code: "UPSTREAM_COST_UNREAD_TODAY", text: "t", detail: null, action: null, diagnostic: "HTTP 524 · /api/log/self/stat · 上游回：timeout" };
+  const attention = { code: "KEY_INVALID_OR_DENIED", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null };
+  assert.equal(bubbleDiagnostic(row({ notice })), "HTTP 524 · /api/log/self/stat · 上游回：timeout");
+  assert.equal(bubbleDiagnostic(row({ notice, attention })), undefined, "需处理自己没有详细原因：不显示今天超时那份");
+  assert.equal(bubbleDiagnostic(row({ notice, attention: { ...attention, diagnostic: "HTTP 403 · /api/x" } })), "HTTP 403 · /api/x");
+  assert.equal(bubbleDiagnostic(row({})), undefined);
 });
