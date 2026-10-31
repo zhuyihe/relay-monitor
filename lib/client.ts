@@ -132,7 +132,7 @@ export type ProfitKeyRow = {
   // 范围里有几天这把 Key 的收入份额没分（这天还没固定、只有一边固定）：数不进 incomeUsd，成本照进 costUsd
   pendingDays: number;
 };
-export type ProfitDetailKey = Omit<ProfitKeyRow, "state" | "firstDay" | "lastDay" | "days" | "pendingDays">;
+export type ProfitDetailKey = Omit<ProfitKeyRow, "state" | "firstDay" | "lastDay" | "days" | "pendingDays"> & { costRate?: number | null; incomeRate?: number | null };
 export type ProfitRow = {
   rowKey: string; ruleIds: string[]; channels: { channelId: number; name: string | null }[];
   upstream: { stationId: string; name: string | null; provider: string | null };
@@ -176,11 +176,13 @@ export type ProfitPageResponse = {
 export type ProfitDetailModel = { model: string; upstreamModel?: string | null; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; pricesPerMillion?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null } | null; beforeRatioUsd: number; usd: number };
 export type ProfitDetailResponse = {
   day: string; settled: boolean;
-  income: { usd: number | null; adminUsage: { usd: number | null; deducted: "all" | "some" | "none" }; byChannel: { channelId: number; usd: number | null }[] };
+  // 这天的汇率（已固定的是结账那天记下的，今天是现在的；这天几块用的不一样或没记是 null，页面退回按这一行现在的汇率）；income.cny / actual.cny 是按每块各自的汇率换好的人民币数
+  rates?: { income: number | null; cost: number | null };
+  income: { usd: number | null; cny?: number | null; adminUsage: { usd: number | null; deducted: "all" | "some" | "none" }; byChannel: { channelId: number; usd: number | null }[] };
   // backfilledAt：这天固定时收费记录还没读完、后来补算的时刻；没补算是 null
   expected: { usd: number | null; reason: string | null; keyChange?: { atMs: number | null; between: [number, number] | null } | null; backfilledAt?: string | null; groupName: string | null; groupRatio: number | null; segments: { startMs: number; endMs: number; ratio: number | null; group?: string | null; usd?: number | null; ruleId: string | null }[];
     byModel: ProfitDetailModel[]; missingPriceModels: { model: string; inputTokens: number; outputTokens: number; requests: number }[]; byChannel: { channelId: number; usd: number | null }[]; tokens: number | null };
-  actual: { usd: number | null; keyName: string | null };
+  actual: { usd: number | null; cny?: number | null; keyName: string | null };
   // 这天没算出来的原因（换 Key 冲突期、还在读取、需处理…），算出来的是 null：实付、毛利写「—」加这个原因，不写 0
   unavailable?: { code: string | null; title: string | null; detail: string | null } | null;
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;

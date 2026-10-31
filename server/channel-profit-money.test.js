@@ -2038,6 +2038,9 @@ test("重算后少了一半多的天：账本里有这天的数，合计算了�
   assert.equal(row.keys.reduce((sum, key) => sum + (key.costUsd ?? 0), 0), row.actualCostUsd, "Key 行之和 = 渠道行");
   assert.equal(row.attention?.code, "RESETTLE_SHRUNK", "仍亮需处理：确认以后才换成重算的数");
   assert.equal(attentionSuffixOf(multi), 0, "页顶的「N 个渠道需处理，没算进来」不数它：它算进来了");
+  // 范围里有今天时，底是今天的现读（它的状态里没有那天的原因）：被拦的那天仍要在行上亮需处理，靠的是状态行（把「被挡住 / held」那段去掉这条会变红）
+  const withToday = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-11T00:00:00"), endMs: f.state.now });
+  assert.deepEqual([withToday.rows[0].counted, withToday.rows[0].attention?.code, withToday.rows[0].excludedDays], [true, "RESETTLE_SHRUNK", 0], "有今天的范围：需处理标记照样在，这天算进来了");
   const single = await range("2026-10-12", "2026-10-13");
   assert.deepEqual([single.rows[0].counted, single.rows[0].actualCostUsd, single.rows[0].attention?.code], [true, 24 * H, "RESETTLE_SHRUNK"]);
   assert.equal(single.rows[0].keys.reduce((sum, key) => sum + (key.costUsd ?? 0), 0), 24 * H);
@@ -2128,6 +2131,17 @@ test("人民币：换过上游的，换之前的日子按旧上游的汇率；�
   assert.ok(Math.abs(k50.costCny - 26 * H * 8.6) < 1e-6, "Up2 的 Key 按 Up2 当时的汇率");
   assert.equal(row.daily.find((day) => day.day === "2026-10-11").actualCostCny, 10 * H * 7 + 26 * H * 8.6);
   assert.equal(row.daily.find((day) => day.day === "2026-10-10").actualCostCny, D * 7);
+  assert.equal(multi.dailyCost.find((day) => day.day === "2026-10-11").actualCostCny, 10 * H * 7 + 26 * H * 8.6, "成本估算每天的上游成本（人民币）也按那天那个上游的汇率，汇率改过也不变");
+  assert.equal(multi.dailyCost.find((day) => day.day === "2026-10-10").actualCostCny, D * 7);
+  assert.equal(multi.dailyCost.reduce((sum, day) => sum + day.actualCostCny, 0), row.actualCostCny, "每天加起来 = 这一行合计");
+  // 计算明细抽屉：看换上游之前那天（10-10）用旧上游结账时的汇率，换上游那天两把 Key 各按各上游的汇率；汇率改过也不变
+  const before = await f.rt.reconciliation.profitDetail({ ruleIds: row.ruleIds, day: "2026-10-10" });
+  assert.deepEqual([before.rates.income, before.rates.cost, before.income.cny, before.actual.cny], [7, 7, 2 * D * 7, D * 7]);
+  const swapDay = await f.rt.reconciliation.profitDetail({ ruleIds: row.ruleIds, day: "2026-10-11" });
+  assert.equal(swapDay.actual.cny, 10 * H * 7 + 26 * H * 8.6);
+  assert.equal(swapDay.income.cny, 2 * D * 7);
+  assert.equal(swapDay.rates.cost, null, "这天两块汇率不一样：不给统一的");
+  assert.deepEqual(swapDay.keys.map((key) => [key.tokenId, key.costRate]).sort((a, b) => a[0] - b[0]), [[9, 7], [50, 8.6]]);
 });
 
 // ===== 「刷新」（/query observe）：一次刷新只读一次自营站点的渠道列表，各绑定共用（规格第九节第七条）=====
@@ -2160,4 +2174,41 @@ test("渠道列表同一时间在读的合并成一次：几个调用同时来�
   const before = channelReads();
   await Promise.all([1, 2, 3].map(() => f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual" })));
   assert.equal(channelReads() - before, 1, "三个同时的刷新：渠道列表只读 1 次");
+});
+
+test("31 天里连着换两次 Key：第二次换 Key，D 到换的那天写「已经记着的 Key + 新 Key」，第一次换下来的旧 Key 不会丢，成本也不漏", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 20, 30], channelKey: {}, noAgent: true,
+    windows: { 9: [-Infinity, SH("2026-10-12T14:00:00")], 20: [SH("2026-10-12T10:00:00"), SH("2026-10-14T14:00:00")], 30: [SH("2026-10-12T10:00:00"), Infinity] }, rates: { 9: 1, 20: 3, 30: 2 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+  await f.at("2026-10-13T10:00:00");
+  const first = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 });
+  assert.equal(first.fromDay, "2026-10-12");
+  await f.at("2026-10-14T15:00:00");
+  const second = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 30 });
+  assert.equal(second.fromDay, "2026-10-12", "Key 30 在第一次换之前就有用量");
+  const rule = (await f.rt.reconciliation.listRules())[0];
+  const keys = (await f.repository.listDayKeys([rule.id], "2026-10-12", "2026-10-14"))[rule.id];
+  const ids = (day) => keys[day].map((key) => key.tokenId).sort((x, y) => x - y);
+  assert.deepEqual([ids("2026-10-12"), ids("2026-10-13"), ids("2026-10-14")], [[9, 20, 30], [9, 20, 30], [20, 30]], "第一次换下来的 Key 9 还在记着的几天（10-12、10-13）里；10-14 本来就没记它");
+  for (const iso of ["2026-10-14T16:00:00", "2026-10-14T23:00:00", "2026-10-15T01:00:00", "2026-10-15T02:00:00"]) await f.round(iso);
+  const cost = (day) => Number(f.costOn(day).at(-1)?.cost_usd ?? NaN);
+  const H = 3600;
+  assert.equal(cost("2026-10-12"), 14 * H * 1 + 14 * H * 3 + 14 * H * 2, "10-12：三把 Key 都算整天，Key 9 的 14 小时没丢");
+  const states = (await f.repository.listSettlementStates([rule.id])).filter((state) => state.manualReason);
+  assert.deepEqual(states.map((state) => state.manualReason), [], "没有被「少了一半以上」拦成需处理");
+});
+
+test("看一天（今天）点开那一行的近 7 天小格：更早已固定的天写已固定、带数，不写「还在读取」；整页的数只含今天", async (t) => {
+  const f = await halfDayFixture(t);
+  const H = 3600, D = 24 * H;
+  const page = await f.rt.reconciliation.profitPage({ preset: "today" });
+  const cells = page.rows[0].daily;
+  assert.equal(cells.length, 7);
+  const byDay = Object.fromEntries(cells.map((cell) => [cell.day, cell]));
+  for (const day of ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"]) assert.deepEqual([byDay[day].state, byDay[day].actualCostUsd], ["fixed", D], day);
+  assert.equal(byDay["2026-10-09"].state, "notStarted", "开始算以前的天不是还在读取");
+  assert.equal(byDay["2026-10-14"].state, "today");
+  assert.equal(page.rows[0].actualCostUsd, 9 * H, "整页的数只含今天（0 点到 9 点）");
 });
