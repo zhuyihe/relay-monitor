@@ -4196,7 +4196,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const unaccountedUpstreamCostUsd = daily ? null : response.unaccountedUpstream?.totalUsd ?? null;
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
-      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
+      // 只读缓存：范围里有今天时，「数据截至」写那份数真实的时刻（轮询读它的截止点，没人看时可能是几分钟前），不写现在；还在读取的行不算
+      const readAts = cacheOnly && labels.includes(dayKeyInTz(now, tz)) ? results.filter((row) => !row.todayReading).map((row) => latestToday.get(row.rule.id)?.value.window?.endMs).filter(Number.isFinite) : [];
+      return { ...page, asOf: readAts.length ? new Date(Math.min(now, ...readAts)).toISOString() : response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unaccountedUpstreamCostUsd,

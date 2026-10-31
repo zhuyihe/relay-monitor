@@ -1797,3 +1797,14 @@ test("今天解绑的绑定：页面只读缓存先给「还在读取」；后�
     [false, true, false, "2026-10-10", live.rows[0].actualCostUsd]);
   assert.equal(done.rows[0].actualCostUsd, 15 * 3600);
 });
+
+test("页面只读缓存：「数据截至」写那份数真实的时刻（轮询读它的那一刻），不是现在；现读的页面写现在", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T10:10:00");
+  await f.at("2026-10-30T10:12:00");
+  const cached = await cachedPage(f);
+  assert.equal(Date.parse(cached.asOf), SH("2026-10-30T10:10:00"));
+  assert.equal(Date.parse((await f.rt.reconciliation.profitPage({ preset: "today" })).asOf), SH("2026-10-30T10:12:00"));
+  await f.at("2026-10-30T10:30:00"); // 太旧、都在读取：没有真实时刻可写，用现在
+  assert.equal(Date.parse((await cachedPage(f)).asOf), SH("2026-10-30T10:30:00"));
+});
