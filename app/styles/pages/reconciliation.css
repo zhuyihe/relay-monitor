@@ -16,11 +16,12 @@
   display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0;
   background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); overflow: hidden;
 }
-.jy-profit-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 20px 24px; }
+/* 数字不折行：大数字按格子宽度缩小（人民币、位数多时也放得下），四格一样高 */
+.jy-profit-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 20px 24px; container-type: inline-size; }
 .jy-profit-metric + .jy-profit-metric { border-left: 1px solid var(--jy-rule-soft); }
 .jy-profit-metric dd { margin: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .jy-profit-metric__title { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
-.jy-profit-metric__value { font-size: 28px; line-height: 36px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.jy-profit-metric__value { font-size: clamp(18px, 13cqw, 28px); line-height: 36px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* 每天的毛利小柱状图 */
 .jy-profit-chart__body { min-width: 0; }
@@ -133,7 +134,7 @@
   .jy-profit-metric + .jy-profit-metric { border-left: 0; }
   .jy-profit-metric:nth-child(even) { border-left: 1px solid var(--jy-rule-soft); }
   .jy-profit-metric:nth-child(n + 3) { border-top: 1px solid var(--jy-rule-soft); }
-  .jy-profit-metric__value { font-size: 22px; line-height: 30px; }
+  .jy-profit-metric__value { font-size: clamp(16px, 13cqw, 22px); line-height: 30px; }
   .jy-profit-notes { padding: 0; flex-direction: column; }
 }
 
