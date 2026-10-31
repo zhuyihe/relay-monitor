@@ -328,6 +328,10 @@ test("还在读取：页顶写「其中 N 个渠道还在读取」排在最前�
   const unread = row({ rowKey: "r2", counted: false, incomeUsd: null, notice: { code: "UPSTREAM_COST_UNREAD_TODAY", text: "t", detail: null, action: null } });
   assert.equal(attentionSuffix(page({ rows: [reading, row()] })), "其中 1 个渠道还在读取");
   assert.equal(attentionSuffix(page({ rows: [reading, reading, unread] })), "其中 2 个渠道还在读取 · 其中 1 个渠道上游成本读不到，没算进来");
+  const out = row({ rowKey: "r3", counted: false, incomeUsd: null, attention: { code: "KEY_INVALID_OR_DENIED", title: "t", detail: null, action: null, fromDay: null, moreCount: 0, shrunk: null } });
+  const less = row({ rowKey: "r4", notice: { code: "COST_UNREAD_TODAY", text: "t", detail: null, action: null } });
+  assert.equal(attentionSuffix(page({ rows: [less, unread, reading, out] })),
+    "其中 1 个渠道需处理，没算进来 · 其中 1 个渠道还在读取 · 其中 1 个渠道上游成本读不到，没算进来 · 其中 1 个渠道成本可能少算了", "顺序：需处理 → 还在读取 → 读不到 → 成本可能少算了");
   assert.equal(attentionSuffix(page({ rows: [row()] })), "", "没有还在读取的：没有这一句");
   assert.equal(readingText(reading), "还在读取");
   assert.equal(readingText(row()), null);

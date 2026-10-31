@@ -89,10 +89,10 @@ export function attentionSuffix(page: ProfitPageResponse) {
   // 今天上游成本读不到的行整行没算进合计，单独一句；别的提示（成本可能少算了，照常算进来）一句
   const unread = noticed.filter((row) => row.notice?.code === "UPSTREAM_COST_UNREAD_TODAY"), notices = noticed.filter((row) => row.notice?.code !== "UPSTREAM_COST_UNREAD_TODAY");
   const parts: string[] = [];
-  // 今天的数还没读到的渠道（reading）：写在最前，读到就没了；它们没有提示、没有需处理，不会和下面几句重复
+  // 顺序：需处理（要人动手，最要紧）→ 还在读取（一会儿就没了）→ 读不到 → 成本可能少算了；还在读取的行没有提示、没有需处理，不会和别的几句重复
   const reading = page.rows.filter((row) => row.reading);
-  if (reading.length) parts.push(COPY.caption.reading(channelCount(reading)));
   if (out.length) parts.push(isSingleDay(page) ? COPY.caption.attention(channelCount(out)) : COPY.caption.attentionDays(channelCount(out), Math.max(1, sum(out.map((row) => row.excludedDays || 0)))));
+  if (reading.length) parts.push(COPY.caption.reading(channelCount(reading)));
   if (unread.length) parts.push(COPY.caption.unread(channelCount(unread)));
   if (notices.length) parts.push(COPY.caption.notice(channelCount(notices)));
   return parts.join(" · ");

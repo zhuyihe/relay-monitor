@@ -25,7 +25,7 @@ export const COPY = Object.freeze({
     notice: (channels: number) => `其中 ${channels} 个渠道成本可能少算了`,
     // 今天上游成本读不到、整行没算进合计（UPSTREAM_COST_UNREAD_TODAY）：和「成本可能少算了」分开说，两种都有时先写这一句
     unread: (channels: number) => `其中 ${channels} 个渠道上游成本读不到，没算进来`,
-    // 页面先出来、这几个渠道今天的数后台还没读到（还没轮到、读还在路上）：读到会自己补上；和「读不到」分开说，写在最前
+    // 页面先出来、这几个渠道今天的数后台还没读到（还没轮到、读还在路上）：读到会自己补上；和「读不到」分开说，排在需处理后面、读不到前面
     reading: (channels: number) => `其中 ${channels} 个渠道还在读取`,
   }),
   // 顶上四个数

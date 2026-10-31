@@ -86,13 +86,13 @@ function KeyTag({ keyRow, view }: { keyRow: ProfitKeyRow; view: KeyView }) {
   return tag ? <em className={`jy-tag jy-profit-key-tag ${keyRow.state === "active" ? "jy-tag--info" : "jy-tag--type"}`}>{tag}</em> : null;
 }
 function KeyRowDesktop({ row, keyRow, ctx, view, detailDay }: { row: ProfitRow; keyRow: ProfitKeyRow; ctx: Ctx; view: KeyView; detailDay: string | null }) {
-  const cells = keyCells(keyRow, row, ctx), loss = cells.gross != null && cells.gross < 0;
+  const cells = keyCells(keyRow, row, ctx), loss = cells.gross != null && cells.gross < 0, reading = readingText(row); // 渠道整行还在读取：Key 行的数字格也写「还在读取」，Key 名、标签照常
   return <tr className="jy-profit-keyrow" data-key-of={row.rowKey}>
     <td className="jy-profit-keyrow__name"><span>{keyLabel(keyRow, swappedUpstream(row))}</span><KeyTag keyRow={keyRow} view={view} /></td>
-    <td className="jy-profit-num">{fmtMoney(cells.income, ctx.currency)}</td>
-    <td className="jy-profit-num">{fmtMoney(cells.actual, ctx.currency)}</td>
-    <td className="jy-profit-num">{cells.gross == null ? EMPTY : neg(loss, fmtMoney(cells.gross, ctx.currency))}</td>
-    <td className="jy-profit-num">{cells.gross == null ? EMPTY : neg(loss, marginText(cells.gross, cells.income))}</td>
+    <td className="jy-profit-num">{reading ?? fmtMoney(cells.income, ctx.currency)}</td>
+    <td className="jy-profit-num">{reading ?? fmtMoney(cells.actual, ctx.currency)}</td>
+    <td className="jy-profit-num">{reading ?? (cells.gross == null ? EMPTY : neg(loss, fmtMoney(cells.gross, ctx.currency)))}</td>
+    <td className="jy-profit-num">{reading ?? (cells.gross == null ? EMPTY : neg(loss, marginText(cells.gross, cells.income)))}</td>
     {detailDay ? <td /> : null}
   </tr>;
 }
@@ -156,8 +156,8 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
             {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
               const cells = keyCells(key, row, ctx);
               return <li key={String(key.tokenId)} className="jy-profit-key">
-                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span><b>{cells.gross == null ? EMPTY : marginText(cells.gross, cells.income)}</b></div>
-                <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(fmtMoney(cells.income, ctx.currency), fmtMoney(cells.actual, ctx.currency))}</div>
+                <div className="jy-profit-key__head"><span>{keyLabel(key, swappedUpstream(row))}<KeyTag keyRow={key} view={view} /></span><b>{readingText(row) ?? (cells.gross == null ? EMPTY : marginText(cells.gross, cells.income))}</b></div>
+                <div className="jy-profit-key__sub">{COPY.table.mobileKeyLine(readingText(row) ?? fmtMoney(cells.income, ctx.currency), readingText(row) ?? fmtMoney(cells.actual, ctx.currency))}</div>
               </li>;
             })}</ul> : null}
           </li>;
