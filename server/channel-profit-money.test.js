@@ -1470,7 +1470,7 @@ test("多天范围里今天：后绑的那条（在用、收入记在它上面�
   const inner = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up2.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
   const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") });
-  assert.deepEqual([page.rows[0].notice, page.notCountedDays.count], [null, 1]);
+  assert.deepEqual([page.rows[0].notice?.code, page.notCountedDays.count], ["UPSTREAM_COST_UNREAD_TODAY", 1]);
   assert.equal(page.rows[0].incomeUsd, 2 * 24 * 3600, "只有 10-29 已固定的那一天");
 });
 
@@ -1486,9 +1486,9 @@ test("今天：没读成的那条还在绑着（只是收入记在更晚绑的�
   t.mock.method(globalThis, "fetch", async (input, init) => { const url = new URL(String(input)); if (url.host === "up.test" && url.pathname === "/api/log/self/stat") throw Object.assign(new Error("timeout"), { name: "TimeoutError" }); return inner(input, init); });
   await f.at("2026-10-30T15:00:00");
   const row = (await f.rt.reconciliation.profitPage({ preset: "today" })).rows[0];
-  assert.deepEqual([row.bound, row.counted, row.notice], [true, false, null]);
+  assert.deepEqual([row.bound, row.counted, row.notice?.code], [true, false, "UPSTREAM_COST_UNREAD_TODAY"]);
   const multi = (await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") })).rows[0];
-  assert.deepEqual([multi.counted, multi.notice], [false, null]);
+  assert.deepEqual([multi.counted, multi.notice?.code], [false, "UPSTREAM_COST_UNREAD_TODAY"]);
 });
 
 // ===== 读上游失败：把上游回的原话（脱敏）带到需处理的「查看详细原因」里；找不到 Key 和被拒分开写 =====
@@ -1502,7 +1502,7 @@ async function failingUpstreamFixture(t, reply) {
   const inner = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
-    if (url.host === "up.test" && url.pathname === "/api/log/self/stat") return reply(url, init);
+    if (reply && url.host === "up.test" && url.pathname === "/api/log/self/stat") return reply(url, init);
     return inner(input, init);
   });
   await f.at("2026-10-30T15:00:00");
@@ -1605,3 +1605,25 @@ test("详细原因不进数据库快照：读上游失败后轮询写了今天�
   assert.ok(!dump.includes("上游回") && !dump.includes("request-id") && !dump.includes("/api/log/self/stat"), "数据库里没有详细原因");
   assert.equal(f.repository.log.snapshotWrites.length, writes, "措辞每轮不一样，今天的快照也没再写");
 });
+
+// ===== 今天上游成本读不到：亮提示，不让用户只看到「—」=====
+for (const [label, reply, expectDiag] of [
+  ["超时", () => { throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }); }, /^\/api\/log\/self\/stat · 错误：.*timeout/],
+  ["5xx", () => ({ status: 503, text: async () => JSON.stringify({ success: false, message: "service unavailable" }) }), /^HTTP 503 · \/api\/log\/self\/stat · 上游回：service unavailable/],
+  ["HTML 524", () => ({ status: 524, text: async () => "<html><body><h1>524 A timeout occurred</h1></body></html>" }), /^HTTP 524 · \/api\/log\/self\/stat · 上游回：<html>.*524 A timeout occurred/],
+]) {
+  test(`今天上游成本读不到（${label}）：这一行没算进来、名字后面亮蓝色提示「上游成本这会儿读不到」、带脱敏的详细原因，不是需处理；读成了就没有这个提示`, async (t) => {
+    const f = await failingUpstreamFixture(t, reply);
+    const row = await todayRow(f);
+    assert.deepEqual([row.counted, row.incomeUsd, row.actualCostUsd, row.attention], [false, null, null, null], "收入落进没算进来的，成本「—」");
+    assert.deepEqual([row.notice.code, row.notice.text, row.notice.detail, row.notice.action], ["UPSTREAM_COST_UNREAD_TODAY", "上游成本这会儿读不到", "这把 Key 今天的用量上游没回过来，这一行先不算进合计；读到以后会自动补上。", null]);
+    assert.match(row.notice.diagnostic, expectDiag);
+    assert.ok(!row.notice.diagnostic.includes(SECRET_TOKEN));
+    // 多天范围里今天那一格：同样亮
+    const multi = (await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-29T00:00:00"), endMs: SH("2026-10-30T15:00:00") })).rows[0];
+    assert.equal(multi.notice?.code, "UPSTREAM_COST_UNREAD_TODAY");
+    // 读成了：没有这个提示
+    const ok = await failingUpstreamFixture(t, null);
+    assert.equal((await todayRow(ok)).notice, null);
+  });
+}

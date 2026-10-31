@@ -61,7 +61,7 @@ function RowBang({ row, popKey, open, onOpenChange, ...props }: { row: ProfitRow
       <IssuePop tone={tone} title={title} note={note} actions={<ActionButton action={action} row={row} onRetry={props.onRetry} onRefresh={props.onRefresh} retrying={props.retryingKeys.has(row.rowKey)} />}>
         {retryError ? <Alert type="error" showIcon title={COPY.attention.retryFailed} description={<ErrorDetail raw={noteOf(retryError).raw} />} /> : null}
         {/* 读上游失败（被拒、读不到、超时）时上游回的原话（服务端脱敏过）：和上游列表、重新读取报错同一个「查看详细原因」 */}
-        {attention?.diagnostic ? <ErrorDetail raw={attention.diagnostic} /> : null}
+        {attention?.diagnostic || notice?.diagnostic ? <ErrorDetail raw={attention?.diagnostic ?? notice?.diagnostic} /> : null}
       </IssuePop>
     </IssueBang>
   </span>;
