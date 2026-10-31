@@ -107,7 +107,8 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
     if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)} 0:00–${formatZonedTime(Number.isFinite(asOf) ? asOf : ctx.now ?? Date.now(), ctx.tz)} · ${COPY.todayCaption}`;
     const text = rangeText(page, ctx);
     if (page.range?.preset === "since") return `${text} · ${COPY.presets.since}`; // 「10月20日–今天 · 开始算以来」
-    if (isSingleDay(page)) return `${text} ${weekdayOfDayKey(rangeDays(page).first)} · ${page.dayCounts.fixed ? COPY.fixed : COPY.gap.reading}`;
+    // 看一天：固定了写「已固定」；没固定、又有渠道在读取时，页顶后面那句「其中 N 个渠道还在读取」已经说了，这里不再单独写「还在读取」（不连着出现两次）
+    if (isSingleDay(page)) return `${text} ${weekdayOfDayKey(rangeDays(page).first)}${page.dayCounts.fixed ? ` · ${COPY.fixed}` : page.rows.some((row) => row.reading) ? "" : ` · ${COPY.gap.reading}`}`;
     if (isAllFixed(page)) return `${text} · ${COPY.fixed}`;
     const parts = [page.dayCounts.fixed ? COPY.daysFixed(page.dayCounts.fixed) : "", page.dayCounts.reading ? COPY.daysReading(page.dayCounts.reading) : "", page.dayCounts.today ? COPY.todayLive : ""].filter(Boolean);
     return `${text} · ${parts.join("，")}`;

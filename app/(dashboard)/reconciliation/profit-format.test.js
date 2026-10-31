@@ -359,3 +359,14 @@ test("人民币：接口按天换好的数（incomeCny / actualCostCny）优先�
   assert.deepEqual([key.income, key.actual], [35, 25.8]);
   assert.deepEqual([keyCells({ incomeUsd: 5, costUsd: 3 }, base, { currency: "CNY" }).actual], [30]);
 });
+
+test("看过去的一天页头：固定了写「已固定」；有渠道还在读取时只写日期加那一句，不连着写两次「还在读取」；没固定又没有渠道在读取时仍写「还在读取」", () => {
+  const ctx = { tz: TZ, currency: "USD", now: NOW };
+  const reading = row({ rowKey: "r1", reading: true, counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null, notice: null, attention: null });
+  const fixed = rangeCaption(page({ rows: [row()] }), ctx);
+  assert.match(fixed, /^10月25日 .* · 已固定$/);
+  const day = rangeCaption(page({ dayCounts: { fixed: 0, reading: 1, today: 0 }, rows: [row(), reading] }), ctx);
+  assert.match(day, /^10月25日 周\S · 其中 1 个渠道还在读取$/, day);
+  assert.equal(day.split("还在读取").length - 1, 1, "「还在读取」只出现一次");
+  assert.match(rangeCaption(page({ dayCounts: { fixed: 0, reading: 1, today: 0 }, rows: [row()] }), ctx), /^10月25日 周\S · 还在读取$/);
+});
