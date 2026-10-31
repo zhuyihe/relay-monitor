@@ -111,7 +111,9 @@ export type ReconciliationCurrency = "USD" | "CNY";
 // 一行一天的小格：fixed 已固定 / reading 还在读取 / today 今天 / attention 需处理 / notStarted 还没开始算 / future 还没到
 export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" | "attention" | "notStarted" | "future"; gapUsd: number | null; gapState: "over" | "under" | "within" | null; reason: string | null; tokens: number | null;
   // 这天的收入、上游成本、毛利（美元原币）：已固定的取账本，今天取这一行整段的数，其余是 null
-  incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null };
+  incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null;
+  // 同一天的人民币数：已固定的天按那天结账时记下的汇率，今天按现在的汇率；没有汇率是 null
+  incomeCny?: number | null; actualCostCny?: number | null };
 // 差额的状态：over / under 对不上（多扣 / 少扣）、within 门槛以内、today 明天出、reading 还在读取、uncomputable 算不了（reason 给原因）、attention 需处理、notStarted 还没开始算
 export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" | "none";
 // 一行（一个渠道）范围里用过的每把 Key（用户 10-30 定）：收入是读的时候分的（只有一把全归它；几把按原价用量比例；读不到倍率按成本比例），不存
@@ -122,7 +124,10 @@ export type ProfitKeyRow = {
   state: "active" | "swapped" | "unbound"; firstDay: string; lastDay: string; days: number;
   // 倍率：New API 是分组倍率，Sub2API 是 实际扣除 ÷ 标准计费；读不到是 null。rawUsd 原价用量
   ratio: number | null; ratioKind: "group" | "actual_over_standard";
-  costUsd: number | null; rawUsd: number | null; incomeUsd: number | null; incomeBasis: "single" | "raw" | "cost" | null;
+  costUsd: number | null; rawUsd: number | null; incomeUsd: number | null;
+  // 人民币：范围里每天按那天的汇率换了再加；没有汇率是 null（页面退回按这一行现在的汇率换）
+  costCny?: number | null; incomeCny?: number | null;
+  incomeBasis: "single" | "raw" | "cost" | null;
   grossProfitUsd: number | null; grossMarginRate: number | null;
   // 范围里有几天这把 Key 的收入份额没分（这天还没固定、只有一边固定）：数不进 incomeUsd，成本照进 costUsd
   pendingDays: number;
@@ -139,6 +144,8 @@ export type ProfitRow = {
   reading: boolean;
   // 一个渠道一行（rowKey `ch:<自营站点>:<渠道>`）：bound 在绑着的，unboundOn 已解绑的那天（整天算，之后不算）；毛利率 = 毛利 ÷ 收入，没收入是 null
   incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
+  // 按人民币显示时用：范围里每天按那天（那个上游）结账时记下的汇率换了再加，今天按现在的；算不出（没有汇率、和美元合计对不上）是 null，页面退回按这一行现在的汇率换
+  incomeCny?: number | null; actualCostCny?: number | null;
   gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };
   // 提示类的感叹号（今天提醒换 Key）：这一行照读到的数算、进合计，不是需处理
   notice: { code: string; text: string; detail: string | null; action: WorkflowAction | null; diagnostic?: string } | null;
