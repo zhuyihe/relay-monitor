@@ -370,3 +370,12 @@ test("看过去的一天页头：固定了写「已固定」；有渠道还在�
   assert.equal(day.split("还在读取").length - 1, 1, "「还在读取」只出现一次");
   assert.match(rangeCaption(page({ dayCounts: { fixed: 0, reading: 1, today: 0 }, rows: [row()] }), ctx), /^10月25日 周\S · 还在读取$/);
 });
+
+test("Key 标签的日子：「现在」和起始日同月不带月份、跨月才带；月份按业务时区算（上海过了零点就是下个月，不看 UTC 的日期）", () => {
+  const key = { state: "active", firstDay: "2026-10-06", lastDay: "2026-10-09" };
+  const tag = (at) => keyTag(key, false, "2026-10-03", "Asia/Shanghai", Date.parse(at));
+  assert.equal(tag("2026-10-09T03:00:00Z"), COPY.table.keyActiveSince("6日"), "同月：只写日子");
+  assert.equal(tag("2026-10-31T15:59:00Z"), COPY.table.keyActiveSince("6日"), "上海 10-31 23:59 还是 10 月");
+  assert.notEqual(tag("2026-10-31T16:01:00Z"), COPY.table.keyActiveSince("6日"), "上海已经是 11-01：跨月，带月份");
+  assert.match(tag("2026-10-31T16:01:00Z"), /10月6日/);
+});
