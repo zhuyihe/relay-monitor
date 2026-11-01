@@ -84,19 +84,19 @@ export function UsersTab({
   const cols: Col<UsersRow>[] = [
     {
       key: "user", label: COPY.users.cols.user, sort: noop,
-      render: (r) => (<span className="jy-two">{name(r)}{r.group && <span className="jy-caption">{r.group}</span>}</span>),
+      render: (r) => (<span className="jy-cell-two">{name(r)}{r.group && <span className="jy-caption">{r.group}</span>}</span>),
       foot: searching ? COPY.users.totalMatched(list.total) : COPY.users.total(list.total),
     },
     { key: "spark", label: COPY.users.cols.spark, render: (r) => <SparkLine values={sparkValues(r, page.availableDays)} gray={r.status === "down" || r.status === "churned"} label={COPY.users.sparkLabel(r.username)} /> },
     {
       key: "week", label: COPY.users.cols.week, num: true, sort: noop,
-      render: (r) => (<span className="jy-two jy-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
+      render: (r) => (<span className="jy-cell-two jy-cell-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
       foot: weekOk ? money(list.totals.week, rate) : EMPTY,
     },
     { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => money(r.today, rate), foot: money(list.totals.today, rate) },
     {
       key: "balance", label: COPY.users.cols.balanceDays, sort: noop,
-      render: (r) => (<span className="jy-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
+      render: (r) => (<span className="jy-cell-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
       foot: <span className="jy-users-balance">{money(list.totals.balance, rate)}</span>,
     },
     { key: "last", label: COPY.users.cols.lastUsed, num: true, sort: noop, render: (r) => lastUsedText(r, page) },
