@@ -307,7 +307,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 },
               }}
             >
-              <button type="button" className="jy-avatar" aria-label={username ? `账户菜单，当前用户 ${username}` : "账户菜单"}>
+              <button type="button" className="jy-avatar" aria-label={username ? `账户菜单，当前账号 ${username}` : "账户菜单"}>
                 {initial}
               </button>
             </Dropdown>

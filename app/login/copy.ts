@@ -9,7 +9,7 @@ export const COPY = Object.freeze({
   foot: "每一笔上游花费都看得清",
   title: `登录${BRAND.productName}`,
   subtitle: "用管理员账号登录。",
-  username: "用户名",
+  username: "账号",
   password: "密码",
   submit: "登录",
   failed: "登录失败",
