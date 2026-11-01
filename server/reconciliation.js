@@ -872,6 +872,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { ...pendingResult(rule, window, issueText("PENDING")), todayReading: true };
   }
 
+  // 后台读（轮询读今天、结账）的排队：每条绑定的读各自一条道，不等最慢的那条——
+  //   · 同时打到上游的后台读合起来不超过 MAX_CONCURRENT_RULES（6）条，跨轮也算在内（bgSlots）；
+  //   · 同一件事（一条绑定的今天、一次结账）还没读完，下一轮就不再起第二份，直接沿用在读的那份（bgInflight）；读完它自己写进缓存。
+  const bgInflight = (rt._reconciliationBgInflight ||= new Map());
+  const bgSlots = (rt._reconciliationBgSlots ||= { active: 0, queue: [] });
+  const acquireBgSlot = () => new Promise((resolve) => {
+    const go = () => { bgSlots.active += 1; resolve(); };
+    if (bgSlots.active < MAX_CONCURRENT_RULES) go(); else bgSlots.queue.push(go);
+  });
+  const releaseBgSlot = () => { bgSlots.active -= 1; bgSlots.queue.shift()?.(); };
+  const withBgSlot = async (work) => { await acquireBgSlot(); try { return await work(); } finally { releaseBgSlot(); } };
+  // key 在读着就返回在读的那份（不起新的）；work 里自己要吞掉错误
+  function runBackground(key, work, { slot = true } = {}) {
+    const existing = bgInflight.get(key);
+    if (existing) return existing;
+    const promise = (slot ? withBgSlot(work) : work()).finally(() => { if (bgInflight.get(key) === promise) bgInflight.delete(key); });
+    bgInflight.set(key, promise);
+    return promise;
+  }
+
   function serializeWrite(write) {
     const pending = (rt._reconciliationWriteChain || Promise.resolve()).then(write);
     rt._reconciliationWriteChain = pending.catch(() => {});
@@ -3953,7 +3973,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       // 重结请求在写账本的事务里按值消费（saveSnapshotsForScope）：结成了这条请求就办完了，取数期间才提的新请求留着；
       // 没结成按 settlementOutcome 记进状态行，退避由状态行管（请求本身保留，7 天不成就放弃）
-      return settleDay(rule, window, { origin: "poll", ownerRegistry, state, trigger }).catch(() => null);
+      return withBgSlot(() => settleDay(rule, window, { origin: "poll", ownerRegistry, state, trigger })).catch(() => null);
     };
     await mapWithConcurrency(yesterday, MAX_CONCURRENT_RULES, settle);
     if (!older.length) return;
@@ -4316,7 +4336,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
     },
     // 每轮观测今天；每条规则按自己的时区，在昨天结束 15 分钟后结账昨天，直到算出毛利为止。
-    async refreshDue(now = Date.now()) {
+    // background：轮询用——今天的读和结账都放到后台各走各的，这一轮不等最慢的那条（测试和脚本不带，照旧等全部读完）
+    async refreshDue(now = Date.now(), { background = false } = {}) {
       const startedAt = Date.now();
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
@@ -4342,18 +4363,22 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const registryRules = new Map([...rules, ...(archivedUsed ? archivedRules : []), ...archivedToday].map((rule) => [rule.id, rule]));
       const ownerRegistry = await ownerRegistryFor(allRules, [...registryRules.values()], { observe: true, poll: true });
       await markQuietOwnStations(rules, ownerRegistry);
-      await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
-        // 规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻。
-        const at = now + Math.max(0, Date.now() - startedAt);
-        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
-          .catch(() => null);
-      });
-      await mapWithConcurrency(archivedToday, MAX_CONCURRENT_RULES, async (rule) => {
-        const at = now + Math.max(0, Date.now() - startedAt);
-        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry }).catch(() => null);
-      });
+      // 每条绑定的今天各读各的（上一次还没读完就不再起第二份）；规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻
+      const todayReads = [
+        ...rules.map((rule) => runBackground(`today|${rule.id}`, async () => {
+          const at = now + Math.max(0, Date.now() - startedAt);
+          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry }).catch(() => null);
+        })),
+        ...archivedToday.map((rule) => runBackground(`today-archived|${rule.id}`, async () => {
+          const at = now + Math.max(0, Date.now() - startedAt);
+          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry }).catch(() => null);
+        })),
+      ];
+      if (!background) await Promise.all(todayReads);
       await syncOptionUnreadableSince(rules, { observe: true }); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
-      await settleDue(plan, ownerRegistry);
+      // 结账也放后台：上一次结账还没做完这一轮就不再起第二份，慢的那天接着在后台读，不挡这一轮
+      const settling = runBackground("settleDue", () => settleDue(plan, ownerRegistry).catch((error) => { console.error("结账失败:", error?.message || String(error)); }), { slot: false });
+      if (!background) await settling;
       await pruneSettlementStates(now);
       await autoStartRound();
       await settleFixedCostDays(now).catch((error) => console.error("固定成本按天固定失败:", error?.message || String(error)));
@@ -4425,7 +4450,7 @@ export function startReconciliationPolling(rt, options = {}) {
   const tick = async () => {
     running = true;
     lastStartAt = Date.now();
-    try { await module.refreshDue(); } catch { /* 下一轮重试 */ }
+    try { await module.refreshDue(undefined, { background: true }); } catch { /* 下一轮重试 */ }
     // 系统自己试读上游（身份、完整账单、时区）：到点的才读，失败按退避
     try { await (rt.autoVerify ||= createAutoVerifier(rt)).verifyDue(); } catch { /* 下一轮重试 */ }
     running = false;

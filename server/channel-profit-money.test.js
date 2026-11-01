@@ -2208,17 +2208,18 @@ test("看一天（今天）：小格只有今天一格；整页的数只含今�
 // ===== 后台读上游用量统计等 120 秒，页面前等着的读取仍 25 秒（假的慢上游：统计接口 60 秒才回）=====
 // 用测试自带的假定时器：统计接口的「慢」和 request() 的超时都是 setTimeout，推进假时钟就等于过了那么久
 const yieldTurns = async (n = 30) => { for (let i = 0; i < n; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
-function slowUpstream(t, f, { host = "up2.test", delayMs = 60000 } = {}) {
+function slowUpstream(t, f, { host = "up2.test", delayMs = 60000, when = () => true } = {}) {
   const inner = globalThis.fetch;
-  const state = { slow: true, delayMs, pending: [], aborted: [] };
+  const state = { slow: true, delayMs, pending: [], aborted: [], active: 0, maxActive: 0 };
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
     const url = new URL(String(input));
-    if (!state.slow || url.host !== host || url.pathname !== "/api/log/self/stat") return inner(input, init);
-    const entry = { signal: init.signal, abortedAt: null };
+    if (!state.slow || url.host !== host || url.pathname !== "/api/log/self/stat" || !when(url)) return inner(input, init);
+    const entry = { signal: init.signal, abortedAt: null, url };
     state.pending.push(entry);
+    state.active += 1; state.maxActive = Math.max(state.maxActive, state.active);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => resolve(inner(input, init)), state.delayMs);
-      init.signal?.addEventListener("abort", () => { clearTimeout(timer); entry.abortedAt = Date.now(); reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })); });
+      const timer = setTimeout(() => { state.active -= 1; resolve(inner(input, init)); }, state.delayMs);
+      init.signal?.addEventListener("abort", () => { clearTimeout(timer); state.active -= 1; entry.abortedAt = Date.now(); reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })); });
     });
   });
   return state;
@@ -2342,4 +2343,82 @@ test("以前因为超时没固定的天（31 天以内）：之后上游回得�
   await yieldTurns(100);
   await runUntil(t, second);
   assert.ok(f.costOn("2026-10-30").some((row) => row.rule_id === up2.id), "自动补固定了");
+});
+
+// ===== 轮询不等最慢的那条：每条绑定各读各的，同时在读的不超过 6 条，同一条不重复读，结账慢不挡今天的刷新 =====
+const pollRound = async (f, deltaMs = 60000) => { f.state.now += deltaMs; await f.rt.reconciliation.refreshDue(f.state.now, { background: true }); await yieldTurns(60); };
+
+test("轮询不等最慢的那条：一个上游读 100 秒，别的绑定每一轮都刷新、从来不变成「还在读取」；慢的那条不重复读，读完自己出数", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T10:10:00");
+  await f.at("2026-10-30T10:30:00"); // 距离上一次读到已经超过「两个轮询间隔 + 2 分钟」：Up2 的缓存已经不能用
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const slow = slowUpstream(t, f, { delayMs: 100000 });
+  const rules = await f.rt.reconciliation.listRules();
+  const upRule = rules.find((item) => item.upstreamStationId === f.supplier.id);
+  const stored = () => f.rt._reconciliationLatestToday.get(upRule.id)?.value.generatedAt;
+  await f.rt.reconciliation.refreshDue(f.state.now, { background: true });
+  await yieldTurns(60);
+  assert.equal(slow.pending.length, 1, "Up2 在读");
+  const seenAt = [stored()];
+  for (let round = 1; round <= 5; round += 1) {
+    t.mock.timers.tick(15000); // 假时钟走一点，慢的那条还没到 100 秒
+    await pollRound(f);
+    seenAt.push(stored());
+    assert.equal(slow.pending.length, 1, `第 ${round} 轮：慢的那条还在读，不再起第二份`);
+    const page = await cachedPage(f);
+    const byUpstream = (id) => page.rows.find((row) => row.upstream.stationId === id);
+    assert.deepEqual([byUpstream(f.supplier.id).counted, byUpstream(f.supplier.id).reading], [true, false], `第 ${round} 轮：Up 照常有数`);
+    assert.deepEqual([byUpstream(f.supplier2.id).counted, byUpstream(f.supplier2.id).reading], [false, true], "Up2 读完之前写「还在读取」");
+  }
+  assert.equal(new Set(seenAt).size, seenAt.length, "Up 每一轮都刷新了");
+  t.mock.timers.tick(30000); await yieldTurns(80); // 慢的那条读完（累计 105 秒）
+  await yieldTurns(80);
+  const done = await cachedPage(f);
+  assert.deepEqual(done.rows.map((row) => [row.counted, row.reading]), [[true, false], [true, false]], "读完以后自己出数");
+});
+
+test("后台同时在读的不超过 6 条（跨轮也算），同一条绑定不重复读", async (t) => {
+  const ids = Array.from({ length: 9 }, (_, index) => 50 + index);
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], secondKeys: ids, channelKey: {}, noAgent: true, channelCount: 12, windows: Object.fromEntries([9, ...ids].map((id) => [id, [-Infinity, Infinity]])) });
+  await f.at("2026-10-30T10:00:00");
+  for (let index = 0; index < ids.length; index += 1) await f.profit.selectKey({ ownStationId: f.own.id, channelId: index + 1, upstreamStationId: f.supplier2.id, tokenId: ids[index] });
+  await f.round("2026-10-30T10:05:00");
+  await f.at("2026-10-30T10:30:00");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const slow = slowUpstream(t, f, { delayMs: 100000 });
+  await f.rt.reconciliation.refreshDue(f.state.now, { background: true });
+  await yieldTurns(60);
+  assert.equal(slow.active, 6, "一开始 6 条在读，其余排队");
+  await pollRound(f); await pollRound(f); // 又来两轮：不会多起，也不会重复读
+  assert.equal(slow.active, 6);
+  assert.equal(slow.pending.length, 6);
+  t.mock.timers.tick(100000); await yieldTurns(120); // 前 6 条读完，排着的 3 条上场
+  assert.ok(slow.pending.length >= 9, "排着的上场了");
+  t.mock.timers.tick(100000); await yieldTurns(120);
+  assert.ok(slow.maxActive <= 6, `同时在读最多 ${slow.maxActive} 条`);
+  const readsOf = (tokenName) => slow.pending.filter((entry) => entry.url.searchParams.get("token_name") === tokenName).length;
+  for (const id of ids) assert.equal(readsOf(`Key ${id}`), 1, `Key ${id} 只读了一次`);
+});
+
+test("结账慢不挡今天的刷新：昨天的账在后台慢慢读，今天的每一轮照常刷新；上一次结账没做完就不再起第二份，读完自己固定", async (t) => {
+  const f = await twoUpstreams(t);
+  await f.round("2026-10-30T23:00:00");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dayEnd = SH("2026-10-31T00:00:00") / 1000;
+  const slow = slowUpstream(t, f, { delayMs: 100000, when: (url) => Number(url.searchParams.get("start_timestamp")) < dayEnd }); // 只有结 10-30 那天的整天读得慢
+  await f.at("2026-10-31T00:30:00");
+  const rules = await f.rt.reconciliation.listRules();
+  const upRule = rules.find((item) => item.upstreamStationId === f.supplier.id), up2Rule = rules.find((item) => item.upstreamStationId === f.supplier2.id);
+  await f.rt.reconciliation.refreshDue(f.state.now, { background: true });
+  await yieldTurns(80);
+  assert.equal(slow.pending.length, 1, "Up2 结 10-30 在后台读");
+  const stamp = () => f.rt._reconciliationLatestToday.get(upRule.id)?.value.generatedAt;
+  const first = stamp();
+  await pollRound(f);
+  assert.notEqual(stamp(), first, "结账还没读完，Up 今天的刷新照常");
+  assert.equal(slow.pending.length, 1, "上一次结账没做完：不再起第二份");
+  assert.ok(!f.costOn("2026-10-30").some((row) => row.rule_id === up2Rule.id));
+  t.mock.timers.tick(100000); await yieldTurns(120);
+  assert.ok(f.costOn("2026-10-30").some((row) => row.rule_id === up2Rule.id), "读完自己固定了");
 });
