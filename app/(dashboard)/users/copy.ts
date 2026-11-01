@@ -50,7 +50,7 @@ export const COPY = Object.freeze({
     afterWeekCompare: "比 7 天前：上线满 7 天后再比",
     usersCount: (n: number) => `${n} 个`,
     usersDelta: (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n)} 个`,
-    prepaidTitle: "客户余额合计，不含管理员",
+    prepaidTitle: "用户余额合计，不含管理员",
     kpiLabel: "用户消费的四个数",
     metricLabel: "图上看哪个数",
     chartTitle: "每天的用户消费",
