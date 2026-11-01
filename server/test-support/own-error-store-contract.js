@@ -4,7 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const bucket = (extra = {}) => ({ slotMs: 3600000 * 10, channelId: 1, model: "m", group: "g", reason: "rate_limit", status: 429, attempt: 1, count: 2, ...extra });
+const bucket = (extra = {}) => ({ table: "channel", slotMs: 3600000 * 10, channelId: 1, model: "m", group: "g", reason: "rate_limit", status: 429, attempt: 1, retryable: 1, count: 2, ...extra });
+const userBucket = (extra = {}) => ({ table: "user", slotMs: 3600000 * 10, userId: 7, model: "m", reason: "rate_limit", count: 3, firstCount: 1, ...extra });
 
 export function defineOwnErrorStoreContract({ name, create, createConsume = null }) {
   test(`own error store contract: ${name}`, { timeout: 60000 }, async (t) => {
@@ -14,29 +15,44 @@ export function defineOwnErrorStoreContract({ name, create, createConsume = null
     const id = (suffix) => { const value = `oec-${Date.now() % 1e9}-${suffix}`.slice(0, 32); stations.push(value); return value; };
     t.after(async () => { for (const station of stations) { await store.deleteStation(station); await consume?.deleteStation(station); } });
 
-    await t.test("同一个桶的次数加起来；原因、状态码、第几次尝试、渠道、模型、分组任何一项不同就是另一个桶；进度不在窗口起点不写", async () => {
+    await t.test("同一个桶的次数加起来；原因、状态码、第几次尝试、能不能重试、渠道、模型、分组任何一项不同就是另一个桶；进度不在窗口起点不写", async () => {
       const station = id("a");
       await store.startCursor(station, 1000);
-      assert.equal(await store.applyWindow(station, { fromMs: 1000, toMs: 2000, buckets: [bucket(), bucket({ reason: "upstream", status: 503 }), bucket({ attempt: 2 })] }), true);
+      assert.equal(await store.applyWindow(station, { fromMs: 1000, toMs: 2000, buckets: [bucket(), bucket({ reason: "upstream", status: 503 }), bucket({ attempt: 2 }), bucket({ retryable: 0 })] }), true);
       assert.equal(await store.applyWindow(station, { fromMs: 1000, toMs: 2000, buckets: [bucket()] }), false, "同一个窗口不能加两次");
       assert.equal(await store.applyWindow(station, { fromMs: 2000, toMs: 3000, buckets: [bucket({ count: 3 }), bucket({ channelId: 2 }), bucket({ model: "other" }), bucket({ group: "vip" }), bucket({ status: 0, reason: "other" })] }), true);
       const listed = await store.listBuckets(station, 0, 3600000 * 100);
-      assert.equal(listed.length, 7);
-      const one = listed.find((b) => b.channelId === 1 && b.model === "m" && b.group === "g" && b.reason === "rate_limit" && b.status === 429 && b.attempt === 1);
+      assert.equal(listed.length, 8);
+      const one = listed.find((b) => b.channelId === 1 && b.model === "m" && b.group === "g" && b.reason === "rate_limit" && b.status === 429 && b.attempt === 1 && b.retryable === 1);
       assert.equal(one.count, 5, "2 + 3");
-      assert.deepEqual(Object.keys(one).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "slotMs", "status"]);
-      assert.deepEqual(listed.map((b) => b.attempt).sort(), [1, 1, 1, 1, 1, 1, 2]);
+      assert.deepEqual(Object.keys(one).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "retryable", "slotMs", "status", "table"]);
+      assert.deepEqual(listed.map((b) => b.attempt).sort(), [1, 1, 1, 1, 1, 1, 1, 2]);
+      assert.deepEqual(listed.map((b) => b.retryable).sort(), [0, 1, 1, 1, 1, 1, 1, 1], "不能重试的失败另算一个桶");
       assert.equal(await store.applyWindow(id("none"), { fromMs: 0, toMs: 1, buckets: [] }), false, "没有进度的站点不写");
     });
 
-    await t.test("第几次尝试只存 1、2、3；渠道 0（读不到渠道）能存；名字太长截到列宽", async () => {
+    await t.test("第几次尝试存确切的 1–10（超过 10 记 10、小于 1 记 1）；渠道 0（读不到渠道）能存；名字太长截到列宽", async () => {
       const station = id("b");
       await store.startCursor(station, 0);
-      await store.applyWindow(station, { fromMs: 0, toMs: 1, buckets: [bucket({ attempt: 9 }), bucket({ attempt: 0, model: "x".repeat(300) }), bucket({ channelId: 0, group: "y".repeat(100) })] });
+      await store.applyWindow(station, { fromMs: 0, toMs: 1, buckets: [bucket({ attempt: 9 }), bucket({ attempt: 0, model: "x".repeat(300) }), bucket({ channelId: 0, group: "y".repeat(100), attempt: 40 })] });
       const listed = await store.listBuckets(station, 0, 99999999);
-      assert.deepEqual(listed.map((b) => b.attempt).sort(), [1, 1, 3]);
+      assert.deepEqual(listed.map((b) => b.attempt).sort((a, b) => a - b), [1, 9, 10]);
       assert.ok(listed.some((b) => b.channelId === 0));
       assert.ok(listed.every((b) => b.model.length <= 128 && b.group.length <= 64));
+    });
+
+    await t.test("用户桶：同一个桶的次数和第 1 次次数各自加起来；用户 ID、模型、原因不同是另一个桶；只存用户 ID；和渠道桶同一个窗口事务、各自一张表", async () => {
+      const station = id("u");
+      await store.startCursor(station, 0);
+      assert.equal(await store.applyWindow(station, { fromMs: 0, toMs: 10, buckets: [bucket(), userBucket(), userBucket({ count: 2, firstCount: 2 }), userBucket({ userId: 8 }), userBucket({ model: "other" }), userBucket({ reason: "upstream" })] }), true);
+      assert.equal((await store.listBuckets(station, 0, 99999999)).length, 1, "默认读渠道桶，用户桶不混进去");
+      const users = await store.listBuckets(station, 0, 99999999, { table: "user" });
+      assert.equal(users.length, 4);
+      assert.deepEqual(users.find((b) => b.userId === 7 && b.model === "m" && b.reason === "rate_limit"), { table: "user", slotMs: 3600000 * 10, userId: 7, model: "m", reason: "rate_limit", count: 5, firstCount: 3 });
+      assert.deepEqual(Object.keys(users[0]).sort(), ["count", "firstCount", "model", "reason", "slotMs", "table", "userId"]);
+      await assert.rejects(store.listBuckets(station, 0, 99999999, { table: "nope" }), /unknown bucket table/);
+      await store.pruneBuckets(3600000 * 100);
+      assert.deepEqual([(await store.listBuckets(station, 0, 99999999)).length, (await store.listBuckets(station, 0, 99999999, { table: "user" })).length], [0, 0], "清理两张表一起清");
     });
 
     await t.test("别的站点、别的小时的桶分开；按小时范围读；清理只删早的", async () => {
@@ -63,12 +79,12 @@ export function defineOwnErrorStoreContract({ name, create, createConsume = null
     await t.test("删站点：进度、暂存、桶都清掉，别的站点不受影响", async () => {
       const a = id("f"), b = id("g");
       await store.startCursor(a, 0); await store.startCursor(b, 0);
-      await store.applyWindow(a, { fromMs: 0, toMs: 10, buckets: [bucket()] });
-      await store.applyWindow(b, { fromMs: 0, toMs: 10, buckets: [bucket()] });
+      await store.applyWindow(a, { fromMs: 0, toMs: 10, buckets: [bucket(), userBucket()] });
+      await store.applyWindow(b, { fromMs: 0, toMs: 10, buckets: [bucket(), userBucket()] });
       await store.savePending(a, { fromMs: 10, toMs: 20, nextPage: 2, total: 5, seenIds: [1], buckets: [], complete: false, classificationKey: "k" });
       await store.deleteStation(a);
-      assert.deepEqual([await store.getCursor(a), await store.getPending(a), (await store.listBuckets(a, 0, 99999999)).length], [null, null, 0]);
-      assert.equal((await store.listBuckets(b, 0, 99999999)).length, 1);
+      assert.deepEqual([await store.getCursor(a), await store.getPending(a), (await store.listBuckets(a, 0, 99999999)).length, (await store.listBuckets(a, 0, 99999999, { table: "user" })).length], [null, null, 0, 0]);
+      assert.deepEqual([(await store.listBuckets(b, 0, 99999999)).length, (await store.listBuckets(b, 0, 99999999, { table: "user" })).length], [1, 1]);
     });
   });
 }

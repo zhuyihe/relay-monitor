@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { ERROR_KIND, INGEST, createOwnLogIngest } from "./own-log-ingest.js";
+import { ERROR_KIND, INGEST, RETRY_SETTINGS_FAIL_TTL_MS, RETRY_SETTINGS_TTL_MS, cachedRetrySettings, createOwnLogIngest, readRetrySettings } from "./own-log-ingest.js";
 import { ERROR_SPEC } from "./own-log-store.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { ownUsersKey } from "./own-helpers.js";
@@ -21,6 +21,7 @@ async function fakeSite(t, logs, controls = {}) {
     requests.push({ path: url.pathname, p: Number(url.searchParams.get("p") || 1), start: Number(url.searchParams.get("start_timestamp") || 0), end: Number(url.searchParams.get("end_timestamp") || 0) });
     const send = (status, body) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(body)); };
     if (url.pathname === "/api/user/") return send(200, { success: true, data: { items: USERS, total: USERS.length } });
+    if (url.pathname === "/api/option/" && controls.options) return controls.options(send);
     if (url.pathname !== "/api/log/") return send(404, { success: false });
     const failAt = controls.failAt?.(requests.length);
     if (failAt) return send(failAt, { success: false, message: "boom" });
@@ -378,7 +379,10 @@ test("错误日志：读 type=5，按原因、状态码、第几次尝试分桶�
   assert.deepEqual(buckets.map((b) => [b.channelId, b.reason, b.status, b.attempt, b.count]).sort(), [[1, "rate_limit", 429, 1, 1], [1, "upstream", 503, 2, 1], [2, "upstream", 502, 1, 1]]);
   assert.ok(buckets.every((b) => b.slotMs % 3600000 === 0 && b.model === "m" && b.group === "g"));
   assert.equal(await consumeStore.getCursor("own"), null, "另一份进度，消费日志的不动");
-  assert.deepEqual(Object.keys(buckets[0]).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "slotMs", "status"], "只有次数，没有用户名、令牌名、原文");
+  assert.deepEqual(Object.keys(buckets[0]).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "retryable", "slotMs", "status", "table"], "只有次数，没有用户名、令牌名、原文");
+  // 用户桶：日志里的 user_id（夹具里没写，记 0）；前两条在同一个小时（429 第 1 次、503 第 2 次），第三条在下一个小时（502 第 1 次）
+  const userBuckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER, { table: "user" });
+  assert.deepEqual(userBuckets.map((b) => [b.userId, b.model, b.reason, b.count, b.firstCount]).sort(), [[0, "m", "rate_limit", 1, 1], [0, "m", "upstream", 1, 0], [0, "m", "upstream", 1, 1]]);
 });
 
 test("错误日志：暂存和桶里不留错误原文、用户名、令牌名（读到一半停下时看暂存）", async (t) => {
@@ -393,7 +397,7 @@ test("错误日志：暂存和桶里不留错误原文、用户名、令牌名�
   let partial = null;
   for (let i = 0; i < 60 && !partial; i += 1) { resetOwnRequestBudget(); await ingest.ingestOnce(own); const pending = await store.getPending("own"); if (pending && pending.nextPage > 1) partial = pending; }
   assert.ok(partial, "有一轮停在窗口中间，暂存里有东西");
-  const text = JSON.stringify([partial, [...store.buckets.values()]]);
+  const text = JSON.stringify([partial, ...[...store.tableBuckets.values()].map((table) => [...table.values()])]);
   for (const secret of ["alice", "secret-key", "sk-xxxx", "用户的内容"]) assert.ok(!text.includes(secret), `暂存和桶里不能有 ${secret}`);
 });
 
@@ -530,4 +534,96 @@ test("错误日志清理 35 天前的桶；关→开传 justTurnedOn：进度比
   assert.equal((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).length, 2, "桶不删");
   assert.equal(await ingest.pruneIfDue(), 1, "清掉 35 天前的那一个");
   assert.deepEqual((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).map((b) => b.count), [2]);
+});
+
+const optionsReply = (items) => (send) => send(200, { success: true, data: items });
+const retryOptions = (times, ranges) => [{ key: "RetryTimes", value: String(times) }, { key: "AutomaticRetryStatusCodes", value: ranges }, { key: "SomethingElse", value: "ignored" }];
+
+test("站点的重试设置：读 GET /api/option/ 的 RetryTimes 和 AutomaticRetryStatusCodes，其余扔掉；1 小时内不重复读；没权限缓存 1 小时、读不到缓存 10 分钟并沿用上一次的；额度紧或断路不发请求", async (t) => {
+  resetOwnRequestBudget();
+  let mode = "ok", calls = 0;
+  const { own, rt, requests } = await fakeSite(t, [], { options: (send) => { calls += 1; return mode === "ok" ? send(200, { success: true, data: retryOptions(3, "429，500-599") }) : mode === "denied" ? send(403, { success: false, message: "无权进行此操作，权限不足" }) : send(500, { success: false }); } });
+  let now = NOW;
+  const read = () => readRetrySettings(rt, own, { now });
+  assert.deepEqual(await read(), { retryTimes: 3, retryRanges: [[429, 429], [500, 599]] });
+  assert.deepEqual(cachedRetrySettings(rt, own), { retryTimes: 3, retryRanges: [[429, 429], [500, 599]] });
+  assert.equal(requests.filter((r) => r.path === "/api/option/").length, 1);
+  now += RETRY_SETTINGS_TTL_MS - 1000; await read();
+  assert.equal(calls, 1, "1 小时内不重复读");
+  mode = "denied"; now += 2000;
+  assert.deepEqual(await read(), { retryTimes: 3, retryRanges: [[429, 429], [500, 599]] }, "过了 1 小时重读，没权限：沿用上一次读到的");
+  assert.equal(calls, 2);
+  now += RETRY_SETTINGS_TTL_MS - 1000; await read();
+  assert.equal(calls, 2, "没权限也缓存 1 小时");
+  mode = "fail"; now += 2000; resetOwnRequestBudget();
+  await read();
+  assert.equal(calls, 3);
+  now += RETRY_SETTINGS_FAIL_TTL_MS - 1000; await read();
+  assert.equal(calls, 3, "读不到缓存 10 分钟");
+  mode = "ok"; now += 2000; resetOwnRequestBudget(); // 上一次 500 让断路器开了一会儿（真实时钟），这里时钟是假的
+  assert.equal((await read()).retryTimes, 3);
+  assert.equal(calls, 4, "10 分钟后再试");
+  // 额度紧 / 断路：不发请求，沿用上一次的
+  now += RETRY_SETTINGS_TTL_MS + 1000; resetOwnRequestBudget();
+  for (let i = 0; i < OWN_RATE_LIMIT; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 200, elapsedMs: 10, now });
+  assert.deepEqual(await read(), { retryTimes: 3, retryRanges: [[429, 429], [500, 599]] });
+  assert.equal(calls, 4, "额度用满：不发");
+  resetOwnRequestBudget(); noteOwnRequest(own.baseUrl + "/x", { status: 429, now });
+  await read();
+  assert.equal(calls, 4, "断路：不发");
+});
+
+test("站点没有这两项设置（版本太老）或没读到过：重试次数、范围是 null，按 rc.30 的默认；没有「没读到过」的缓存时 cachedRetrySettings 是 null", async (t) => {
+  resetOwnRequestBudget();
+  const { own, rt } = await fakeSite(t, [], { options: optionsReply([{ key: "Other", value: "1" }]) });
+  assert.equal(cachedRetrySettings(rt, own), null);
+  assert.deepEqual(await readRetrySettings(rt, own, { now: NOW }), { retryTimes: null, retryRanges: null });
+  resetOwnRequestBudget();
+  const bad = await fakeSite(t, [], { options: optionsReply(retryOptions("abc", 42)) });
+  assert.deepEqual(await readRetrySettings(bad.rt, bad.own, { now: NOW }), { retryTimes: null, retryRanges: null }, "写得不对的当没有");
+  resetOwnRequestBudget();
+  const empty = await fakeSite(t, [], { options: optionsReply(retryOptions(0, "")) });
+  assert.deepEqual(await readRetrySettings(empty.rt, empty.own, { now: NOW }), { retryTimes: 0, retryRanges: [] }, "重试 0 次、范围是空的：就是不重试，不当成没读到");
+});
+
+test("错误日志的「能不能重试」跟着站点的重试范围走：读得到范围就按它，读不到按默认；范围变了，没读完的暂存丢掉重读（口径变了不能混）", async (t) => {
+  resetOwnRequestBudget();
+  const logs = [errRow(1, YESTERDAY_START + 600000, {}, { status_code: 503 }), errRow(2, YESTERDAY_START + 600000, {}, { status_code: 429 })];
+  const run = async (options) => {
+    resetOwnRequestBudget();
+    const site = await fakeSite(t, logs, { options });
+    const store = new MemoryOwnLogStore(ERROR_SPEC);
+    const ingest = errorIngest(site.rt, store, () => NOW);
+    for (let i = 0; i < 60; i += 1) { resetOwnRequestBudget(); if ((await ingest.ingestOnce(site.own)).skipped === "caught-up") break; }
+    return (await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).map((b) => [b.status, b.retryable]).sort();
+  };
+  assert.deepEqual(await run(optionsReply(retryOptions(3, "429"))), [[429, 1], [503, 0]], "站点只重试 429：503 不能重试");
+  assert.deepEqual(await run(optionsReply(retryOptions(3, "429,500-599"))), [[429, 1], [503, 1]]);
+  assert.deepEqual(await run(undefined), [[429, 1], [503, 1]], "站点读不到设置：按默认范围，503 能重试");
+  assert.deepEqual(await run((send) => send(403, { success: false, message: "无权" })), [[429, 1], [503, 1]], "没权限：同样按默认");
+});
+
+test("重试设置变了（口径指纹变了）：这一窗口没读完的暂存丢掉，下一轮从同一处重读", async (t) => {
+  resetOwnRequestBudget();
+  const start = NOW - 40 * 60000, logs = []; let id = 1;
+  for (let at = start; at < start + 300000; at += 1000) for (let k = 0; k < 5; k += 1) logs.push(errRow(id++, at, {}, { status_code: 503 }));
+  let ranges = "429,500-599";
+  const { own, rt } = await fakeSite(t, logs, { options: (send) => send(200, { success: true, data: retryOptions(3, ranges) }) });
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await store.startCursor("own", wholeSecondMs(start), NOW);
+  let now = NOW;
+  const ingest = errorIngest(rt, store, () => now);
+  let partial = null;
+  for (let i = 0; i < 40 && !partial; i += 1) { resetOwnRequestBudget(); await ingest.ingestOnce(own); const pending = await store.getPending("own"); if (pending && pending.nextPage > 1) partial = pending; }
+  assert.ok(partial, "停在窗口中间");
+  ranges = "429"; now += RETRY_SETTINGS_TTL_MS + 1000; rt._ownRetrySettings.clear(); resetOwnRequestBudget();
+  const changed = await ingest.ingestOnce(own);
+  assert.equal(changed.error, "pending-classification-changed");
+  assert.equal(await store.getPending("own"), null, "没读完的暂存丢了");
+  for (let i = 0; i < 80; i += 1) { resetOwnRequestBudget(); if ((await ingest.ingestOnce(own)).skipped === "caught-up") break; }
+  const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  assert.equal(total(buckets), logs.length, "重读以后每条只进一次");
+  const olderRows = logs.filter((log) => log.created_at * 1000 < partial.fromMs).length;
+  assert.equal(buckets.filter((b) => b.retryable === 1).reduce((sum, b) => sum + b.count, 0), olderRows, "口径变之前已经读完入桶的窗口留着旧口径，没读完的窗口全按新口径（503 不能重试）重读");
+  assert.ok(buckets.some((b) => b.retryable === 0));
 });

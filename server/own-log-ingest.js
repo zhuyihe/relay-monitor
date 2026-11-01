@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { OWN_LOG_SLOT_MS, accumulateBuckets, bucketKeyOf } from "../lib/own-log-bucket.js";
 import { OWN_ERROR_SLOT_MS, accumulateErrorBuckets, errorBucketKeyOf } from "../lib/own-error-bucket.js";
 import { ingestAllowance, noteIngestUsage, ownRequestState } from "../lib/own-request-budget.js";
-import { queryOwnLogWindow } from "../lib/providers.js";
+import { queryOwnLogWindow, queryOwnRetrySettings } from "../lib/providers.js";
 import { businessTimeZone, dayStartInTz, dayKeyInTz, shiftedDayStartInTz } from "../lib/business-time.js";
 import { readOwnAdminDirectory, resoldAdminKeysOf } from "./own-helpers.js";
 
@@ -46,12 +46,40 @@ export const INGEST = Object.freeze({
   PRUNE_MAX_BATCHES: 20,
 });
 
-// 一条流水线读哪种日志：type、桶怎么加、桶的键、要不要管理员名单、每轮页数和窗口的上限（不写就用 INGEST 里的）
+// 站点的重试设置（RetryTimes、自动重试状态码范围）：错误日志判断「这次失败站点会不会再试」要用。读 GET /api/option/（站点里只读内存里的设置表，不查库），
+// 每个站点 1 小时最多读一次；读不到（没权限、版本太老、网络、额度紧、断路）退回按 rc.30 的默认范围，下一轮再试：没权限缓存 1 小时，别的读不到缓存 10 分钟；
+// 额度紧或断路时不发请求，沿用上一次读到的。返回 { retryTimes, retryRanges }（读不到的字段是 null）或 null（从没读到过）
+export const RETRY_SETTINGS_TTL_MS = 3600000, RETRY_SETTINGS_FAIL_TTL_MS = 600000;
+export async function readRetrySettings(rt, own, { now = Date.now(), query = queryOwnRetrySettings } = {}) {
+  const cache = (rt._ownRetrySettings ||= new Map());
+  const key = `${own.id}|${ownBase(own)}|${own.userId || ""}|${own.authVersion ?? ""}`;
+  const hit = cache.get(own.id);
+  const known = hit?.key === key ? hit : null;
+  if (known && now - known.at < (known.failed ? known.ttl : RETRY_SETTINGS_TTL_MS)) return known.value;
+  // 重试设置不是必须的（读不到就按默认）：断路、额度只剩保底（别的读取已经占了大半）时不发
+  const allowance = ingestAllowance(ownBase(own), { now });
+  if (ownRequestState(ownBase(own), now).broken || allowance.allowed <= 0 || allowance.floor) return known?.value ?? null;
+  let entry;
+  try {
+    const result = await query(own);
+    entry = result.state === "ok"
+      ? { key, at: now, value: { retryTimes: result.retryTimes, retryRanges: result.retryRanges } }
+      : { key, at: now, failed: true, ttl: RETRY_SETTINGS_TTL_MS, value: known?.value ?? null };
+  } catch { entry = { key, at: now, failed: true, ttl: RETRY_SETTINGS_FAIL_TTL_MS, value: known?.value ?? null }; }
+  cache.set(own.id, entry);
+  return entry.value;
+}
+// 已经读到的（不发请求）：查询函数要「站点的重试次数」时用；没读到过是 null
+export const cachedRetrySettings = (rt, own) => rt._ownRetrySettings?.get(own.id)?.value ?? null;
+
+// 一条流水线读哪种日志：type、桶怎么加、桶的键、要不要管理员名单、每轮页数和窗口的上限（不写就用 INGEST 里的）；
+// prepare：每轮读之前问一下额外的上下文（错误日志要站点的重试设置），返回 { 给 accumulate 的字段, key（进暂存的口径指纹，变了就丢掉没读完的暂存重读） }
 export const CONSUME_KIND = Object.freeze({
   name: "consume", type: 2, tag: "own-log-ingest", slotMs: OWN_LOG_SLOT_MS, accumulate: accumulateBuckets, keyOf: bucketKeyOf, needsAdmins: true, limits: Object.freeze({}),
 });
 export const ERROR_KIND = Object.freeze({
   name: "error", type: 5, tag: "own-error-ingest", slotMs: OWN_ERROR_SLOT_MS, accumulate: accumulateErrorBuckets, keyOf: errorBucketKeyOf, needsAdmins: false,
+  prepare: async ({ rt, own, now }) => { const settings = await readRetrySettings(rt, own, { now }); return { retryRanges: settings?.retryRanges ?? null, key: JSON.stringify(settings?.retryRanges ?? null) }; },
   limits: Object.freeze({ pagesPerRound: 3, pagesBehind: 6, windowStartMs: 5 * 60000, windowMaxMs: 15 * 60000, minAdvanceMs: 5 * 60000 }),
 });
 
@@ -107,9 +135,10 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
     const mayRequest = () => budget > 0 && now() < deadline && !ownRequestState(base, now()).broken;
     let coveredTo = cursor.coveredToMs;
     let windowMs = windowSizes.get(own.id) ?? limit.windowStartMs;
+    const context = kind.prepare ? await kind.prepare({ rt, own, now: at }) : {};
     // 暂存只含编号和聚合值，不留用户名、Key 名、请求内容。管理员/转售归类改变时拒绝混用两种口径。
     const classificationKey = createHash("sha256").update(JSON.stringify({
-      kind: kind.name, admins: [...adminSet].sort(), resold: resoldKeys.map((key) => [key.username, key.tokenName]).sort(),
+      kind: kind.name, extra: context.key ?? null, admins: [...adminSet].sort(), resold: resoldKeys.map((key) => [key.username, key.tokenName]).sort(),
     })).digest("hex");
     const result = (extra = {}) => ({ pages, windows, coveredToMs: coveredTo, skipChecked: true, ...extra });
     const invalid = (code) => Object.assign(new Error(code), { code });
@@ -177,7 +206,7 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
         // 已翻完 total 指定的页数还缺编号，不能靠空页把漏掉的记录当作已采完。
         if (total != null && !complete && page >= Math.ceil(total / INGEST.PAGE_SIZE)) throw invalid("pending-count-mismatch");
         const buckets = new Map((pending?.buckets || []).map((bucket) => [kind.keyOf(bucket), bucket]));
-        kind.accumulate(fresh, { adminSet, resoldKeys }, buckets);
+        kind.accumulate(fresh, { adminSet, resoldKeys, ...context }, buckets);
         const saved = await store.savePending(own.id, { fromMs, toMs, nextPage: page + 1, total,
           seenIds: [...seen], buckets: [...buckets.values()], complete, classificationKey },
           { expectedRevision: pending?.revision ?? null }, now());

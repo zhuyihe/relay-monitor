@@ -21,22 +21,35 @@ export const bucketFromRow = (row) => ({ slotMs: Number(row.slot_ms), channelId:
   ...Object.fromEntries(OWN_LOG_BUCKET_COLUMNS.map((column) => [FIELD_OF_COLUMN[column], Number(row[column])])) });
 
 
-// 错误日志的桶（own_error_buckets）：主键是（站点、小时、渠道、模型、分组、原因、状态码、第几次尝试），只有一个计数 count
+// 错误日志的两种桶（同一个暂存、同一个窗口事务，用 table 分开）：
+//   own_error_buckets（渠道桶）：（站点、小时、渠道、模型、分组、原因、状态码、第几次尝试 1–10、能不能重试）→ 次数 count
+//   own_error_user_buckets（用户桶）：（站点、小时、用户 ID、模型、原因）→ 次数 count、第 1 次尝试的次数 first_count；只存用户 ID，不存用户名
 export const OWN_ERROR_BUCKET_COLUMNS = Object.freeze(["count"]);
-export const errorBucketRowOf = (stationId, bucket) => ({ station_id: stationId, slot_ms: bucket.slotMs, channel_id: Math.max(0, Math.trunc(Number(bucket.channelId)) || 0), model: clip(bucket.model, 128),
-  grp: clip(bucket.group, 64), reason: clip(bucket.reason, 12), status_code: Math.max(0, Math.trunc(Number(bucket.status)) || 0), attempt: Math.min(3, Math.max(1, Math.trunc(Number(bucket.attempt)) || 1)),
+export const OWN_ERROR_USER_BUCKET_COLUMNS = Object.freeze(["count", "first_count"]);
+const int = (value, min = 0) => Math.max(min, Math.trunc(Number(value)) || min);
+export const errorBucketRowOf = (stationId, bucket) => ({ station_id: stationId, slot_ms: bucket.slotMs, channel_id: int(bucket.channelId), model: clip(bucket.model, 128),
+  grp: clip(bucket.group, 64), reason: clip(bucket.reason, 12), status_code: int(bucket.status), attempt: Math.min(10, int(bucket.attempt, 1)), retryable: bucket.retryable ? 1 : 0,
   count: Math.round(Number(bucket.count) || 0) });
-export const errorBucketFromRow = (row) => ({ slotMs: Number(row.slot_ms), channelId: Number(row.channel_id), model: row.model, group: row.grp, reason: row.reason, status: Number(row.status_code), attempt: Number(row.attempt), count: Number(row.count) });
+export const errorBucketFromRow = (row) => ({ table: "channel", slotMs: Number(row.slot_ms), channelId: Number(row.channel_id), model: row.model, group: row.grp, reason: row.reason, status: Number(row.status_code),
+  attempt: Number(row.attempt), retryable: Number(row.retryable), count: Number(row.count) });
+export const errorUserRowOf = (stationId, bucket) => ({ station_id: stationId, slot_ms: bucket.slotMs, user_id: int(bucket.userId), model: clip(bucket.model, 128), reason: clip(bucket.reason, 12),
+  count: Math.round(Number(bucket.count) || 0), first_count: Math.round(Number(bucket.firstCount) || 0) });
+export const errorUserFromRow = (row) => ({ table: "user", slotMs: Number(row.slot_ms), userId: Number(row.user_id), model: row.model, reason: row.reason, count: Number(row.count), firstCount: Number(row.first_count) });
 
+// spec.tables：这条流水线写的桶表（第一张是默认的）；owns 判断一个桶进哪张表
 export const CONSUME_SPEC = Object.freeze({
-  name: "consume", cursor: "own_log_cursor", pending: "own_log_pending", buckets: "own_log_buckets",
-  keyColumns: Object.freeze(["station_id", "slot_ms", "channel_id", "model", "upstream_model", "grp", "semantic"]), counterColumns: OWN_LOG_BUCKET_COLUMNS,
-  rowOf: bucketRowOf, fromRow: bucketFromRow, keyOf: bucketKeyOf,
+  name: "consume", cursor: "own_log_cursor", pending: "own_log_pending", keyOf: bucketKeyOf,
+  tables: Object.freeze([Object.freeze({ name: "channel", table: "own_log_buckets", owns: () => true,
+    keyColumns: Object.freeze(["station_id", "slot_ms", "channel_id", "model", "upstream_model", "grp", "semantic"]), counterColumns: OWN_LOG_BUCKET_COLUMNS, rowOf: bucketRowOf, fromRow: bucketFromRow })]),
 });
 export const ERROR_SPEC = Object.freeze({
-  name: "error", cursor: "own_error_cursor", pending: "own_error_pending", buckets: "own_error_buckets",
-  keyColumns: Object.freeze(["station_id", "slot_ms", "channel_id", "model", "grp", "reason", "status_code", "attempt"]), counterColumns: OWN_ERROR_BUCKET_COLUMNS,
-  rowOf: errorBucketRowOf, fromRow: errorBucketFromRow, keyOf: errorBucketKeyOf,
+  name: "error", cursor: "own_error_cursor", pending: "own_error_pending", keyOf: errorBucketKeyOf,
+  tables: Object.freeze([
+    Object.freeze({ name: "channel", table: "own_error_buckets", owns: (bucket) => bucket.table !== "user",
+      keyColumns: Object.freeze(["station_id", "slot_ms", "channel_id", "model", "grp", "reason", "status_code", "attempt", "retryable"]), counterColumns: OWN_ERROR_BUCKET_COLUMNS, rowOf: errorBucketRowOf, fromRow: errorBucketFromRow }),
+    Object.freeze({ name: "user", table: "own_error_user_buckets", owns: (bucket) => bucket.table === "user",
+      keyColumns: Object.freeze(["station_id", "slot_ms", "user_id", "model", "reason"]), counterColumns: OWN_ERROR_USER_BUCKET_COLUMNS, rowOf: errorUserRowOf, fromRow: errorUserFromRow }),
+  ]),
 });
 
 const cursorFromRow = (row) => row ? { stationId: row.station_id, coveredFromMs: Number(row.covered_from_ms), coveredToMs: Number(row.covered_to_ms), updatedAtMs: Number(row.updated_at_ms),
@@ -158,15 +171,17 @@ export class OwnLogStore {
           await conn.rollback(); return false;
         }
       }
-      const rows = [...buckets].map((bucket) => this.spec.rowOf(stationId, bucket));
-      // 一条语句最多 200 个桶；加起来写（ON DUPLICATE KEY UPDATE col = col + VALUES(col)）
-      for (let at = 0; at < rows.length; at += 200) {
-        const part = rows.slice(at, at + 200);
-        const columns = [...this.spec.keyColumns, ...this.spec.counterColumns];
-        await conn.query(
-          `INSERT INTO ${this.spec.buckets} (${columns.join(", ")}) VALUES ${part.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ")}
-           ON DUPLICATE KEY UPDATE ${this.spec.counterColumns.map((column) => `${column} = ${column} + VALUES(${column})`).join(", ")}`,
-          part.flatMap((item) => columns.map((column) => item[column])));
+      // 桶按表分开写；一条语句最多 200 个桶，加起来写（ON DUPLICATE KEY UPDATE col = col + VALUES(col)）
+      for (const table of this.spec.tables) {
+        const rows = [...buckets].filter((bucket) => table.owns(bucket)).map((bucket) => table.rowOf(stationId, bucket));
+        for (let at = 0; at < rows.length; at += 200) {
+          const part = rows.slice(at, at + 200);
+          const columns = [...table.keyColumns, ...table.counterColumns];
+          await conn.query(
+            `INSERT INTO ${table.table} (${columns.join(", ")}) VALUES ${part.map(() => `(${columns.map(() => "?").join(", ")})`).join(", ")}
+             ON DUPLICATE KEY UPDATE ${table.counterColumns.map((column) => `${column} = ${column} + VALUES(${column})`).join(", ")}`,
+            part.flatMap((item) => columns.map((column) => item[column])));
+        }
       }
       await conn.query(`UPDATE ${this.spec.cursor} SET covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?`, [toMs, now, stationId]);
       await conn.query(`DELETE FROM ${this.spec.pending} WHERE station_id = ?`, [stationId]);
@@ -178,16 +193,22 @@ export class OwnLogStore {
     } finally { conn.release(); }
   }
 
-  // [fromSlotMs, toSlotMs) 的桶，V1-b 结账和对账用
-  async listBuckets(stationId, fromSlotMs, toSlotMs) {
-    const [rows] = await this.pool.query(`SELECT * FROM ${this.spec.buckets} WHERE station_id = ? AND slot_ms >= ? AND slot_ms < ?`, [stationId, fromSlotMs, toSlotMs]);
-    return rows.map(this.spec.fromRow);
+  // [fromSlotMs, toSlotMs) 的桶，V1-b 结账和对账用；table 选哪张表（错误日志有 "channel" 和 "user"，默认第一张）
+  async listBuckets(stationId, fromSlotMs, toSlotMs, { table = this.spec.tables[0].name } = {}) {
+    const spec = this.spec.tables.find((item) => item.name === table);
+    if (!spec) throw new Error(`unknown bucket table: ${table}`);
+    const [rows] = await this.pool.query(`SELECT * FROM ${spec.table} WHERE station_id = ? AND slot_ms >= ? AND slot_ms < ?`, [stationId, fromSlotMs, toSlotMs]);
+    return rows.map(spec.fromRow);
   }
 
-  // 每小时清一批：beforeSlotMs 以前的桶，一次最多 limit 行
+  // 每小时清一批：beforeSlotMs 以前的桶，每张表一次最多 limit 行；返回删了几行（各表加起来）
   async pruneBuckets(beforeSlotMs, limit = 2000) {
-    const [result] = await this.pool.query(`DELETE FROM ${this.spec.buckets} WHERE slot_ms < ? LIMIT ?`, [beforeSlotMs, limit]);
-    return Number(result?.affectedRows) || 0;
+    let deleted = 0;
+    for (const table of this.spec.tables) {
+      const [result] = await this.pool.query(`DELETE FROM ${table.table} WHERE slot_ms < ? LIMIT ?`, [beforeSlotMs, limit]);
+      deleted += Number(result?.affectedRows) || 0;
+    }
+    return deleted;
   }
 
   async deleteStation(stationId) {
@@ -196,7 +217,7 @@ export class OwnLogStore {
       await conn.beginTransaction();
       await conn.query(`SELECT covered_to_ms FROM ${this.spec.cursor} WHERE station_id = ? FOR UPDATE`, [stationId]);
       await conn.query(`DELETE FROM ${this.spec.pending} WHERE station_id = ?`, [stationId]);
-      await conn.query(`DELETE FROM ${this.spec.buckets} WHERE station_id = ?`, [stationId]);
+      for (const table of this.spec.tables) await conn.query(`DELETE FROM ${table.table} WHERE station_id = ?`, [stationId]);
       await conn.query(`DELETE FROM ${this.spec.cursor} WHERE station_id = ?`, [stationId]);
       await conn.commit();
     } catch (error) {

@@ -407,6 +407,7 @@ export async function ensureSchema(pool) {
     state_json JSON NOT NULL,
     updated_at_ms BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // attempt 是确切的第几次尝试 1–10；retryable 是这次失败「站点会不会再试」（0 / 1，照站点的自动重试状态码范围；不能重试的失败就是这个请求最后一次失败）
   await pool.query(`CREATE TABLE IF NOT EXISTS own_error_buckets (
     station_id VARCHAR(32) NOT NULL,
     slot_ms BIGINT NOT NULL,
@@ -416,9 +417,22 @@ export async function ensureSchema(pool) {
     reason VARCHAR(12) NOT NULL,
     status_code INT NOT NULL,
     attempt TINYINT NOT NULL,
+    retryable TINYINT NOT NULL DEFAULT 1,
     count INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (station_id, slot_ms, channel_id, model, grp, reason, status_code, attempt),
+    PRIMARY KEY (station_id, slot_ms, channel_id, model, grp, reason, status_code, attempt, retryable),
     INDEX idx_own_error_buckets_slot (slot_ms)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 用户桶：小时 × 用户 ID × 模型 × 原因 → 次数，first_count 只数第 1 次尝试（被拒过的请求数）；只存日志里的 user_id，不存用户名
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_error_user_buckets (
+    station_id VARCHAR(32) NOT NULL,
+    slot_ms BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    reason VARCHAR(12) NOT NULL,
+    count INT NOT NULL DEFAULT 0,
+    first_count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (station_id, slot_ms, user_id, model, reason),
+    INDEX idx_own_error_user_buckets_slot (slot_ms)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 用户运营（第一步：数据和后台，server/user-ops-store.js）：用户余额快照、按小时的用量、回补进度、提醒状态；都按站点分开，不加外键。
   // 余额快照留 14 天、用量留 35 天（server/user-ops.js 每天清一批）

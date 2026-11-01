@@ -39,7 +39,7 @@ import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, re
 import { workflowAction } from "../lib/workflow-actions.js";
 import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
 import { ERROR_SPEC, OwnLogStore } from "./own-log-store.js";
-import { ERROR_KIND, INGEST, createOwnLogIngest } from "./own-log-ingest.js";
+import { ERROR_KIND, INGEST, cachedRetrySettings, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
 import { lastSaleAtOf, noteTodayIncome } from "../lib/sale-tracker.js";
@@ -4430,7 +4430,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     backfillExpectedCost,
     ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
     // 错误日志的小时计数（模型供需用，server/own-error-supply.js 在它上面汇总）
-    ownErrorBuckets: (stationId, fromSlotMs, toSlotMs) => (ownErrorStore || rt._ownErrorStore).listBuckets(stationId, fromSlotMs, toSlotMs),
+    ownErrorBuckets: (stationId, fromSlotMs, toSlotMs, options) => (ownErrorStore || rt._ownErrorStore).listBuckets(stationId, fromSlotMs, toSlotMs, options),
+    // 站点的重试设置（错误日志读之前读到的，1 小时一读；没读到过是 null）：queryErrorSupply 的 retry 参数
+    ownRetrySettings: (own) => cachedRetrySettings(rt, own),
     upstreamPricing: (station) => upstreamPricing.pricingFor(station),
     // 自营站点记不记收费记录的最近一次读取结果（{ state: on | off | denied | unavailable, reason? }），没读过是 null；设置页用
     consumeLogStatus: consumeLogStatusOf,
