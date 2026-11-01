@@ -59,13 +59,13 @@ export function ChurnTab({
   const cols: Col<ChurnRow>[] = [
     {
       key: "user", label: C.cols.user,
-      render: (r) => (<span className="jy-two">{name(r)}{r.group && <span className="jy-caption">{r.group}</span>}</span>),
+      render: (r) => (<span className="jy-cell-two">{name(r)}{r.group && <span className="jy-caption">{r.group}</span>}</span>),
       foot: searching ? C.totalMatched(list.total) : C.total(list.total),
     },
     { key: "status", label: C.cols.status, render: (r) => <ChurnTag status={r.status} /> },
     {
       key: "change", label: C.cols.change,
-      render: (r) => (<span className="jy-two"><span className="jy-users-balance">{changeText(r, rate)}</span>{r.status !== "returned" && <span className="jy-caption">{basisText(r)}</span>}</span>),
+      render: (r) => (<span className="jy-cell-two"><span className="jy-users-balance">{changeText(r, rate)}</span>{r.status !== "returned" && <span className="jy-caption">{basisText(r)}</span>}</span>),
     },
     {
       key: "loss", label: C.cols.loss, num: true,
