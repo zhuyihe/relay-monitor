@@ -17,7 +17,7 @@ export const COPY = Object.freeze({
   dash: "—",
   // 拿不到数据时只写一句（放在表的位置）
   none: Object.freeze({
-    noLog: "你的站还没开错误日志，看不到缺货失败。打开方法：在 New API 的环境变量里加 ERROR_LOG_ENABLED=true，再重启。",
+    noLog: "到现在一条错误日志都没读到，可能你的站没开：在 New API 的环境变量里加 ERROR_LOG_ENABLED=true，再重启。",
     switchOff: "系统设置里关了「读取错误日志」，看不到缺货失败。",
     switchOffLink: "去打开",
     noFailures: "近 24 小时没有缺货失败。",
@@ -34,6 +34,8 @@ export const COPY = Object.freeze({
     last24Lost: (money: string) => `少收约 ${money}`,
     last24Users: (v: number) => `影响 ${v} 个重点用户`,
     last24None: "近 24 小时没有缺货失败",
+    outModels: (v: number) => `${v} 个模型断货`,
+    tomorrowAllOut: (v: number) => `这 ${v} 个模型在断货`,
     upstreams: (v: number) => `${v} 家`,
     topupOne: (hours: string) => ` ${hours}后没钱`,
     topupMany: (count: number, hours: string) => ` 等 ${count} 家，最早的 ${hours}后没钱`,
@@ -51,6 +53,10 @@ export const COPY = Object.freeze({
   upstreamMany: (name: string, count: number) => `${name} 等 ${count} 家`,
   tomorrowTimes: (v: string) => `约 ${v} 次`,
   tomorrowNone: "不缺",
+  outNow: "断货中",
+  outSince: (text: string) => text,
+  outMoney: (money: string) => `估计每天 ${money}`,
+  outTomorrow: "仍断货",
   causes: Object.freeze({ rate_limit: "限流", auth_quota: "没钱", upstream: "故障", no_channel: "没渠道" } as Record<LostCause, string>),
   thatUpstream: "那家上游",
   // 建议：一句话，不加理由行（X 是出问题的上游，Y 是能把量挪过去的上游）
@@ -74,6 +80,7 @@ export const COPY = Object.freeze({
   // 手机卡片
   cardLost: (v: number) => `失败 ${n(v)} 次`,
   cardMoney: (money: string) => `少收约 ${money}`,
+  cardOutMoney: (money: string) => `估计每天少收 ${money}`,
   cardLine: (parts: string[]) => parts.join(" · "),
   cardTomorrow: (text: string) => `明天预计${text}`,
   cardReco: (text: string) => `建议：${text}`,
@@ -96,6 +103,8 @@ export const COPY = Object.freeze({
     failed: "读不到这个模型的详情",
     notComputed: "这次没算出来，过一会儿再看。",
     titleLost: (v: number) => `近 24 小时缺货失败 ${n(v)} 次`,
+    outChart: "没有开着的渠道，这个模型的请求现在都失败。",
+    outUsers: "断货中，数不出受影响的用户。",
     kpiLost: "缺货失败", kpiLostSub: "近 24 小时", kpiMoney: "少收", kpiCause: "主要原因", kpiTomorrow: "明天预计",
     causeLine: (cause: string, upstream: string | null) => (upstream ? `${cause} · ${upstream}` : cause),
     chartTitle: "每小时缺货失败",

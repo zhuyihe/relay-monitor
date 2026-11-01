@@ -13,7 +13,7 @@ import { Seg } from "../../components/seg";
 import { ChartLegend, HourlyChart } from "./charts";
 import { COPY } from "./copy";
 import { RunwayCell } from "./models-table";
-import { bindLink, causeText, compareText, conclusionText, limitLine, priceText, tomorrowText, upstreamName, userLink, yuan } from "./models-format";
+import { bindLink, causeText, compareText, conclusionText, isOut, limitLine, outSinceText, priceText, tomorrowText, upstreamName, userLink, yuan } from "./models-format";
 import type { ChannelView, DetailChannel, DetailHeadroom, LoadedPage, ModelDetail } from "./models-format";
 import type { HourBar } from "./charts";
 
@@ -52,7 +52,9 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
   useDrawerEscape(open, onClose);
 
   // 标题旁的红字：这个模型近 24 小时缺货失败几次（没有失败不写）；详情还没读回来先用主表那一行的
-  const lost24 = detail?.headroom?.lost?.lost24 ?? page.headroom.lost.rows.find((item) => item.name === name)?.lost24 ?? 0;
+  const lostRow = detail?.headroom?.lost ?? page.headroom.lost.rows.find((item) => item.name === name) ?? null;
+  const outNow = !!lostRow && isOut(lostRow);
+  const lost24 = lostRow?.lost24 ?? 0;
 
   const body = () => {
     if (state === "notFound") return <p className="jy-muted">{COPY.drawer.notFound}</p>;
@@ -80,7 +82,7 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
       title={(
         <span className="jy-models-drawer-title">
           <strong>{name}</strong>
-          {lost24 > 0 && <span className="jy-hshort">{COPY.drawer.titleLost(lost24)}</span>}
+          {outNow ? <span className="jy-hshort">{COPY.outNow}</span> : lost24 > 0 && <span className="jy-hshort">{COPY.drawer.titleLost(lost24)}</span>}
         </span>
       )}
     >
@@ -96,6 +98,8 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
     if (mode === "last24") return h.hourly.last24.map((p) => ({ hour: p.hour, lost: p.lost }));
     return [...h.hourly.clock7d].sort((a, b) => a.hour - b.hour).map((p) => ({ hour: p.hour, lost: p.lost }));
   }, [h.hourly, mode]);
+  const out = !!lost && isOut(lost);
+  const since = out ? outSinceText(lost!.outSince, detail.tz, detail.asOf) : null;
   const empty = bars != null && bars.every((bar) => bar.lost.rate_limit + bar.lost.upstream + bar.lost.auth_quota === 0);
   const dash = EMPTY;
   return (
@@ -103,12 +107,12 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
       <dl className="jy-kpis jy-models-drawer-kpis">
         <div>
           <dt>{D.kpiLost}</dt>
-          <dd className="jy-kpi-figure">{lost ? COPY.timesCell(lost.lost24) : COPY.timesCell(0)}</dd>
-          <dd className="jy-caption">{D.kpiLostSub}</dd>
+          <dd className="jy-kpi-figure">{out ? COPY.outNow : COPY.timesCell(lost?.lost24 ?? 0)}</dd>
+          {(out ? since : D.kpiLostSub) && <dd className="jy-caption">{out ? since : D.kpiLostSub}</dd>}
         </div>
         <div>
           <dt>{D.kpiMoney}</dt>
-          <dd className="jy-kpi-figure">{lost && lost.lostMoney24 > 0 ? COPY.moneyCell(yuan(lost.lostMoney24, rate)) : dash}</dd>
+          <dd className="jy-kpi-figure">{lost && lost.lostMoney24 > 0 ? (out ? COPY.outMoney(yuan(lost.lostMoney24, rate)) : COPY.moneyCell(yuan(lost.lostMoney24, rate))) : dash}</dd>
         </div>
         <div>
           <dt>{D.kpiCause}</dt>
@@ -116,7 +120,7 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
         </div>
         <div>
           <dt>{D.kpiTomorrow}</dt>
-          <dd className="jy-kpi-figure">{lost ? tomorrowText(lost.tomorrowLost) : dash}</dd>
+          <dd className="jy-kpi-figure">{lost ? tomorrowText(lost.tomorrowLost, out) : dash}</dd>
         </div>
       </dl>
       <section className="jy-models-chart">
@@ -125,7 +129,8 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
           <span className="spacer" />
           <Seg<Mode> size="sm" label={D.chartTitle} value={mode} onChange={setMode} options={[{ value: "last24", label: D.last24 }, { value: "clock7d", label: D.clock7d }]} />
         </div>
-        {bars == null ? <p className="jy-muted">{D.notComputed}</p>
+        {out ? <p className="jy-muted">{D.outChart}</p>
+          : bars == null ? <p className="jy-muted">{D.notComputed}</p>
           : empty ? <p className="jy-muted">{D.chartNone}</p>
             : (
               <>
@@ -133,7 +138,7 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
                 <ChartLegend bars={bars} />
               </>
             )}
-        {bars != null && !empty && <p className="jy-models-conclusion">{conclusionText(lost)}</p>}
+        {!out && bars != null && !empty && <p className="jy-models-conclusion">{conclusionText(lost)}</p>}
       </section>
       <section className="jy-models-chart">
         <div className="jy-chart-sub"><h3>{D.channelsTitle}</h3><span className="jy-caption">{D.channelsSub}</span></div>
@@ -141,7 +146,7 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
       </section>
       <section className="jy-models-chart">
         <div className="jy-chart-sub"><h3>{D.usersTitle}</h3><span className="jy-caption">{D.usersSub}</span></div>
-        <Users detail={detail} />
+        <Users detail={detail} out={out} />
       </section>
       <section className="jy-models-chart">
         <div className="jy-chart-sub"><h3>{D.finderTitle}</h3><span className="jy-caption">{D.finderSub}</span></div>
@@ -152,8 +157,9 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Load
 }
 
 // 受影响的用户：近 24 小时被挡过几次（含后来重试买到的，所以写「受影响 N 次」，不写「失败」），前 5 个，重点用户带「重点」小标签，名字开用户运营的用户抽屉；下面「其他 18 个人受影响 326 次」
-function Users({ detail }: { detail: Loaded }) {
+function Users({ detail, out }: { detail: Loaded; out: boolean }) {
   const D = COPY.drawer, { users } = detail.headroom;
+  if (out) return <p className="jy-muted">{D.outUsers}</p>;
   if (!users.top.length && !users.others) return <p className="jy-muted">{D.usersNone}</p>;
   const biggest = Math.max(1, ...users.top.map((user) => user.blocked));
   return (

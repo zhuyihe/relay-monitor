@@ -10,7 +10,7 @@ import { Icon } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { COPY } from "./copy";
-import { causeText, peakText, recoText, tomorrowText, upstreamCell, yuan, money } from "./models-format";
+import { causeText, isOut, outSinceText, peakText, recoText, tomorrowText, upstreamCell, yuan, money } from "./models-format";
 import type { LoadedPage, LostRowView, Runway } from "./models-format";
 
 // 余下的跑道（上游列表同一个组件、同一种说法）；读不到余额画虚线空条
@@ -80,14 +80,15 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
             <ul className="jy-models-cards">
               {shown.map((item) => {
                 const row = item.row;
-                const line = row ? [row.lostMoney24 > 0 ? COPY.cardMoney(yuan(row.lostMoney24, rate)) : null, row.mainCause ? causeText(row.mainCause) : null, row.mainUpstream ? upstreamCell(row) : null, peakText(row.peakFailHours)].filter(Boolean) as string[] : [];
+                const out = !!row && isOut(row);
+                const line = row ? [row.lostMoney24 > 0 ? (out ? COPY.cardOutMoney(yuan(row.lostMoney24, rate)) : COPY.cardMoney(yuan(row.lostMoney24, rate))) : null, row.mainCause ? causeText(row.mainCause) : null, row.mainUpstream ? upstreamCell(row) : null, peakText(row.peakFailHours)].filter(Boolean) as string[] : [];
                 const reco = row ? recoText(row.reco) : null;
                 return (
                   <li key={item.name}>
                     <div className="jy-models-card" role="button" tabIndex={0} aria-label={COPY.rowOpen(item.name)} onClick={() => onOpen(item.name)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(item.name); } }}>
-                      <span className="r1"><b className="jy-models-cardname">{item.name}</b><span className="jy-hlost">{COPY.cardLost(row?.lost24 ?? 0)}</span></span>
+                      <span className="r1"><b className="jy-models-cardname">{item.name}</b><span className="jy-hlost">{out ? COPY.outNow : COPY.cardLost(row?.lost24 ?? 0)}</span></span>
                       {line.length > 0 && <span className="r2 jy-caption">{COPY.cardLine(line)}</span>}
-                      {row && <span className="r3 jy-caption">{COPY.cardTomorrow(tomorrowText(row.tomorrowLost))}</span>}
+                      {row && <span className="r3 jy-caption">{COPY.cardTomorrow(tomorrowText(row.tomorrowLost, out))}</span>}
                       {reco && reco !== EMPTY && <span className="r4 jy-caption">{COPY.cardReco(reco)}</span>}
                     </div>
                   </li>
@@ -104,16 +105,17 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
               <tbody>
                 {shown.length === 0 && <tr><td colSpan={8} className="jy-muted jy-models-empty">{COPY.noMatch}</td></tr>}
                 {shown.map((item) => {
-                  const row = item.row;
+                  const row = item.row, out = !!row && isOut(row);
+                  const since = out ? outSinceText(row!.outSince, page.tz, page.asOf) : null;
                   return (
                     <tr key={item.name} className="is-clickable" onClick={() => onOpen(item.name)}>
                       <td>{name(item)}</td>
-                      <td className="r">{COPY.timesCell(row?.lost24 ?? 0)}</td>
-                      <td className="r">{row && row.lostMoney24 > 0 ? COPY.moneyCell(yuan(row.lostMoney24, rate)) : dash}</td>
+                      <td className="r">{out ? (since ? <span className="jy-cell-two jy-cell-two--r"><span>{COPY.outNow}</span><span className="jy-caption">{since}</span></span> : COPY.outNow) : COPY.timesCell(row?.lost24 ?? 0)}</td>
+                      <td className="r">{row && row.lostMoney24 > 0 ? (out ? COPY.outMoney(yuan(row.lostMoney24, rate)) : COPY.moneyCell(yuan(row.lostMoney24, rate))) : dash}</td>
                       <td>{row?.mainCause ? causeText(row.mainCause) : dash}</td>
                       <td>{row && row.mainUpstream ? upstreamCell(row) : dash}</td>
                       <td className="jy-hnowrap">{(row && peakText(row.peakFailHours)) || dash}</td>
-                      <td className="r">{row ? tomorrowText(row.tomorrowLost) : COPY.tomorrowNone}</td>
+                      <td className="r">{row ? tomorrowText(row.tomorrowLost, out) : COPY.tomorrowNone}</td>
                       <td>{row ? (recoText(row.reco) === EMPTY ? dash : recoText(row.reco)) : dash}</td>
                     </tr>
                   );

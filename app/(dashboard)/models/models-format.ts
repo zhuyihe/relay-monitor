@@ -1,6 +1,6 @@
 // 模型供需页的类型和把接口的数拼成页面上的字（字在 copy.ts；算数在 lib/models-lost.js、lib/models-headroom.js，页面不重算，只拼字）。钱都按自营站点的汇率换成显示的币种。
 // 页面只读 headroom.lost（近 24 小时缺货失败）和 headroom.upstreams；老的 state / kpis / rows 不读。
-import { EMPTY, formatDays, formatMoney, formatPct } from "../../../lib/format.js";
+import { EMPTY, formatDays, formatMoney, formatPct, formatZonedDate, formatZonedTime } from "../../../lib/format.js";
 import type { Level } from "../../components/status";
 import { COPY } from "./copy";
 import type { ChannelState } from "./copy";
@@ -9,7 +9,9 @@ import type { DetailChannelHeadroom, HeadroomDetail, HeadroomPage, LostByReason,
 export type { ChannelState, LostCause, LostReco, LostRow };
 
 // 等 PR E-A 把这几个字段写进类型以后，下面几个带 & 的可以去掉
-export type LostRowView = LostRow & { upstreamCount?: number };
+// 断货的模型（一个开着的渠道都没有，断货前每天还在卖）：lost24 是 null，少收、明天预计是估计值（estimated），outSince 是从哪一刻起断货（毫秒，不知道是 null）
+export type LostRowView = Omit<LostRow, "lost24"> & { lost24: number | null; estimated?: boolean; outSince?: number | null; upstreamCount?: number };
+export const isOut = (row: { lost24: number | null }) => row.lost24 === null;
 export type LostViewData = Omit<LostView, "rows"> & { rows: LostRowView[]; quiet?: { name: string; weekUsd: number }[] };
 export type UpstreamView = UpstreamHeadroom & { lost24?: LostByReason | null };
 export type ChannelView = DetailChannelHeadroom & { lost24?: number; mainCause?: LostCause | null };
@@ -27,7 +29,7 @@ export type FinderRow = {
   upstreamId: string; name: string | null; price: Price | null; readable: boolean; supplying: boolean; runway: Runway | null; bindable: boolean;
   main: boolean; compare: { kind: "same" | "cheaper" | "pricier"; pct: number } | null;
 };
-export type DetailHeadroom = Omit<HeadroomDetail, "channels"> & { channels: ChannelView[] };
+export type DetailHeadroom = Omit<HeadroomDetail, "channels" | "lost"> & { channels: ChannelView[]; lost: LostRowView | null };
 export type ModelDetail = {
   name: string; rate: number; tz: string; asOf: number; critDays: number;
   headroom: DetailHeadroom | null;
@@ -72,8 +74,13 @@ export function upstreamCell(row: LostRowView): string {
   const name = upstreamName(row.mainUpstream);
   return (row.upstreamCount ?? 1) > 1 ? COPY.upstreamMany(name, row.upstreamCount!) : name;
 }
-// 明天预计：「约 200 次」；不到 1 次写「不缺」
-export const tomorrowText = (n: number) => (n < 0.5 ? COPY.tomorrowNone : COPY.tomorrowTimes(approx(n)));
+// 明天预计：「约 200 次」；不到 1 次写「不缺」；断货的写「仍断货」
+export const tomorrowText = (n: number, out = false) => (out ? COPY.outTomorrow : n < 0.5 ? COPY.tomorrowNone : COPY.tomorrowTimes(approx(n)));
+// 断货从哪天起：今天断的写「今天 14:00 起」，更早写「10月30日起」；不知道不写
+export function outSinceText(ts: number | null | undefined, tz: string, now: number): string | null {
+  if (ts == null) return null;
+  return formatZonedDate(ts, tz, now) === formatZonedDate(now, tz, now) ? `今天 ${formatZonedTime(ts, tz)} 起` : `${formatZonedDate(ts, tz, now)}起`;
+}
 
 // 建议：一句话，不加理由行。X 是出问题的上游，Y 是能把量挪过去的上游
 export function recoText(reco: LostReco): string {
@@ -97,22 +104,26 @@ export function recoText(reco: LostReco): string {
 export type Kpi = {
   key: "tomorrow" | "last24" | "topup"; title: string; value: string; sub: string;
   // 下一行里可点的部分：最缺的模型、重点用户、快没钱的上游
-  lead?: { kind: "model" | "upstream"; id: string; name: string } | null; before?: string; after?: string; users?: number | null;
+  lead?: { kind: "model" | "upstream"; id: string; name: string } | null; before?: string; after?: string; users?: number | null; tail?: string;
 };
 export function kpisOf(page: LoadedPage): Kpi[] {
   const { lost } = page.headroom, K = COPY.kpi, rate = page.rate;
   const off = lost.status === "noErrorLog";
   const t = lost.kpis.tomorrow, l = lost.kpis.last24;
-  const worst = [...lost.rows].sort((a, b) => b.tomorrowLost - a.tomorrowLost)[0];
+  // 最缺的从有失败的里挑（断货的没有失败次数）；断货的模型数
+  const worst = [...lost.rows].filter((row) => !isOut(row)).sort((a, b) => b.tomorrowLost - a.tomorrowLost)[0];
+  const outCount = lost.rows.filter(isOut).length;
   const tomorrow: Kpi = off || !t
     ? { key: "tomorrow", title: K.tomorrow, value: K.dash, sub: "" }
     : t.count > 0 && worst
       ? { key: "tomorrow", title: K.tomorrow, value: K.models(t.count), sub: "", before: K.tomorrowBefore(approx(t.lost)), lead: { kind: "model", id: worst.name, name: worst.name } }
-      : { key: "tomorrow", title: K.tomorrow, value: K.models(0), sub: K.tomorrowNone };
+      : t.count > 0 && outCount > 0
+        ? { key: "tomorrow", title: K.tomorrow, value: K.models(t.count), sub: K.tomorrowAllOut(outCount) }
+        : { key: "tomorrow", title: K.tomorrow, value: K.models(0), sub: K.tomorrowNone };
   const last24: Kpi = off || !l
     ? { key: "last24", title: K.last24, value: K.dash, sub: "" }
-    : l.lost > 0
-      ? { key: "last24", title: K.last24, value: K.times(l.lost), sub: K.last24Lost(yuan(l.lostUsd, rate)), users: l.keyUsers > 0 ? l.keyUsers : null }
+    : l.lost > 0 || outCount > 0
+      ? { key: "last24", title: K.last24, value: K.times(l.lost), sub: K.last24Lost(yuan(l.lostUsd, rate)), users: l.keyUsers > 0 ? l.keyUsers : null, tail: outCount > 0 ? K.outModels(outCount) : undefined }
       : { key: "last24", title: K.last24, value: K.times(0), sub: K.last24None };
   const u = lost.kpis.topup;
   const topup: Kpi = u.count > 0 && u.first
@@ -140,7 +151,7 @@ export function actionHref(action: "topup" | "addKey" | "weights", upstreamId: s
 // 抽屉图下面一句：失败多在 21–24 点，主要是上游甲限流。
 export function conclusionText(lost: LostRowView | null): string {
   const C = COPY.drawer.conclusion;
-  if (!lost || lost.lost24 <= 0) return C.none;
+  if (!lost || lost.lost24 === null || lost.lost24 <= 0) return C.none;
   const when = lost.peakFailHours?.hours.length ? C.when(hoursText(lost.peakFailHours.hours)) : "";
   const who = lost.mainUpstream ? upstreamName(lost.mainUpstream) : "";
   const tail = lost.mainCause === "no_channel" ? C.noChannel : lost.mainCause ? C.mainly(`${who}${causeText(lost.mainCause)}`) : "";

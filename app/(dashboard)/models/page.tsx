@@ -115,13 +115,14 @@ export default function ModelsPageRoute() {
             <div key={kpi.key}>
               <dt>{kpi.title}</dt>
               <dd className="jy-kpi-figure">{kpi.value}</dd>
-              {(kpi.sub || kpi.before || kpi.lead || kpi.after || kpi.users != null) && (
+              {(kpi.sub || kpi.before || kpi.lead || kpi.after || kpi.users != null || kpi.tail) && (
                 <dd className="jy-caption">
                   {kpi.before}
                   {kpi.lead && <button type="button" className="jy-link jy-models-linkbtn" onClick={() => (kpi.lead!.kind === "model" ? open(kpi.lead!.id) : toUpstream(kpi.lead!.id))}>{kpi.lead.name}</button>}
                   {kpi.after}
                   {kpi.sub}
                   {kpi.users != null && <>{kpi.sub ? " · " : ""}<Link className="jy-link" href={USERS_LINK}>{COPY.kpi.last24Users(kpi.users)}</Link></>}
+                  {kpi.tail && <>{kpi.sub || kpi.users != null ? " · " : ""}{kpi.tail}</>}
                 </dd>
               )}
             </div>

@@ -445,7 +445,8 @@ function modelsFixture({ mode = "ok", headroomNull = false } = {}) {
     row("gemini-2.5-pro", 203.19, { lost24: 120, lostMoney24: 3, mainCause: "auth_quota", mainUpstream: up("main", "主力上游"), peakFailHours: { hours: [20, 21] }, tomorrowLost: 125, reco: { kind: "topup", upstreamId: "main", name: "主力上游", hoursLeft: 5 } }),
     row("claude-haiku-4.5", 52.54, { lost24: 40, lostMoney24: 1, mainCause: "upstream", mainUpstream: up("backup", "备用上游"), peakFailHours: { hours: [23, 0] }, tomorrowLost: 0.2, reco: { kind: "fault", upstreamId: "backup", name: "备用上游", moveTo: up("c", "上游丙") } }),
     row("gpt-5", 340.14, { lost24: 74, lostMoney24: 2, mainCause: "rate_limit", mainUpstream: up("main", "主力上游"), peakFailHours: null, tomorrowLost: 70, reco: { kind: "rateLimit", upstreamId: "main", name: "主力上游", accountLimited: true, addKeys: null, moveTo: null } }),
-    row("qwen3-coder", 39.35, { lost24: 12, lostMoney24: 0.8, mainCause: "no_channel", mainUpstream: null, tomorrowLost: 12, reco: { kind: "openChannel" } }),
+    // 断货的模型：一个开着的渠道都没有，断货前每天还在卖——没有失败次数，少收是按天估的
+    row("glm-4.6", 12.79, { lost24: null, estimated: true, outSince: Date.parse("2026-10-30T08:00:00+08:00"), lostMoney24: 12 / 7, mainCause: "no_channel", mainUpstream: null, tomorrowLost: 12, reco: { kind: "openChannel" } }),
   ];
   const upstreams = [
     { upstreamId: "main", name: "主力上游", hoursLeft: 5, limit: q("measured", 9000), peakUsed: 9000, room: 0, full: true, accountLimited: false, blocked24: null, lost24: { rate_limit: 1452, upstream: 0, auth_quota: 120 }, models: { count: 12, names: ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5"] }, actions: ["topup", "addKey"] },
@@ -457,8 +458,8 @@ function modelsFixture({ mode = "ok", headroomNull = false } = {}) {
   const lost = {
     status, noErrorLogReason: mode === "nolog" ? "switchOff" : mode === "norecords" ? "noRecords" : null,
     kpis: {
-      tomorrow: off ? null : mode === "nofail" ? { count: 0, lost: 0 } : { count: 4, lost: 1300 },
-      last24: off ? null : mode === "nofail" ? { lost: 0, lostUsd: 0, keyUsers: 0 } : { lost: 432, lostUsd: 38 / 7, keyUsers: 4 },
+      tomorrow: off ? null : mode === "nofail" ? { count: 0, lost: 0 } : { count: 5, lost: 1300 },
+      last24: off ? null : mode === "nofail" ? { lost: 0, lostUsd: 0, keyUsers: 0 } : { lost: 420, lostUsd: 50 / 7, keyUsers: 4 },
       topup: { count: 1, first: { upstreamId: "main", name: "主力上游", hoursLeft: 5 } },
     },
     rows, quietCount: mode === "ok" ? 2 : 0, quiet: mode === "ok" ? [{ name: "deepseek-v3", weekUsd: 110.13 / 7 }, { name: "gpt-5-mini", weekUsd: 81.58 / 7 }] : [],
@@ -517,9 +518,9 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByText(MODELS_COPY.asOf("16:50"), { exact: true }).waitFor();
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
-  assert.match(await kpi(MODELS_COPY.kpi.tomorrow).innerText(), /4 个模型[\s\S]*不处理的话，明天约 1,300 次失败 · 最多的是 claude-sonnet-4\.6/);
+  assert.match(await kpi(MODELS_COPY.kpi.tomorrow).innerText(), /5 个模型[\s\S]*不处理的话，明天约 1,300 次失败 · 最多的是 claude-sonnet-4\.6/);
   const second = await kpi(MODELS_COPY.kpi.last24).innerText();
-  assert.match(second, /432 次[\s\S]*少收约 ¥38 · 影响 4 个重点用户/);
+  assert.match(second, /420 次[\s\S]*少收约 ¥50 · 影响 4 个重点用户 · 1 个模型断货/);
   assert.equal(await kpi(MODELS_COPY.kpi.last24).getByRole("link", { name: "影响 4 个重点用户" }).getAttribute("href"), "/users");
   assert.match(await kpi(MODELS_COPY.kpi.topup).innerText(), /1 家[\s\S]*主力上游 5 小时后没钱/);
   // 表：表名、表名下一行小字（全页唯一一处解释）、八列
@@ -527,7 +528,7 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   await page.getByText(MODELS_COPY.tableCaption, { exact: true }).waitFor();
   assert.deepEqual(await page.locator("thead th").allInnerTexts(), ["模型", "缺货失败", "少收", "主要原因", "出在哪家上游", "最多的时段", "明天预计", "建议"]);
   const names = () => page.locator("tbody .jy-models-name").allInnerTexts();
-  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "qwen3-coder"], "按接口排好的次序（少收从多到少）");
+  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "glm-4.6"], "按接口排好的次序（少收从多到少）");
   const cells = (name) => modelRow(page, name).locator("td").allInnerTexts();
   const sonnet = await cells("claude-sonnet-4.6");
   assert.match(sonnet[0], /claude-sonnet-4\.6\s*近 7 天 ¥711\.79/);
@@ -539,8 +540,9 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   assert.deepEqual([haiku[3], haiku[4], haiku[5], haiku[6], haiku[7]], ["故障", "备用上游", "23–1 点", "不缺", "备用上游在出错，先把量挪到上游丙"]);
   const gpt = await cells("gpt-5");
   assert.deepEqual([gpt[5], gpt[7]], ["—", "找主力上游提额度"], "失败太散挑不出时段写「—」；按账号限的找它提额度");
-  const qwen = await cells("qwen3-coder");
-  assert.deepEqual([qwen[3], qwen[4], qwen[7]], ["没渠道", "—", "这个模型没有开着的渠道，去开一个"]);
+  // 断货的行：缺货失败写「断货中」加从哪天起，少收写「估计每天」，明天预计写「仍断货」，上游和时段写「—」
+  const glm = await cells("glm-4.6");
+  assert.deepEqual(glm.slice(1).map((cell) => cell.split("\n")), [["断货中", "10月30日起"], ["估计每天 ¥12"], ["没渠道"], ["—"], ["—"], ["仍断货"], ["这个模型没有开着的渠道，去开一个"]]);
   // 收起的其余模型
   await page.getByText(MODELS_COPY.quietNote(2), { exact: true }).waitFor();
   // 一屏：1440×900 整页不出滚动条；左右两块占满剩下的高度，左 9 右 3
@@ -566,7 +568,7 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   for (const word of BANNED_WORDS) assert.equal(text.includes(word), false, `页面上不该出现「${word}」`);
   // 点开收起的其余模型：多出 2 行，缺货失败写 0 次，别的写「—」；整页仍不滚
   await page.getByRole("button", { name: MODELS_COPY.restShow(2), exact: true }).click();
-  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "qwen3-coder", "deepseek-v3", "gpt-5-mini"]);
+  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "glm-4.6", "deepseek-v3", "gpt-5-mini"]);
   assert.deepEqual((await cells("deepseek-v3")).slice(1), ["0 次", "—", "—", "—", "—", "不缺", "—"]);
   assert.equal(await fits(), true);
   await page.getByRole("button", { name: MODELS_COPY.restHide(2), exact: true }).click();
@@ -670,6 +672,22 @@ test("模型供需（手机 375）：顶上三个数两两一排、一个模型�
   assert.match(await drawer.locator(".jy-models-subcards").nth(1).locator("> li").first().innerText(), /上游丙[\s\S]*还没在供[\s\S]*0\.80 倍 · 便宜 20%[\s\S]*去绑定渠道/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "抽屉打开也不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-drawer-375x812.png` }); }
+});
+
+test("模型供需：断货的模型（一个开着的渠道都没有）——手机卡片三行、抽屉不画柱子、写一句话、用户写「断货中，数不出受影响的用户。」", async (t) => {
+  const { page } = await openModelsPage(t, { viewport: { width: 375, height: 812 } });
+  const card = page.locator(".jy-models-card").filter({ hasText: "glm-4.6" });
+  assert.deepEqual((await card.innerText()).split("\n"), ["glm-4.6", "断货中", "估计每天少收 ¥12 · 没渠道", "明天预计仍断货", "建议：这个模型没有开着的渠道，去开一个"]);
+  await card.click();
+  const drawer = page.locator(".jy-models-drawer");
+  await drawer.getByText(MODELS_COPY.drawer.outChart, { exact: true }).waitFor();
+  assert.equal(await drawer.locator(".jy-hbar-col").count(), 0, "不画柱子");
+  await drawer.getByText(MODELS_COPY.drawer.outUsers, { exact: true }).waitFor();
+  assert.equal((await drawer.locator(".ant-drawer-title .jy-hshort").innerText()), "断货中");
+  const k = drawer.locator(".jy-models-drawer-kpis > div");
+  assert.match(await k.nth(0).innerText(), /缺货失败[\s\S]*断货中[\s\S]*10月30日起/);
+  assert.match(await k.nth(1).innerText(), /少收[\s\S]*估计每天 ¥12/);
+  assert.match(await k.nth(3).innerText(), /明天预计[\s\S]*仍断货/);
 });
 
 test("模型供需：拿不到数据时只写一句话、放在表的位置：没开错误日志、控制台关了读取（带「去打开」）、近 24 小时没有失败、这次没算出来；没有提示条", async (t) => {
