@@ -23,6 +23,7 @@
 .jy-models-panel table.jy-data .jy-cell-runway, .jy-models-drawer table.jy-data .jy-cell-runway { justify-content: flex-start; }
 .jy-models-panel table.jy-data .jy-cell-runway .v, .jy-models-drawer table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 
+.jy-models-restrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .jy-models-rest { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
 .jy-models-rest:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
 /* 被自动停用的原因：一行放不下就截短，鼠标放上去（title）看全文 */

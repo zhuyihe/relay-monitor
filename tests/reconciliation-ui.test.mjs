@@ -515,6 +515,7 @@ test("模型供需（电脑）：页顶一句、四个数、主表默认只列�
   const box = page.locator(".jy-models-panel .jy-table-scroll");
   const panelBottom = async () => (await page.locator(".jy-models-panel").boundingBox());
   assert.ok((await panelBottom()).height >= 220, "表那块占着剩下的高度");
+  await page.getByText(MODELS_COPY.restNote(2), { exact: true }).waitFor();
   await page.getByRole("button", { name: MODELS_COPY.restShow(2), exact: true }).click();
   assert.deepEqual(await page.locator("tr.jy-data-group").allInnerTexts(), [MODELS_COPY.segGap(6), MODELS_COPY.segNone(2)]);
   assert.deepEqual(await names(), ["claude-sonnet-4.6", "gpt-5", "gemini-2.5-pro", "claude-haiku-4.5", "qwen3-coder", "glm-4.6", "deepseek-v3", "gpt-5-mini"]);
@@ -565,10 +566,11 @@ test("模型供需（电脑）：页顶一句、四个数、主表默认只列�
   assert.deepEqual(await drawer.locator(".jy-models-drawer-kpis dt").allInnerTexts(), [MODELS_COPY.drawer.kpiWeek, MODELS_COPY.drawer.kpiVs, MODELS_COPY.drawer.kpiSuccess, MODELS_COPY.drawer.kpiSupply]);
   // 渠道和上游：被自动停用的也列出来（灰字）
   const channels = drawer.locator("table").first();
-  assert.deepEqual(await channels.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => [tr.cells[0].innerText, tr.cells[1].innerText.split("\n")[0], tr.className])), [["高速 A", "启用", ""], ["标准 B", "启用", ""], ["高速 C", "被自动停用", "jy-models-off"]]);
+  assert.deepEqual(await channels.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => [tr.cells[0].innerText, tr.cells[1].innerText.split("\n")[0], tr.className])), [["高速 A", "启用", ""], ["标准 B", "启用", ""], ["高速 C", "被自动停用 · 11月1日 9:30", "jy-models-off"]]);
   // 被自动停用的渠道写上停用时间和原因：太长的截短，鼠标放上去看全文；启用着的没有这一行
   const reason = channels.locator("tbody tr").nth(2).locator(".jy-models-reason");
-  assert.match(await reason.getAttribute("title"), /^11月1日 9:30 停用：status code 401: Invalid token[\s\S]*重新生成一个 Key/);
+  assert.match(await reason.getAttribute("title"), /^status code 401: Invalid token[\s\S]*重新生成一个 Key/);
+  assert.equal(await channels.locator("tbody tr").nth(2).locator("td").nth(1).locator(".jy-cell-two > span").first().innerText(), "被自动停用 · 11月1日 9:30", "第一行是状态和时间，第二行才是原因");
   assert.equal(await reason.evaluate((node) => node.scrollWidth > node.clientWidth), true, "一行放不下，截短显示");
   assert.equal(await channels.locator(".jy-models-reason").count(), 1);
   // 找货帮手：按价格从低到高；还没在供的有「去绑定渠道」，链到那个上游的绑定渠道小窗口
@@ -611,7 +613,7 @@ test("模型供需（手机 375）：一个模型一张卡片、段标题照样�
   const channelCards = drawer.locator(".jy-models-subcards").first().locator("> li");
   assert.equal(await channelCards.count(), 3);
   assert.match(await channelCards.first().innerText(), /高速 A\s*启用[\s\S]*优先级 10 · 近 7 天占 72% · 主力上游/);
-  assert.match(await channelCards.nth(2).innerText(), /高速 C\s*被自动停用[\s\S]*11月1日 9:30 停用：status code 401/);
+  assert.match(await channelCards.nth(2).innerText(), /高速 C\s*被自动停用 · 11月1日 9:30[\s\S]*status code 401/);
   assert.match(await drawer.locator(".jy-models-subcards").nth(1).locator("> li").first().innerText(), /上游丙[\s\S]*还没在供[\s\S]*0\.80 倍 · 便宜 20%[\s\S]*去绑定渠道/);
   assert.ok(await channelCards.first().locator("strong, b").first().evaluate((node) => node.getBoundingClientRect().width > 40), "渠道名不是一个字一行");
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "抽屉打开也不横向滚动");

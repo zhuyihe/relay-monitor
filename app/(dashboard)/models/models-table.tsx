@@ -76,7 +76,10 @@ export function ModelsTable({ page, sort, onSort, onOpen }: { page: ModelsPage; 
   ];
 
   const rest = !needle && restCount > 0 && (
-    <button type="button" className="jy-link jy-models-rest" aria-expanded={showRest} onClick={() => setShowRest(!showRest)}>{showRest ? COPY.restHide(restCount) : COPY.restShow(restCount)}</button>
+    <span className="jy-models-restrow">
+      <span>{COPY.restNote(restCount)}</span>
+      <button type="button" className="jy-link jy-models-rest" aria-expanded={showRest} onClick={() => setShowRest(!showRest)}>{showRest ? COPY.restHide(restCount) : COPY.restShow(restCount)}</button>
+    </span>
   );
   return (
     <Panel
