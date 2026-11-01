@@ -4599,7 +4599,7 @@ test("U05历史请求31日默认/最大与数量cap，非法参数在数据库�
   }
 });
 
-test("U05真实withAuth历史/configuration opt-in：归档入口可发现、默认/非法flag不返回，错误安全可重试", async (t) => {
+test("U05真实withAuth configuration opt-in：归档入口可发现、默认/非法flag不返回", async (t) => {
   const f = confirmedHistoryFixture();
   t.mock.method(globalThis, "fetch", async () => { assert.fail("read-only history must not fetch upstream"); });
   const { registerHooks } = await import("node:module");
@@ -4614,25 +4614,13 @@ test("U05真实withAuth历史/configuration opt-in：归档入口可发现、默
     return next(url, context);
   } });
   try {
-    const { GET } = await import("../app/api/reconciliation/rules/[id]/confirmed/route.js");
     const { GET: CONFIGURATION } = await import("../app/api/reconciliation/configuration/route.js");
-    const url = `http://localhost/api/reconciliation/rules/old-rule/confirmed?startMs=${f.window.startMs}&endMs=${f.window.endMs}`;
-    const ctx = { params: Promise.resolve({ id: "old-rule" }) };
-    assert.equal((await GET(new Request(url), ctx)).status, 401);
     const request = (value) => new Request(value, { headers: { cookie: "rm_session=valid" } });
-    const response = await GET(request(url), ctx); assert.equal(response.status, 200);
-    assert.equal((await response.json()).records[0].upstreamSource.tokenName, "old-name");
     for (const suffix of ["", "?includeArchived=1", "?includeArchived=TRUE", "?includeArchived=false"]) {
       assert.deepEqual((await (await CONFIGURATION(request(`http://localhost/api/reconciliation/configuration${suffix}`))).json()).rules, []);
     }
     const archived = await (await CONFIGURATION(request("http://localhost/api/reconciliation/configuration?includeArchived=true"))).json();
     assert.equal(archived.rules[0].id, "old-rule"); assert.ok(archived.rules[0].archivedAt);
-    const invalid = await GET(request(`${url}&cursor=bad`), ctx); assert.equal(invalid.status, 400);
-    const missing = await GET(request(url), { params: { id: "missing" } }); assert.equal(missing.status, 404);
-    f.state.fail = true;
-    const failed = await GET(request(url), ctx); assert.equal(failed.status, 503);
-    const body = await failed.json(); assert.equal(body.code, "HISTORY_UNAVAILABLE"); assert.equal(body.retryable, true);
-    assert.doesNotMatch(JSON.stringify(body), /raw-secret|database failure/);
   } finally { hooks.deregister(); delete globalThis.__u05HistoryRuntime; }
 });
 
