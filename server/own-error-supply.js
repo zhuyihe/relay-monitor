@@ -24,11 +24,17 @@ export const REJECTED_REASONS = Object.freeze(ERROR_REASONS.filter((reason) => r
 const DAY_MS = 86400000;
 export const RETRY_INFER_DAYS = 7;
 const emptyRejected = () => ({ ...Object.fromEntries(REJECTED_REASONS.map((reason) => [reason, 0])), total: 0 });
+// 大多数格子（渠道 × 模型 × 小时）没有错误：共用一份冻住的空对象，第一次加错误时才复制（写时复制），省下几十万个小对象
+const SHARED_REJECTED = Object.freeze(emptyRejected());
+const SHARED_ATTEMPTS = Object.freeze({ retryable: Object.freeze(new Array(MAX_ATTEMPT).fill(0)), nonRetryable: Object.freeze(new Array(MAX_ATTEMPT).fill(0)) });
+export const SUPPLY_CHUNK_SLOTS = 24; // 读桶一次读多少个小时（分批读，不一次读成两个大数组）
 // sampled：这里面有几个窗口的被拒数是按样本估的（错误太多的窗口只读 300 条，按窗口总条数摊；0 = 都是实数）
 const emptyAgg = () => ({ rejected: emptyRejected(), rejectedRequests: 0, badRequest: 0, success: 0, sampled: 0 });
+const lazyAgg = () => ({ rejected: SHARED_REJECTED, rejectedRequests: 0, badRequest: 0, success: 0, sampled: 0 });
 const emptyAttempts = () => ({ retryable: new Array(MAX_ATTEMPT).fill(0), nonRetryable: new Array(MAX_ATTEMPT).fill(0) });
 function addError(agg, bucket) {
   if (bucket.reason === "bad_request") { agg.badRequest += bucket.count; return; }
+  if (agg.rejected === SHARED_REJECTED) agg.rejected = emptyRejected();
   agg.rejected[bucket.reason] = (agg.rejected[bucket.reason] || 0) + bucket.count;
   agg.rejected.total += bucket.count;
   if (bucket.attempt === 1) agg.rejectedRequests += bucket.count;
@@ -36,7 +42,11 @@ function addError(agg, bucket) {
 }
 // 请求问题、其他（404 之类）不进 F 的尝试数
 const NOT_IN_F = new Set(["bad_request", "other"]);
-const addAttempts = (attempts, bucket) => { if (NOT_IN_F.has(bucket.reason)) return; attempts[bucket.retryable ? "retryable" : "nonRetryable"][Math.min(MAX_ATTEMPT, Math.max(1, bucket.attempt)) - 1] += bucket.count; };
+const addAttempts = (owner, bucket) => {
+  if (NOT_IN_F.has(bucket.reason)) return;
+  if (owner.attempts === SHARED_ATTEMPTS) owner.attempts = emptyAttempts();
+  owner.attempts[bucket.retryable ? "retryable" : "nonRetryable"][Math.min(MAX_ATTEMPT, Math.max(1, bucket.attempt)) - 1] += bucket.count;
+};
 
 // 渠道 → 现有绑定：rules 是 repository.listRules() 的结果；只算这个自营站点的、启用的、没解除的绑定。
 // 返回 Map(渠道 id → { upstreamStationId, ruleId })。一条绑定 = 一把 Key，所以同一个 ruleId 下的渠道共用一把 Key 的限额；同一个 upstreamStationId 是同一个上游账号
@@ -96,11 +106,9 @@ export const wallHourOf = (slotMs, tz = DEFAULT_BUSINESS_TIME_ZONE) => wallHourO
  *   cells: [{ slotMs, channelId, model, success, rejected, rejectedRequests, attempts: { retryable: [1–10 档], nonRetryable: [1–10 档] } }]（渠道 × 模型 × 小时，有数的才有）
  * }
  */
-export async function queryErrorSupply({ errors, consume, stationId, fromMs, toMs, channelUpstream = new Map(), tz = DEFAULT_BUSINESS_TIME_ZONE, retry = null }) {
+export async function queryErrorSupply({ errors, consume, stationId, fromMs, toMs, channelUpstream = new Map(), tz = DEFAULT_BUSINESS_TIME_ZONE, retry = null, maxRows = Infinity }) {
   const fromSlotMs = Math.floor(fromMs / OWN_ERROR_SLOT_MS) * OWN_ERROR_SLOT_MS, toSlotMs = Math.max(fromSlotMs, Math.ceil(toMs / OWN_ERROR_SLOT_MS) * OWN_ERROR_SLOT_MS);
-  const [errorBuckets, consumeBuckets, cursor] = await Promise.all([
-    errors.listBuckets(stationId, fromSlotMs, toSlotMs), consume.listBuckets(stationId, fromSlotMs, toSlotMs), errors.getCursor(stationId),
-  ]);
+  const cursor = await errors.getCursor(stationId);
   let retryTimes = Number.isInteger(retry?.retryTimes) && retry.retryTimes >= 0 ? retry.retryTimes : null;
   let method = retryTimes != null ? "retry-times" : "none", approximate = false;
   if (retryTimes == null) {
@@ -112,23 +120,32 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
   const cellOf = (slotMs, channelId, model) => {
     const key = `${slotMs}|${channelId}|${model}`;
     let cell = cells.get(key);
-    if (!cell) cells.set(key, cell = { slotMs, channelId, model, ...emptyAgg(), attempts: emptyAttempts() });
+    if (!cell) cells.set(key, cell = { slotMs, channelId, model, ...lazyAgg(), attempts: SHARED_ATTEMPTS });
     return cell;
   };
   const modelHourOf = (slotMs, model) => {
     const key = `${slotMs}|${model}`;
     let entry = modelHours.get(key);
-    if (!entry) modelHours.set(key, entry = { slotMs, model, ...emptyAgg(), attempts: emptyAttempts() });
+    if (!entry) modelHours.set(key, entry = { slotMs, model, ...lazyAgg(), attempts: SHARED_ATTEMPTS });
     return entry;
   };
-  for (const bucket of errorBuckets) {
-    const cell = cellOf(bucket.slotMs, bucket.channelId, bucket.model), modelHour = modelHourOf(bucket.slotMs, bucket.model);
-    addError(cell, bucket); addAttempts(cell.attempts, bucket);
-    addError(modelHour, bucket); addAttempts(modelHour.attempts, bucket);
-  }
-  for (const bucket of consumeBuckets) {
-    cellOf(bucket.slotMs, bucket.channelId, bucket.model).success += bucket.requests;
-    modelHourOf(bucket.slotMs, bucket.model).success += bucket.requests;
+  // 分批读（每批 SUPPLY_CHUNK_SLOTS 个小时），一批一批往格子里加，不把整段时间的桶一次读成两个大数组；
+  // 读到的桶行数（错误日志 + 整站消费日志）超过 maxRows 就停，抛 TOO_MANY_BUCKETS（调用方当「这次不算」）
+  let rows = 0;
+  for (let from = fromSlotMs; from < toSlotMs; from += SUPPLY_CHUNK_SLOTS * OWN_ERROR_SLOT_MS) {
+    const to = Math.min(toSlotMs, from + SUPPLY_CHUNK_SLOTS * OWN_ERROR_SLOT_MS);
+    const [errorBuckets, consumeBuckets] = await Promise.all([errors.listBuckets(stationId, from, to), consume.listBuckets(stationId, from, to)]);
+    rows += errorBuckets.length + consumeBuckets.length;
+    if (rows > maxRows) throw Object.assign(new Error("too many buckets"), { code: "TOO_MANY_BUCKETS" });
+    for (const bucket of errorBuckets) {
+      const cell = cellOf(bucket.slotMs, bucket.channelId, bucket.model), modelHour = modelHourOf(bucket.slotMs, bucket.model);
+      addError(cell, bucket); addAttempts(cell, bucket);
+      addError(modelHour, bucket); addAttempts(modelHour, bucket);
+    }
+    for (const bucket of consumeBuckets) {
+      cellOf(bucket.slotMs, bucket.channelId, bucket.model).success += bucket.requests;
+      modelHourOf(bucket.slotMs, bucket.model).success += bucket.requests;
+    }
   }
   // 汇总：从渠道 × 模型 × 小时的格子往上加
   const total = { ...emptyAgg(), finalFailures: 0 };

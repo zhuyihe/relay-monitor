@@ -8,6 +8,7 @@ import { dayGrid } from "../lib/user-ops-view.js";
 import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { modelDetail, modelsPage, MODELS_FAIL_TTL_MS, MODELS_TTL_MS } from "./models-page.js";
 import { ERROR_SPEC } from "./own-log-store.js";
+import { HEADROOM } from "../lib/models-headroom.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 
 const H = 3600000;
@@ -285,4 +286,15 @@ test("高峰余量：没有数据库（或读库出错）时 headroom 是 null�
   await withStores(broken.rt);
   broken.rt._ownErrorStore.listBuckets = async () => { throw new Error("db down"); };
   assert.equal((await modelsPage(broken.rt, { now: NOW })).headroom, null, "读库出错：老页面照常");
+});
+
+test("高峰余量：渠道桶（错误日志 + 整站消费日志）超过 60 万行就不算，headroom 是 null，老页面照常（防止撑爆内存）", async (t) => {
+  const { rt } = makeRt(t, world());
+  const { errors } = await withStores(rt);
+  const real = errors.listBuckets.bind(errors);
+  errors.listBuckets = async (station, from, to, options) => (options?.table ? real(station, from, to, options) : new Array(HEADROOM.MAX_BUCKET_ROWS + 1)); // 第一批就超过
+  const page = await modelsPage(rt, { now: NOW });
+  assert.equal(page.headroom, null);
+  assert.equal(page.rows.length, 4, "老字段照常");
+  assert.equal(HEADROOM.MAX_BUCKET_ROWS, 600000);
 });

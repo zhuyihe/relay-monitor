@@ -15,7 +15,7 @@ export async function readHeadroom(rt, ctx) {
     const settings = rt.store?.settings || {};
     const channelUpstream = channelUpstreamMap(ctx.rules, own.id);
     const [supply, rejectedUsers, errorCursor, consumeCursor, latest] = await Promise.all([
-      queryErrorSupply({ errors, consume, stationId: own.id, fromMs: now - HEADROOM.WINDOW_DAYS * DAY_MS, toMs: now, channelUpstream, tz, retry: rt.reconciliation?.ownRetrySettings?.(own) ?? null }),
+      queryErrorSupply({ errors, consume, stationId: own.id, fromMs: now - HEADROOM.WINDOW_DAYS * DAY_MS, toMs: now, channelUpstream, tz, retry: rt.reconciliation?.ownRetrySettings?.(own) ?? null, maxRows: HEADROOM.MAX_BUCKET_ROWS }),
       queryRejectedUsers({ errors, stationId: own.id, fromMs: now - 24 * HOUR_MS, toMs: now }),
       errors.getCursor(own.id), consume.getCursor(own.id), errors.latestSlot(own.id),
     ]);
@@ -40,7 +40,7 @@ export async function readHeadroom(rt, ctx) {
     result.page.links = links;
     return result;
   } catch (error) {
-    console.debug("models-headroom", error?.code || error?.message || "failed");
+    console.debug("models-headroom", error?.code || error?.message || "failed"); // TOO_MANY_BUCKETS：桶太多这次不算
     return null;
   }
 }
