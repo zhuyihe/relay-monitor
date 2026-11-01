@@ -20,7 +20,7 @@ const MODELS_DAYS = 30;
 const toUsd = (quota) => quota / QUOTA_PER_UNIT;
 
 // 今天到现在，对比过去 7 天同一时段：每位用户 { today, usual（过去 7 天同一时段的平均）, usualDay（过去 7 天整天的平均）}；
-// 还算不了（过去 7 个整天没补全、刚过 0 点没满 1 小时）是 null
+// 还算不了（过去 7 个整天没补全、刚过 0 点没满 1 小时）是 null；upTo 是「今天到几点」（上一个整点，毫秒），页面写「平时到 14:00 → 今天到 14:00」
 export async function sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom }) {
   const N = grid.days, todayStart = grid.starts[N - 1];
   const whole = Math.floor((now - SAME_LAG_MS - todayStart) / HOUR_MS);
@@ -69,7 +69,7 @@ export async function sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom 
       value.usualDay += hours.reduce((total, usd) => total + usd, 0) / SAME_DAYS;
     }
   }
-  return out;
+  return { users: out, upTo };
 }
 
 // 每位用户近 30 天花得最多的模型；返回 { models: Map | null, error }
@@ -115,11 +115,11 @@ export async function churnResponse(rt, ops, store, params, { now = Date.now() }
     sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom }),
     mainModels(rt, own, { now, tz }),
   ]);
-  const view = buildChurnView({ now, tz, rows: page.users, daily: cache.daily, sameTime, models: models.models, ready: page.ready, backfill: page.backfill });
+  const view = buildChurnView({ now, tz, rows: page.users, daily: cache.daily, sameTime: sameTime?.users ?? null, models: models.models, ready: page.ready, backfill: page.backfill });
   const query = { only: params.get("only"), big: params.get("big") === "1", q: params.get("q"), page: params.get("page") };
   return {
     asOf: page.asOf, syncedMs: page.syncedMs, tz, rate: page.rate, ownStationId: page.ownStationId, fresh: page.fresh,
-    backfill: page.backfill, ready: view.ready, summary: view.summary, modelsError: models.error,
+    backfill: page.backfill, ready: view.ready, sameUntilMs: sameTime?.upTo ?? null, summary: view.summary, modelsError: models.error,
     list: queryChurn(view, query),
   };
 }
