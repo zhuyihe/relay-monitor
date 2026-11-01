@@ -3,7 +3,7 @@
 // 筛选（只看重点用户、状态）、翻页都在服务端（/api/users/churn），这里只管摆；点一行开用户抽屉（和用户页签同一个）。手机是一人一张卡片。
 import { useEffect, useState } from "react";
 import { Button, Grid, Input } from "antd";
-import { EMPTY } from "../../../lib/format";
+import { EMPTY, formatZonedTime } from "../../../lib/format";
 import { Icon } from "../../components/icons";
 import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
@@ -54,6 +54,8 @@ export function ChurnTab({
     </span>
   );
   const when = (row: ChurnRow) => lastUsedText(row, users);
+  // 比的是哪两段；今天明显少了写「平时到 14:00 → 今天到 14:00」（14:00 是比到的上一个整点）
+  const basisText = (row: ChurnRow) => (row.status === "todayLow" ? C.basisPeriod(page.sameUntilMs != null ? formatZonedTime(page.sameUntilMs, page.tz) : EMPTY) : row.status === "down" ? C.basis.decline : C.basis.churn);
   const cols: Col<ChurnRow>[] = [
     {
       key: "user", label: C.cols.user,
@@ -63,7 +65,7 @@ export function ChurnTab({
     { key: "status", label: C.cols.status, render: (r) => <ChurnTag status={r.status} /> },
     {
       key: "change", label: C.cols.change,
-      render: (r) => (<span className="jy-two"><span className="jy-users-balance">{changeText(r, rate)}</span>{r.status !== "returned" && <span className="jy-caption">{C.basis[basisOf(r)]}</span>}</span>),
+      render: (r) => (<span className="jy-two"><span className="jy-users-balance">{changeText(r, rate)}</span>{r.status !== "returned" && <span className="jy-caption">{basisText(r)}</span>}</span>),
     },
     {
       key: "loss", label: C.cols.loss, num: true,
@@ -144,7 +146,7 @@ export function ChurnTab({
                       <b className="jy-users-week">{lossText(row, rate)}</b>
                     </span>
                     {row.status !== "returned" && (
-                      <span className="r2"><span className="jy-caption">{changeText(row, rate)} · {C.basis[basisOf(row)]}</span></span>
+                      <span className="r2"><span className="jy-caption">{changeText(row, rate)} · {basisText(row)}</span></span>
                     )}
                     <span className="r3">
                       <span className="jy-caption">{C.cardLast(when(row), money(row.balanceUsd, rate))}</span>
@@ -186,5 +188,5 @@ export function ChurnTab({
   );
 }
 
-const basisOf = (row: ChurnRow): "period" | "decline" | "churn" => (row.status === "todayLow" ? "period" : row.status === "down" ? "decline" : "churn");
+
 

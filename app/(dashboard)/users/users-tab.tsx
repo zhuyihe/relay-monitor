@@ -127,6 +127,7 @@ export function UsersTab({
       <div className="jy-users-filters" aria-busy={loading || undefined}>
         <Seg<Scope>
           size="sm"
+          className="jy-users-seg-scope"
           label={COPY.users.scopeLabel}
           value={query.scope}
           onChange={(value) => onQuery({ scope: value })}
@@ -143,6 +144,7 @@ export function UsersTab({
         <span className="jy-users-filters-rule" aria-hidden="true" />
         <Seg<Only>
           size="sm"
+          className="jy-users-seg-status"
           label={COPY.users.filterLabel}
           value={query.only}
           onChange={(value) => onQuery({ only: value })}

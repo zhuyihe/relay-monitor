@@ -43,7 +43,7 @@ export type UserDetail = {
   user: UsersRow | null; rate: number; ready: UsersPage["ready"]; backfill: UsersPage["backfill"]; models: DetailModels;
 };
 
-export const TABS: readonly UsersTab[] = ["overview", "users", "churn", "demand"];
+export const TABS: readonly UsersTab[] = ["overview", "users", "churn"];
 export const OPEN_TABS: readonly UsersTab[] = ["overview", "users", "churn"];
 export const ONLY_VALUES = ["all", "soon", "down", "new", "churned"] as const;
 export const ONLY_LABEL: Record<Only, string> = { all: COPY.users.filterAll, soon: COPY.status.soon, down: COPY.status.down, new: COPY.status.new, churned: COPY.status.churned };
@@ -203,6 +203,8 @@ export type ChurnPage = {
   starting?: boolean; asOf: number; syncedMs: number; tz: string; rate: number; ownStationId: string; fresh: boolean;
   backfill: UsersPage["backfill"];
   ready: { down: boolean; churn: boolean; today: boolean; retention: boolean; retentionPrev: boolean; available: number };
+  // 今天明显少了比到几点（上一个整点，毫秒）；还判不了是 null
+  sameUntilMs: number | null;
   summary: {
     down: { count: number; loss: number };
     newChurn: { count: number; monthly: number };

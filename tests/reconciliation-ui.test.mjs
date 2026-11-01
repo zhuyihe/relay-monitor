@@ -2825,7 +2825,7 @@ function churnResponseOf(full, params) {
   const models = new Map([["u006", "gpt-4o"], ["u007", "claude-sonnet"]]);
   const view = buildChurnView({ now: USERS_NOW, tz: USERS_TZ, rows: full.users, daily: full.daily, sameTime, models, ready: full.ready, backfill: full.backfill });
   const list = queryChurn(view, { only: params.get("only"), big: params.get("big") === "1", q: params.get("q"), page: params.get("page") });
-  return { asOf: full.asOf, syncedMs: full.asOf, tz: full.tz, rate: 1, ownStationId: "own-1", fresh: true, backfill: full.backfill, ready: view.ready, summary: view.summary, modelsError: null, list };
+  return { asOf: full.asOf, syncedMs: full.asOf, tz: full.tz, rate: 1, ownStationId: "own-1", fresh: true, backfill: full.backfill, ready: view.ready, sameUntilMs: Date.parse("2026-11-02T10:00:00+08:00"), summary: view.summary, modelsError: null, list };
 }
 async function openUsersPage(t, { viewport, search = "tab=users" } = {}) {
   const full = usersFixture(), requests = [];
@@ -2920,6 +2920,11 @@ test("用户运营·手机：用户表是一人一张卡片，筛选三行、没
   const cards = page.locator(".jy-users-card");
   await cards.first().waitFor();
   assert.equal(await cards.count(), 50);
+  // 手机上筛选三行：范围一整行；勾选框在左、分组下拉在右同一行；状态一整行
+  const box = (locator) => locator.evaluate((node) => { const rect = node.getBoundingClientRect(); return { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width) }; });
+  const [scope, big, group, status] = [await box(usersGroup(page, USERS_COPY.users.scopeLabel)), await box(page.locator(".jy-users-bigcheck")), await box(page.locator(".jy-users-group")), await box(usersGroup(page, USERS_COPY.users.filterLabel))];
+  assert.ok(scope.top < big.top && Math.abs(big.top - group.top) < 24 && big.left < group.left && Math.max(big.top, group.top) < status.top, JSON.stringify({ scope, big, group, status }));
+  assert.deepEqual(await page.getByRole("tab").allInnerTexts().then((list) => list.map((text) => text.replace(/\s+/g, " ").trim())), ["概览", "用户", "流失"], "页签只有三个，都能点");
   assert.match(await cards.first().innerText(), /u001[\s\S]*vip · 最近使用/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-users-375.png`, fullPage: false }); }
@@ -2942,7 +2947,7 @@ test("用户运营·流失页签：四个数、按一天少花多少排的主表
   await rows().first().waitFor();
   assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "状态", "以前日均 → 最近日均", "一天少花多少", "最近使用", "余额", "主要用的模型"]);
   // 默认：今天明显少了（u009，损失 ¥60 × 0.95）排最前，之后是在下滑（u006、u007，一天少 ¥18），再是已流失
-  assert.match(await rows().first().innerText(), /u009[\s\S]*今天明显少了/);
+  assert.match(await rows().first().innerText(), /u009[\s\S]*今天明显少了[\s\S]*平时到 10:00 → 今天到 10:00/);
   const names = await rows().locator("td:first-child button").allInnerTexts();
   assert.deepEqual(names.slice(0, 3), ["u009", "u006", "u007"]);
   assert.match(await rows().nth(1).innerText(), /在下滑[\s\S]*¥20\.00 → ¥2\.00（−90\.0%）[\s\S]*之前 14 天 → 近 3 天[\s\S]*−¥18\.00 \/天[\s\S]*gpt-4o/);

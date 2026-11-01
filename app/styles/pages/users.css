@@ -92,7 +92,11 @@ table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
   .jy-users-filters { padding-inline: 12px; }
   .jy-users-filters .jy-seg { overflow-x: auto; }
   .jy-users-filters-rule { display: none; }
-  .jy-users-bigcheck { flex: 1 0 100%; }
+  /* 手机上筛选三行（设计 v8）：范围一整行；勾选框在左、分组下拉在右；状态一整行，横着滑 */
+  .jy-users-seg-scope { order: 1; flex: 1 0 100%; }
+  .jy-users-bigcheck { order: 2; flex: 0 0 auto; }
+  .jy-users-group { order: 3; flex: 1 1 0; min-width: 0; }
+  .jy-users-seg-status { order: 4; flex: 1 0 100%; }
   .jy-users-search { width: 100%; }
   .jy-users-drawer-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .jy-users-drawer-kpis > div + div { padding-left: 0; border-left: 0; }
@@ -113,8 +117,7 @@ table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 .jy-users-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-top: 1px solid var(--jy-rule-soft); }
 .jy-users-pages { display: inline-flex; align-items: center; gap: 12px; }
 @media (max-width: 767px) {
-  .jy-users-group { flex: 1 0 100%; }
-  .jy-users-group .ant-select { flex: 1; }
+  .jy-users-group .ant-select { flex: 1; min-width: 0; }
 }
 
 /* 抽屉标题下面一行：分组、注册时间、累计消费 */

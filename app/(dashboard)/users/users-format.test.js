@@ -212,7 +212,7 @@ test("新消费用户图旁边那行小字：近 30 天共几个、前 30 天几
 
 test("地址栏：不认识的页签回到概览，不认识的筛选、范围、排法回到默认；分组可以多个", () => {
   assert.equal(parseTab("users"), "users");
-  assert.equal(parseTab("demand"), "overview", "需求还不能点，地址里写了也回到概览");
+  assert.equal(parseTab("demand"), "overview", "没有这个页签（模型需求单开「模型供需」模块），地址里写了也回到概览");
   assert.equal(parseTab(null), "overview");
   assert.equal(parseOnly("soon"), "soon");
   assert.equal(parseOnly("churned"), "churned");

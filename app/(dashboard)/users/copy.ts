@@ -2,12 +2,12 @@
 // 状态名「快用完」「余额用完」是上游已有的档位名（lib/format.js BALANCE_STATE_TEXT），「在下滑」「已流失」「新消费」是新的。
 import { BALANCE_STATE_TEXT } from "../../../lib/format.js";
 
-export type UsersTab = "overview" | "users" | "churn" | "demand";
+export type UsersTab = "overview" | "users" | "churn";
 export type UserStatus = "empty" | "soon" | "down" | "churned" | "new";
 
 export const COPY = Object.freeze({
   tabsLabel: "用户运营视图",
-  tabs: Object.freeze({ overview: "概览", users: "用户", churn: "流失", demand: "需求" }),
+  tabs: Object.freeze({ overview: "概览", users: "用户", churn: "流失" }),
   comingSoon: "即将上线",
   // 没设置自营站点
   setupDesc: "用户运营会看自营站点上用户的消费、余额，谁在涨、谁在掉、谁快用完了。",
@@ -151,7 +151,9 @@ export const COPY = Object.freeze({
     status: Object.freeze({ todayLow: "今天明显少了", down: "在下滑", churned: "已流失", returned: "回流" } as Record<string, string>),
     filterAll: "全部",
     cols: Object.freeze({ user: "用户", status: "状态", change: "以前日均 → 最近日均", loss: "一天少花多少", lastUsed: "最近使用", balance: "余额", model: "主要用的模型" }),
-    basis: Object.freeze({ period: "平时这个时段 → 今天到现在", decline: "之前 14 天 → 近 3 天", churn: "流失前 14 天 → 近 7 天" } as Record<string, string>),
+    basis: Object.freeze({ decline: "之前 14 天 → 近 3 天", churn: "流失前 14 天 → 近 7 天" } as Record<string, string>),
+    // 今天明显少了：比到上一个整点，写「平时到 14:00 → 今天到 14:00」
+    basisPeriod: (time: string) => `平时到 ${time} → 今天到 ${time}`,
     change: (before: string, after: string, pct: string) => `${before} → ${after}（${pct}）`,
     lossPerDay: (money: string) => `−${money} /天`,
     total: (n: number) => `合计（${n} 个用户）`,
@@ -166,10 +168,10 @@ export const COPY = Object.freeze({
     noModel: "—",
     cardLast: (when: string, balance: string) => `最近使用 ${when} · 余额 ${balance}`,
     howTitle: "怎么判断的",
-    howToday: (min: string) => `今天明显少了：今天到现在（算到上一个整点）比过去 7 天同一时段的平均少一半以上，平时同一时段要有 ${min} 以上才判。一天少花多少 = 过去 7 天的日均 ×（1 − 今天到现在 ÷ 平时这个时段）。`,
+    howToday: (min: string) => `今天明显少了：今天到上一个整点比过去 7 天同一时段的平均少一半以上，平时同一时段要有 ${min} 以上才判；比到上一个整点，是因为最近这一小时的数据还没落齐。一天少花多少 = 平时日均 ×（1 − 今天到 14:00 ÷ 平时到 14:00）。`,
     howDown: (min: string) => `在下滑：近 3 天日均比之前 14 天日均少一半以上，之前 14 天日均要有 ${min} 以上才判，和用户页签是同一个规则。一天少花多少 = 之前 14 天日均 − 近 3 天日均。`,
     howChurned: "已流失：前 30 天里有消费，近 7 天没有。一天少花多少 = 流失前 14 天（最后一次有消费那天往前）的日均。",
-    howOrder: "一个人只标一个状态，先后：今天明显少了、在下滑、已流失。",
+    howOrder: "一个人只标一个状态，先后：今天明显少了、已流失、在下滑。",
   }),
   // 用户表下面收起区里的「用户和分组」（原来在自营业务的「用户」标签里，原样搬过来）
   groups: Object.freeze({
