@@ -1,6 +1,6 @@
 // 模型供需页的类型和把接口的数拼成页面上的字（字在 copy.ts；算数在 lib/models-lost.js、lib/models-headroom.js，页面不重算，只拼字）。钱都按自营站点的汇率换成显示的币种。
 // 页面只读 headroom.lost（近 24 小时缺货失败）和 headroom.upstreams；老的 state / kpis / rows 不读。
-import { EMPTY, formatDayKey, formatDays, formatMoney, formatPct } from "../../../lib/format.js";
+import { EMPTY, formatDayKey, formatDays, formatMoney, formatPct, formatZonedDate } from "../../../lib/format.js";
 import type { Level } from "../../components/status";
 import { COPY } from "./copy";
 import type { ChannelState } from "./copy";
@@ -76,7 +76,11 @@ export function upstreamCell(row: LostRowView): string {
 // 明天预计：「约 200 次」；不到 1 次写「不缺」；断货的写「仍断货」
 export const tomorrowText = (n: number, out = false) => (out ? COPY.outTomorrow : n < 0.5 ? COPY.tomorrowNone : COPY.tomorrowTimes(approx(n)));
 // 断货从哪天起：「10月30日起」；接口只给到哪一天（YYYY-MM-DD），不知道不写
-export const outSinceText = (day: string | null | undefined, tz: string, now: number): string | null => (day ? `${formatDayKey(day, tz, now)}起` : null);
+export function outSinceText(day: string | null | undefined, tz: string, now: number): string | null {
+  if (!day) return null;
+  const text = formatDayKey(day, tz, now);
+  return text === formatZonedDate(now, tz, now) ? COPY.outToday : `${text}起`;
+}
 
 // 建议：一句话，不加理由行。X 是出问题的上游，Y 是能把量挪过去的上游
 export function recoText(reco: LostReco): string {

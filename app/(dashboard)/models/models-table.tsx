@@ -109,7 +109,7 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
           <div className="jy-headroom-scroll">
             <table className="jy-data jy-num jy-models-headroom">
               <caption className="sr-only">{COPY.tableTitle}</caption>
-              <colgroup><col style={{ width: "17%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "14%" }} /><col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "21%" }} /></colgroup>
+              <colgroup><col style={{ width: "18%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "20%" }} /></colgroup>
               <thead><tr><th scope="col">{cols.model}</th><th scope="col" className="r">{cols.lost}</th><th scope="col" className="r">{cols.money}</th><th scope="col">{cols.cause}</th><th scope="col">{cols.upstream}</th><th scope="col">{cols.peak}</th><th scope="col" className="r">{cols.tomorrow}</th><th scope="col">{cols.reco}</th></tr></thead>
               <tbody>
                 {shown.length === 0 && <tr><td colSpan={8} className="jy-muted jy-models-empty">{COPY.noMatch}</td></tr>}

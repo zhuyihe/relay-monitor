@@ -54,6 +54,7 @@ export const COPY = Object.freeze({
   tomorrowTimes: (v: string) => `约 ${v} 次`,
   tomorrowNone: "不缺",
   outNow: "断货中",
+  outToday: "今天起",
   outSince: (text: string) => text,
   outMoney: (money: string) => `估计每天 ${money}`,
   outTomorrow: "仍断货",
@@ -140,7 +141,7 @@ export const COPY = Object.freeze({
     supplying: "已经在供", notSupplying: "还没在供",
     goBind: "去绑定渠道",
     finderNone: "已经加了的上游里，没有别的上游卖这个模型。",
-    finderNote: "价格读的是各上游自己公开的价目（1 小时内不重读），这个模型在那个上游的倍率 × 你在那边的分组倍率。只有 New API 上游读得到；Sub2API 上游写「读不到价格」。没加进来的上游不在这里。",
+    finderNote: "只有 New API 上游读得到价格；没加进来的上游不在这里。",
   }),
 });
 

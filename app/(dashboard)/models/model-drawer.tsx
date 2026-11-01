@@ -258,7 +258,7 @@ function Finder({ detail, rate, critDays, phone }: { detail: Loaded; rate: numbe
         <div className="jy-table-wrap">
           <table className="jy-data jy-num jy-data--compact jy-models-finder">
             <caption className="sr-only">{D.finderTitle}</caption>
-            <colgroup><col style={{ width: "20%" }} /><col style={{ width: "16%" }} /><col style={{ width: "20%" }} /><col style={{ width: "20%" }} /><col style={{ width: "13%" }} /><col style={{ width: "11%" }} /></colgroup>
+            <colgroup><col style={{ width: "17%" }} /><col style={{ width: "12%" }} /><col style={{ width: "17%" }} /><col style={{ width: "25%" }} /><col style={{ width: "14%" }} /><col style={{ width: "15%" }} /></colgroup>
             <thead><tr><th scope="col">{cols.upstream}</th><th scope="col" className="r">{cols.price}</th><th scope="col">{cols.vs}</th><th scope="col">{cols.runway}</th><th scope="col">{cols.supply}</th><th scope="col"><span className="sr-only">{D.goBind}</span></th></tr></thead>
             <tbody>
               {detail.finder.map((item) => (

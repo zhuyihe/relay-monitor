@@ -516,7 +516,7 @@ const BANNED_WORDS = ["至少", "积累", "怎么算的", "被挡", "没买到",
 test("模型供需（电脑）：一屏、顶上三个数、八列主表（只列近 24 小时缺货的模型）、建议按原因给、收起的其余模型、按上游看；整页不滚、两块各自在框里滚、表头固定；页面上没有讲算法的话", async (t) => {
   const { page } = await openModelsPage(t, {});
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.getByText(MODELS_COPY.asOf("16:50"), { exact: true }).waitFor();
+  assert.equal(await page.getByText(MODELS_COPY.asOf("16:50"), { exact: true }).isVisible(), false, "电脑上顶栏有「数据截至」，三个数下面不再写第二次");
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
   assert.match(await kpi(MODELS_COPY.kpi.tomorrow).innerText(), /5 个模型[\s\S]*不处理的话，明天约 1,300 次失败 · 最多的是 claude-sonnet-4\.6/);
   const second = await kpi(MODELS_COPY.kpi.last24).innerText();
@@ -543,6 +543,9 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   // 断货的行：缺货失败写「断货中」加从哪天起，少收写「估计每天」，明天预计写「仍断货」，上游和时段写「—」
   const glm = await cells("glm-4.6");
   assert.deepEqual(glm.slice(1).map((cell) => cell.split("\n")), [["断货中", "10月30日起"], ["估计每天 ¥12"], ["没渠道"], ["—"], ["—"], ["仍断货"], ["这个模型没有开着的渠道，去开一个"]]);
+  // 每一格的字都在格子里，不被切（断货行的「断货中」「估计每天 ¥12」曾被切掉）
+  const clipped = await page.locator("tbody tr").evaluateAll((trs) => trs.flatMap((tr) => [...tr.cells].filter((td) => td.scrollWidth > td.clientWidth + 1).map((td) => `${tr.cells[0].innerText.split("\n")[0]}：${td.innerText}`)));
+  assert.deepEqual(clipped, [], "主表里没有被切的格子");
   // 收起的其余模型
   await page.getByText(MODELS_COPY.quietNote(2), { exact: true }).waitFor();
   await page.getByText(MODELS_COPY.smallNote(3), { exact: true }).waitFor();
@@ -643,6 +646,10 @@ test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四
     });
   });
   for (const item of finderFit) assert.deepEqual([item.nameLines, item.lastInside, item.scrolls], [1, true, false], JSON.stringify(item));
+  const finderClipped = await finder.locator("tbody tr").evaluateAll((trs) => trs.flatMap((tr) => [...tr.cells].filter((td) => td.scrollWidth > td.clientWidth + 1).map((td) => `${tr.cells[0].innerText}：${td.innerText}`)));
+  assert.deepEqual(finderClipped, [], "找货帮手表里没有被切的格子（「约 40 天」「去绑定渠道」）");
+  assert.equal(await drawer.locator(".jy-models-users .bar i").first().evaluate((node) => getComputedStyle(node).backgroundColor !== "rgb(235, 104, 52)"), true, "用户条不是橙色（和「限流」撞色）");
+  await drawer.getByText(MODELS_COPY.drawer.finderNote, { exact: true }).waitFor();
   const text = await drawer.innerText();
   for (const word of BANNED_WORDS) assert.equal(text.includes(word), false, `抽屉里不该出现「${word}」`);
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-drawer-1440x900.png` }); }
@@ -653,6 +660,7 @@ test("模型供需（手机 375）：顶上三个数两两一排、一个模型�
   const cards = page.locator(".jy-models-card");
   await cards.first().waitFor();
   assert.equal(await cards.count(), 5);
+  await page.getByText(MODELS_COPY.asOf("16:50"), { exact: true }).waitFor();
   await page.getByText(MODELS_COPY.quietNote(2), { exact: true }).waitFor();
   assert.deepEqual((await cards.first().innerText()).split("\n"), ["claude-sonnet-4.6", "失败 186 次", "少收约 ¥17 · 限流 · 主力上游 等 2 家 · 21–24 点", "明天预计约 200 次", "建议：给主力上游加约 2 把 Key，或把量挪到上游丙"]);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
