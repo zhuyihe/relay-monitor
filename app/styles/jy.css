@@ -384,6 +384,16 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-tip .t-row b { margin-left: auto; color: var(--jy-ink); font-weight: 500; font-variant-numeric: tabular-nums; }
 .jy-tip .jy-status .jy-sym { width: 10px; height: 10px; }
 .jy-table-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--jy-rule-soft); border-radius: var(--jy-r2); }
+/* 长表格可以更高一些（DataTable 的 tall：自营业务的用户、模型表，用户运营的用户表） */
+.jy-table-scroll.jy-my-tall { max-height: 560px; }
+/* 可排序表头（DataTable）：整格是按钮，当前排序列带箭头 */
+.jy-my-sort {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer;
+  border-radius: var(--jy-r1); white-space: nowrap;
+}
+.jy-my-sort:hover, .jy-my-sort.is-active { color: var(--jy-ink); }
+.jy-my-sort .jy-icon { width: 12px; height: 12px; }
 
 /* 热力图 */
 .jy-heat { display: grid; grid-template-columns: 28px repeat(24, minmax(0, 1fr)); gap: 2px; }

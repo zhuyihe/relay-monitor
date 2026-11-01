@@ -378,7 +378,7 @@ test("删除渠道时清理告警绑定与日报渠道里的死 id", async () =>
 test("加载旧规则时补齐渠道绑定字段且不共享默认对象", async () => {
   const a = await new Store(fakePool()).load();
   const b = await new Store(fakePool()).load();
-  assert.deepEqual(a.rules.channelsFor, { low: [], exhaust: [], error: [], recover: [], eta: [] });
+  assert.deepEqual(a.rules.channelsFor, { low: [], exhaust: [], error: [], recover: [], eta: [], userExhaust: [], userEta: [] });
   a.rules.channelsFor.low.push("x");
   assert.deepEqual(b.rules.channelsFor.low, []);
 });
@@ -705,19 +705,19 @@ test("accountUse（K2c）：上游账号是不是只给自营站点的渠道用�
   assert.equal(store.get(fresh.id).accountUse, null, "不认识的值当没回答，不抛错");
 });
 
-test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认开；只有明确关（false）才关；规则「用户余额」默认关，通知方式只接受存在的 id，删通知方式时一起清掉", async () => {
+test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认开；只有明确关（false）才关；规则「大客户余额用完」「大客户快用完」默认开，通知方式只接受存在的 id，删通知方式时一起清掉", async () => {
   const store = await new Store(fakePool([])).load();
   assert.equal(store.settings.userOpsEnabled, true);
   await store.updateSettings({ userOpsEnabled: false });
   assert.equal(store.settings.userOpsEnabled, false);
   await store.updateSettings({ userOpsEnabled: "no" });
   assert.equal(store.settings.userOpsEnabled, true, "只认真正的 false 才关，别的值当开");
-  assert.deepEqual([store.rules.onUserBalance, store.rules.userBalanceChannelIds], [false, []]);
+  assert.deepEqual([store.rules.onUserExhaust, store.rules.onUserEta, store.rules.channelsFor.userExhaust, store.rules.channelsFor.userEta], [true, true, [], []], "两条规则默认开（告警中心「用户」一组），各自的「发到」默认空");
   store.data.notifications.channels = [{ id: "ch-1", name: "A", type: "webhook", enabled: true }, { id: "ch-2", name: "B", type: "webhook", enabled: true }];
-  const rules = await store.updateRules({ onUserBalance: true, userBalanceChannelIds: ["ch-1", "ch-2", "bogus", "ch-1"] });
-  assert.deepEqual([rules.onUserBalance, rules.userBalanceChannelIds], [true, ["ch-1", "ch-2"]]);
-  await store.updateRules({ onUserBalance: "yes" });
-  assert.equal(store.rules.onUserBalance, false, "只认真正的 true 才开");
+  const rules = await store.updateRules({ onUserExhaust: false, onUserEta: true, channelsFor: { userExhaust: ["ch-1", "ch-2", "bogus", "ch-1"], userEta: ["ch-2"] } });
+  assert.deepEqual([rules.onUserExhaust, rules.onUserEta, rules.channelsFor.userExhaust, rules.channelsFor.userEta], [false, true, ["ch-1", "ch-2"], ["ch-2"]]);
+  await store.updateRules({ onUserEta: "yes" });
+  assert.equal(store.rules.onUserEta, false, "只认真正的 true 才开");
   await store.removeChannel("ch-2");
-  assert.deepEqual(store.rules.userBalanceChannelIds, ["ch-1"]);
+  assert.deepEqual([store.rules.channelsFor.userExhaust, store.rules.channelsFor.userEta], [["ch-1"], []]);
 });

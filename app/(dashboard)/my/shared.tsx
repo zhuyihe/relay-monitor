@@ -11,10 +11,10 @@ export type OwnRange = (typeof RANGES)[number];
 // 接口只支持这三档；名字和别的页同一份（RANGE_TEXT）
 export const RANGE_OPTIONS: { value: OwnRange; label: string }[] = RANGES.map((value) => ({ value, label: RANGE_TEXT[value] }));
 
-export const TABS = ["overview", "users", "models"] as const;
+export const TABS = ["overview", "models"] as const;
 export type MyTab = (typeof TABS)[number];
 // 标签名：标签栏和页里「去某某标签看」的提示共用
-export const TAB_TEXT: Record<MyTab, string> = { overview: "概览", users: "用户", models: "模型与渠道" };
+export const TAB_TEXT: Record<MyTab, string> = { overview: "概览", models: "模型与渠道" };
 
 // 自营业务里几个面板的名字：按钮、标题、提示里提到时同一个说法（design/ui-copy-spec.md §11）；
 // 「利润怎么算」日报也用，在 lib/format.js 的 BASIS_TITLE
@@ -159,6 +159,7 @@ export function DataTable<R>({
   tall,
   compact,
   caption,
+  onRowClick,
 }: {
   rows: R[];
   cols: Col<R>[];
@@ -171,6 +172,8 @@ export function DataTable<R>({
   compact?: boolean;
   // 读屏用的表格说明
   caption?: string;
+  // 点一行做什么（用户运营页点一行开抽屉）；键盘用行里的按钮，行本身不进 Tab 顺序
+  onRowClick?: (r: R) => void;
 }) {
   const [sort, setSort] = useState<SortState | null>(defaultSort || null);
   const sorted = useMemo(() => {
@@ -236,7 +239,7 @@ export function DataTable<R>({
         <tbody>
           {sorted.length ? (
             sorted.map((r, i) => (
-              <tr key={rowKey(r, i)}>
+              <tr key={rowKey(r, i)} className={onRowClick ? "is-clickable" : undefined} onClick={onRowClick ? () => onRowClick(r) : undefined}>
                 {cols.map((c) => (
                   <td key={c.key} className={c.num ? "r" : undefined}>
                     {c.render(r)}

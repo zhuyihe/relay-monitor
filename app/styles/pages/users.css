@@ -1,0 +1,94 @@
+/* 用户运营：只放本页独有的细节，布局和组件样式都在 jy.css */
+
+/* 概览那一句结论：比正文大一号；名字、个数是链接 */
+.jy-users-sentence { margin: 0; font-size: 16px; line-height: 26px; color: var(--jy-ink); }
+.jy-users-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
+.jy-users-linkbtn:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
+.jy-users-kpis dd.jy-caption { margin: 0; }
+
+/* 补数据 / 余额记满 24 小时之前的一行灰字，前面一个转圈的小圈 */
+.jy-users-progress { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-users-progress .jy-icon { width: 14px; height: 14px; }
+
+/* ─── 图 ─── */
+.jy-users-gap { fill: var(--jy-sunken); opacity: .7; }
+.jy-chart .series.jy-users-prev { stroke: var(--jy-ink-3); stroke-dasharray: 5 4; stroke-width: 1.5; }
+.jy-chart .series.jy-users-today { stroke-dasharray: 2 4; }
+.jy-users-tip-top { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-users-tip-top .t-sub { color: var(--jy-ink-3); margin-bottom: 2px; }
+.jy-users-spark { display: block; }
+.jy-users-spark .line { fill: none; stroke: var(--jy-s1); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.jy-users-spark .dot { fill: var(--jy-s1); }
+.jy-users-spark.is-gray .line { stroke: var(--jy-ink-3); }
+.jy-users-spark.is-gray .dot { fill: var(--jy-ink-3); }
+.jy-users-bar { fill: var(--jy-s1); }
+.jy-users-bar.is-light { opacity: .45; }
+.jy-users-bar.is-hover { filter: brightness(1.12); }
+
+/* ─── 用户表 ─── */
+.jy-users-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; }
+/* 名字太长时一行放不下就截断（悬停看全名），不撑高行 */
+.jy-users-name .jy-users-linkbtn { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-users-week { font-weight: 600; font-variant-numeric: tabular-nums; }
+/* 大客户小标记：灰框白底、11px、深灰字，不填色，比状态标签还轻 */
+.jy-users-big {
+  display: inline-block; flex: none; padding: 0 5px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r1);
+  background: var(--jy-sheet); color: var(--jy-ink-2); font-size: 11px; line-height: 16px; font-weight: 400; white-space: nowrap;
+}
+.jy-users-filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 16px 12px; }
+.jy-users-filters-rule { width: 1px; height: 20px; background: var(--jy-rule); }
+.jy-users-bigcheck { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; font-size: 13px; color: var(--jy-ink); }
+.jy-users-bigcheck input { width: 16px; height: 16px; margin: 0; accent-color: var(--jy-cobalt); cursor: pointer; }
+.jy-users-search { width: 220px; }
+/* 整页就一个表：高一点（视口高度减去上面的页签、筛选），表头和合计行吸附 */
+.jy-users-panel .jy-table-scroll.jy-my-tall { max-height: max(420px, calc(100vh - 300px)); }
+.jy-panel-body--flush > .jy-table-scroll { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; }
+table.jy-data tbody tr.is-clickable { cursor: pointer; }
+table.jy-data .jy-cell-runway { justify-content: flex-start; }
+table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
+.jy-users-empty { margin: 0; padding: 32px 16px; text-align: center; }
+
+/* 手机：一人一张卡片，三行 */
+.jy-users-cards { list-style: none; margin: 0; padding: 0; }
+.jy-users-card {
+  display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 12px 16px; border: 0; border-top: 1px solid var(--jy-rule-soft);
+  background: var(--jy-sheet); font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.jy-users-card:focus-visible { outline: none; box-shadow: inset var(--jy-focus-ring); }
+.jy-users-card .r1, .jy-users-card .r2, .jy-users-card .r3 { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.jy-users-card .r1 .jy-users-name { flex: 1 1 auto; flex-wrap: wrap; }
+.jy-users-card .r2 { justify-content: flex-start; }
+.jy-users-card .jy-mini-track { width: 72px; }
+
+/* ─── 抽屉 ─── */
+.jy-users-drawer .ant-drawer-title { flex: 1; min-width: 0; }
+.jy-users-drawer-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.jy-users-drawer-title .who { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.jy-users-drawer-title .who strong { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.jy-users-drawer .ant-drawer-body { display: flex; flex-direction: column; gap: 20px; padding-top: 16px; }
+.jy-users-drawer-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: row; }
+.jy-users-drawer-kpis .jy-kpi-figure { font-size: 18px; line-height: 26px; }
+.jy-users-chart .jy-chart-sub { margin-top: 0; }
+.jy-users-models { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.jy-users-models .line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.jy-users-models .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--jy-ink); }
+.jy-users-models b { flex: none; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--jy-ink); }
+.jy-users-models .bar { display: block; height: 6px; margin-top: 4px; border-radius: 3px; background: var(--jy-sunken); overflow: hidden; }
+.jy-users-models .bar i { display: block; height: 100%; border-radius: 3px; background: var(--jy-s1); }
+.jy-users-models .bar i.is-gray { background: var(--jy-ink-3); }
+
+/* 还没做的页签：灰字，后面一行小字（墨·弱，对比度够 4.5:1） */
+.jy-tabs button[aria-disabled="true"] { color: var(--jy-ink-3); cursor: default; }
+.jy-tabs button[aria-disabled="true"]:hover { color: var(--jy-ink-3); }
+.jy-tab-note { margin-left: 6px; font-size: 12px; font-weight: 400; color: var(--jy-ink-3); }
+
+@media (max-width: 767px) {
+  .jy-users-sentence { font-size: 15px; line-height: 24px; }
+  .jy-users-filters { padding-inline: 12px; }
+  .jy-users-filters .jy-seg { overflow-x: auto; }
+  .jy-users-filters-rule { display: none; }
+  .jy-users-bigcheck { flex: 1 0 100%; }
+  .jy-users-search { width: 100%; }
+  .jy-users-drawer-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-users-drawer-kpis > div + div { padding-left: 0; border-left: 0; }
+}

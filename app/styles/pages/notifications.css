@@ -6,6 +6,10 @@
 .jy-notifications-rules .col-to { width: 320px; }
 .jy-notifications-rules .col-to .ant-select { width: 100%; }
 .jy-notifications-rule-title { display: block; font-weight: 500; color: var(--jy-ink); }
+/* 「用户」一组的小标题行：占满整行，下面两行灰字说明这一组管谁 */
+.jy-notifications-rules tr.jy-notifications-group td { padding-top: 20px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); }
+.jy-notifications-group h3 { margin: 0 0 4px; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
+.jy-notifications-group p { margin: 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
 .jy-notifications-rule-desc { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
 .jy-notifications-rules tr.is-off .jy-notifications-rule-title { color: var(--jy-ink-2); }
 .jy-notifications-cond { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; font-size: 13px; color: var(--jy-ink-2); }
@@ -50,6 +54,7 @@
   .jy-notifications-rules tr:first-child { border-top: 0; }
   table.jy-notifications-rules td { display: block; padding: 0; border: 0; }
   .jy-notifications-rules .col-switch { width: auto; }
+  table.jy-notifications-rules tr.jy-notifications-group td { grid-column: 1 / -1; padding: 0; }
   .jy-notifications-rules .col-to { grid-column: 2; width: auto; }
   .jy-notifications-pad { padding: 4px 16px 16px; }
   .jy-m-list .jy-notifications-test { flex-direction: row; flex-wrap: wrap; gap: 4px 8px; }

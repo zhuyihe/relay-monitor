@@ -4,7 +4,7 @@
 //   2. 读 /api/data/users 最近 3 小时，按小时覆盖写进 user_usage_hours；
 //   3. 第一次往回补 30 天：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
 //   4. 算每个用户还能用几天（lib/user-balance.js）和大客户（日均消费占全站八成），结果放在 rt._userOpsView 里（以后页面读）；
-//   5. 站长提醒：规则「用户余额」（rules.onUserBalance，默认关）开着、数据新鲜、回补完成时，只推送大客户，几位一起推一条。
+//   5. 站长提醒：规则「大客户余额用完」「大客户快用完」（rules.onUserExhaust / onUserEta，告警中心「用户」一组）开着、数据新鲜、回补完成时，只推送大客户，几位一起推一条。
 // 对用户自己 New API 的读取：每轮 1 个用户列表（每页 100 个）+ 1 个 data/users，回补期间再加最多 3 个；每个请求之前先问 lib/own-request-budget.js：
 // 断路、或者最近 180 秒已经发了太多就整轮不读。总开关：settings.userOpsEnabled（默认开），关了一个请求都不发。
 import { QUOTA_PER_UNIT, queryOwnData } from "../lib/providers.js";
@@ -42,6 +42,12 @@ export async function forgetUserOps(rt, stationId) {
   if (!rt?.pool) return;
   await (rt._userOpsStore ||= new UserOpsStore(rt.pool)).deleteStation(stationId);
   rt._userOpsView = null;
+  rt._userOpsPageCache = null; rt._userOpsDayCache = null; rt._userOpsModels = null;
+}
+
+// 接口用：同一个运行时共用的后台和存储（轮询里建的就是它）
+export function userOpsOf(rt) {
+  return { ops: (rt.userOps ||= createUserOps(rt)), store: rt.pool ? (rt._userOpsStore ||= new UserOpsStore(rt.pool)) : null };
 }
 
 export function createUserOps(rt, { store = null, now = () => Date.now(), send = broadcast } = {}) {
@@ -107,7 +113,11 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     const tz = businessTimeZone();
     const since = at - USER_OPS.EVAL_LOOKBACK_MS;
     const [pointsByUser, hourRows, progress] = await Promise.all([ops.listBalancePoints(own.id, since), ops.listUsageHours(own.id, since), ops.getProgress(own.id)]);
-    const weekStart = at - USER_BALANCE.WINDOW_MS;
+    // 大客户按「近 7 天」算：最近 7 个整天，不含今天（和页面上的近 7 天同一个口径）
+    const todayKey = dayKeyInTz(at, tz);
+    const weekStart = dayStartInTz(shiftDayLabel(todayKey, -7), tz), weekEnd = dayStartInTz(todayKey, tz);
+    const rules = rt.store?.rules || {};
+    const level1Days = Number(rules.etaDays) > 0 ? Number(rules.etaDays) : USER_BALANCE.LEVEL1_DAYS;
     const hoursByName = new Map();
     const weekRows = [];
     for (const row of hourRows) {
@@ -115,7 +125,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
       if (!hours) hoursByName.set(row.username, hours = new Map());
       const usd = toUsd(row.quota);
       hours.set(row.hourMs, usd);
-      if (row.hourMs >= weekStart) weekRows.push({ username: row.username, hourMs: row.hourMs, usd });
+      if (row.hourMs >= weekStart && row.hourMs < weekEnd) weekRows.push({ username: row.username, hourMs: row.hourMs, usd });
     }
     const averages = dailyAverages(weekRows, tz);
     const eligible = (state.lastUsers || []).filter((user) => user.role < 10 && user.status === 1);
@@ -124,40 +134,56 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     const users = new Map();
     for (const user of eligible) {
       const id = Number(user.id), points = pointsByUser.get(id);
-      const runway = points?.length ? userRunway({ points, hours: hoursByName.get(user.username), now: at, syncedMs: progress?.usageSyncedMs ?? at }) : { state: "warming", level: 0, days: null, burnPerDay: null, balanceUsd: user.quotaUsd, hasConsumption: false };
+      const runway = points?.length ? userRunway({ points, hours: hoursByName.get(user.username), now: at, syncedMs: progress?.usageSyncedMs ?? at, level1Days }) : { state: "warming", level: 0, days: null, burnPerDay: null, balanceUsd: user.quotaUsd, hasConsumption: false };
       users.set(id, { id, username: user.username, big: bigSet.has(id), dailyAvg: averages.get(user.username) || 0, ...runway });
     }
     const pushAllowed = fresh && backfillState.done;
-    rt._userOpsView = { at, stationId: own.id, users, bigIds, backfill: { done: backfillState.done, days: Math.min(USER_OPS.BACKFILL_DAYS, Math.ceil((backfillState.startedMs - backfillState.cursor) / DAY_MS)), total: USER_OPS.BACKFILL_DAYS }, fresh, pushAllowed };
+    // 页面要的两个数顺手在这里算（这一轮已经读了 8 天的快照）：快照最早一条的时刻（余额记满 24 小时才判可用天数）、7 天前的预收（客户余额合计）。页面不再自己读快照
+    let pointsFirstMs = null, prepaidAgo = null;
+    const weekAgo = at - 7 * DAY_MS;
+    for (const list of pointsByUser.values()) if (list.length && (pointsFirstMs == null || list[0][0] < pointsFirstMs)) pointsFirstMs = list[0][0];
+    if (pointsFirstMs != null && pointsFirstMs <= weekAgo) {
+      prepaidAgo = 0;
+      for (const list of pointsByUser.values()) { let last = null; for (const [t, usd] of list) if (t <= weekAgo) last = usd; prepaidAgo += last ?? 0; }
+    }
+    rt._userOpsView = { at, stationId: own.id, users, bigIds, level1Days, pointsFirstMs, prepaidAgo, backfill: { done: backfillState.done, days: Math.min(USER_OPS.BACKFILL_DAYS, Math.ceil((backfillState.startedMs - backfillState.cursor) / DAY_MS)), total: USER_OPS.BACKFILL_DAYS, cursorMs: backfillState.cursor }, fresh, pushAllowed };
     return rt._userOpsView;
   }
 
   // 站长提醒：只推送大客户；状态先写再推，一条都没送到就退回原状态，下一轮再试
   async function alerts(ops, own, at, view) {
     const rules = rt.store?.rules || {};
-    if (rules.onUserBalance !== true || !view.pushAllowed) return { pushed: 0 };
+    // 规则「大客户余额用完」「大客户快用完」（告警中心「用户」一组）：两个都关就不推
+    if (!(rules.onUserExhaust === true || rules.onUserEta === true) || !view.pushAllowed) return { pushed: 0 };
     const prevStates = await ops.getAlertStates(own.id);
     const due = [], changed = [];
     for (const id of view.bigIds) {
       const user = view.users.get(id);
       if (!user || user.state === "warming") continue;
       const prev = prevStates.get(id) || null;
-      const decision = decideUserAlert({ prev, runway: user, now: at, repushHours: Number(rules.renotifyHours) || 0 });
+      // 只算开着的那几种：余额用完只看「余额用完」规则，快用完（可用天数到线）只看「快用完」规则；都没开的这位当没事
+      const level = user.state === "empty" ? (rules.onUserExhaust === true ? 2 : 0) : user.state === "soon" && rules.onUserEta === true ? user.level : 0;
+      const decision = decideUserAlert({ prev, runway: { ...user, level }, now: at, repushHours: Number(rules.renotifyHours) || 0, level1Days: view.level1Days });
       if (decision.push) due.push({ user, decision, prev });
       else if (!prev || prev.level !== decision.state.level || prev.lastBalanceUsd !== decision.state.lastBalanceUsd) changed.push({ id, state: decision.state });
     }
     for (const item of changed) await ops.saveAlertState(own.id, item.id, item.state, at);
     if (!due.length) return { pushed: 0 };
     for (const item of due) await ops.saveAlertState(own.id, item.user.id, item.decision.state, at);
-    const channels = channelsForEvent(rt.store?.channels, { channelsFor: { userBalance: rules.userBalanceChannelIds } }, "userBalance");
-    const { title, body } = userBalanceMessage(due.map(({ user }) => user), formatZonedDateTime(at, businessTimeZone()));
-    let sent = [];
-    try { sent = await send(channels, title, body); } catch { sent = []; }
-    if (!sent.some((result) => result.ok)) {
-      for (const item of due) await ops.saveAlertState(own.id, item.user.id, item.prev || { level: 0, notifiedAt: null, lastBalanceUsd: item.prev?.lastBalanceUsd ?? null }, at);
-      return { pushed: 0, failed: due.length };
+    // 余额用完、快用完各有各的「发到」：分两组，各推一条（一组里几位一起推）；哪一组一条都没送到，就把这一组的状态退回去，下一轮再试
+    const time = formatZonedDateTime(at, businessTimeZone());
+    let pushed = 0, failed = 0;
+    for (const [eventKey, group] of [["userExhaust", due.filter(({ user }) => user.state === "empty")], ["userEta", due.filter(({ user }) => user.state !== "empty")]]) {
+      if (!group.length) continue;
+      const channels = channelsForEvent(rt.store?.channels, rules, eventKey);
+      const { title, body } = userBalanceMessage(group.map(({ user }) => user), time);
+      let sent = [];
+      try { sent = await send(channels, title, body); } catch { sent = []; }
+      if (sent.some((result) => result.ok)) { pushed += group.length; continue; }
+      for (const item of group) await ops.saveAlertState(own.id, item.user.id, item.prev || { level: 0, notifiedAt: null, lastBalanceUsd: item.prev?.lastBalanceUsd ?? null }, at);
+      failed += group.length;
     }
-    return { pushed: due.length };
+    return failed ? { pushed, failed } : { pushed };
   }
 
   async function pruneIfDue(ops, own, at) {
@@ -197,6 +223,8 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     // 同一时间只跑一轮；调用方不用等（轮询里不阻塞）
     runOnce(options) { return state.inflight ||= run(options).finally(() => { state.inflight = null; }); },
     getView: () => rt._userOpsView || null,
+    // 最近一次读到的用户列表（用户运营页用）；还没读到过是 null
+    getUsers: () => state.lastUsers,
     _state: state,
   };
 }

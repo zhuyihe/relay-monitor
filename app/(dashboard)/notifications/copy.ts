@@ -2,6 +2,7 @@
 // 规则名里的余额四档取 lib/format.js 的 BALANCE_STATE_TEXT，这里只写「恢复正常」。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
 import { UNNAMED_CHANNEL } from "../../../lib/alert-rules.js";
+import { BALANCE_STATE_TEXT } from "../../../lib/format.js";
 
 // 余额提醒线下面那句的前半句：没有通知方式时那一小块只用这半句（那里的说明已经说了它管页面上的档位）
 const LOW_HINT_WHERE = "按各上游自己的余额单位比，不换算；单个上游可以在编辑上游里另填。";
@@ -53,6 +54,19 @@ export const COPY = Object.freeze({
   errAfter: "才通知（填 1 就是第一次读不到就通知）",
   errLabel: "连续读不到的次数",
   times: "次",
+  // 「用户」一组（大客户余额用完、快用完；design 用户运营 v7 §5）
+  users: Object.freeze({
+    group: "用户",
+    bigLead: (n: number) => `合起来占全站消费八成的用户算大客户（至少 3 个），现在是 ${n} 个：`,
+    bigTail: "。系统按近 7 天的消费自己算，不用手动加减。",
+    bigFilling: "数据补全中，补完近 7 天就能算出大客户。",
+    onlyBig: "下面两条只管大客户；别的用户快用完、余额用完，只在用户运营页标出来，不推送。",
+    exhaust: "大客户余额用完",
+    exhaustDesc: "大客户的余额用完时通知",
+    eta: "大客户快用完",
+    etaDesc: "大客户的可用天数进提醒天数以内时通知；几个一起快用完时，每天花得多的排在前面",
+    etaCond: (window: string) => `可用天数在 ${window}以内时提醒，和上面「${BALANCE_STATE_TEXT.soon}」用同一个提醒天数。`,
+  }),
   // 提醒节奏
   pace: "提醒节奏",
   paceHint: "对所有打开的提醒都有效。",

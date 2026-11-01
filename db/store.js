@@ -3,7 +3,7 @@
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
 import { normalizeOffPeriods } from "../lib/consume-log.js";
-import { ALERT_EVENT_KEYS, ALERT_RULE_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
+import { ALERT_RULE_KEYS, CHANNEL_EVENT_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
@@ -156,11 +156,11 @@ function verifiedAccount(identity) {
   };
 }
 
-// 每类告警的渠道绑定：归一化为 5 个事件键齐全的新对象（渠道 id 去重、字符串化）。
+// 每类告警的渠道绑定：归一化为 7 个事件键（上游五条 + 用户两条）齐全的新对象（渠道 id 去重、字符串化）。
 // 始终返回新对象，避免共享/回写 DEFAULT_RULES.channelsFor。
 function sanitizeChannelsFor(input, base) {
   const out = {};
-  for (const k of ALERT_EVENT_KEYS) {
+  for (const k of CHANNEL_EVENT_KEYS) {
     const src = input && k in input ? input[k] : base?.[k];
     out[k] = Array.isArray(src) ? [...new Set(src.map(String).filter(Boolean))] : [];
   }
@@ -540,11 +540,10 @@ export class Store {
       // （绑定清空后自动回落到「所有启用渠道」的默认语义）
       const cf = notifications.rules.channelsFor;
       if (cf) {
-        for (const k of ALERT_EVENT_KEYS) {
+        for (const k of CHANNEL_EVENT_KEYS) {
           if (Array.isArray(cf[k])) cf[k] = cf[k].filter((x) => x !== id);
         }
       }
-      if (Array.isArray(notifications.rules.userBalanceChannelIds)) notifications.rules.userBalanceChannelIds = notifications.rules.userBalanceChannelIds.filter((x) => x !== id);
       const dr = settings.dailyReport;
       if (Array.isArray(dr?.channelIds)) dr.channelIds = dr.channelIds.filter((x) => x !== id);
       return notifications.channels.length < n;
@@ -557,12 +556,9 @@ export class Store {
       for (const k of ALERT_RULE_KEYS) {
         if (k in patch) r[k] = !!patch[k];
       }
-      // 用户余额提醒（server/user-ops.js）：开关默认关；发到哪些通知方式，空 = 所有启用的
-      if ("onUserBalance" in patch) r.onUserBalance = patch.onUserBalance === true;
-      if (Array.isArray(patch.userBalanceChannelIds)) {
-        const valid = new Set(notifications.channels.map((c) => c.id));
-        r.userBalanceChannelIds = [...new Set(patch.userBalanceChannelIds.map(String).filter((id) => valid.has(id)))];
-      }
+      // 用户余额提醒（server/user-ops.js，告警中心「用户」一组）：两个开关，只有明确给 true 才开
+      if ("onUserExhaust" in patch) r.onUserExhaust = patch.onUserExhaust === true;
+      if ("onUserEta" in patch) r.onUserEta = patch.onUserEta === true;
       if ("etaDays" in patch) {
         const v = Number(patch.etaDays);
         // 非法输入保留原值；下限 1 小时（阈值支持按小时配置）
@@ -576,7 +572,7 @@ export class Store {
         // 字段级合并：只更新载荷里出现的事件键；仅接受当前存在的渠道 id
         const valid = new Set(notifications.channels.map((c) => c.id));
         const cleaned = {};
-        for (const k of ALERT_EVENT_KEYS) {
+        for (const k of CHANNEL_EVENT_KEYS) {
           if (!(k in patch.channelsFor)) continue;
           const v = patch.channelsFor[k];
           cleaned[k] = Array.isArray(v) ? v.filter((x) => valid.has(String(x))) : [];

@@ -1,5 +1,5 @@
 "use client";
-// 自营业务：自营站点的用户收入、上游成本、毛利与净利，按概览 / 用户 / 模型与渠道分标签。
+// 自营业务：自营站点的用户收入、上游成本、毛利与净利，按概览 / 模型与渠道分标签（用户搬到了「用户运营」页）。
 // 数据来自 /api/own/analytics（同范围 60 秒内复用成功结果，约 30 秒自动刷新一次）；
 // 每日收入图只画收入（ui-design-spec §5.3），取的就是这个接口的逐日收入，不再另读慢的 /api/analytics 逐日上游成本；
 // 时间窗口都按服务端的业务时区划日，不传浏览器时区；
@@ -26,7 +26,6 @@ import { FC_TITLE, OVERVIEW_TITLES, OverviewTab } from "./overview-tab";
 import { describeError } from "../../../lib/error-copy";
 import { MY_TEXT, RANGES, RANGE_OPTIONS, TABS, TAB_TEXT, deriveOwn } from "./shared";
 import type { MyTab, OwnRange } from "./shared";
-import { UsersTab } from "./users-tab";
 
 const TAB_DEFS: { key: MyTab; label: string }[] = TABS.map((key) => ({ key, label: TAB_TEXT[key] }));
 
@@ -248,9 +247,6 @@ export default function MyStationPage() {
       <div className={stale ? "jy-my-busy" : undefined} aria-busy={stale || undefined}>
         <TabPanel idPrefix="my" tabKey="overview" active={tab === "overview"}>
           <OverviewTab v={view} range={shown} asOf={asOf} onRange={setRange} onTab={setTab} reload={reload} />
-        </TabPanel>
-        <TabPanel idPrefix="my" tabKey="users" active={tab === "users"}>
-          <UsersTab v={view} range={shown} reload={reload} />
         </TabPanel>
         <TabPanel idPrefix="my" tabKey="models" active={tab === "models"}>
           <ModelsTab v={view} range={shown} reload={reload} audit={audits} />

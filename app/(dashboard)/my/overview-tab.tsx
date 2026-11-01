@@ -85,7 +85,8 @@ const COPY = Object.freeze({
 // 加载骨架用的块名（my/page.tsx），和下面各块同一份
 export const OVERVIEW_TITLES = Object.freeze({ metrics: COPY.metrics, income: COPY.incomeTitle, topModels: COPY.topModels });
 
-// 利润等式里各项跳到哪个标签页看明细（保留当前时间范围）
+// 收入明细在「用户运营」页（原来的「用户」标签搬过去了）；成本明细在本页的「模型与渠道」标签（保留当前时间范围）
+const USERS_HREF = "/users?tab=users";
 const tabHref = (range: OwnRange, tab: MyTab) => {
   const qs = new URLSearchParams();
   if (range !== "7d") qs.set("range", range); // 7d 是默认范围，不写进地址
@@ -134,7 +135,7 @@ export function OverviewTab({
         ) : (
           <IncomeTrend v={v} range={range} asOf={asOf} />
         )}
-        <TopUsers v={v} range={range} onTab={onTab} />
+        <TopUsers v={v} range={range} />
       </div>
       <div className="jy-grid-8-4">
         <ForecastPanel v={v} />
@@ -206,7 +207,7 @@ function Equation({
         value: p.incomeCny,
         approx: approx.income,
         note: unread ? v.d.station?.name : revNotes.length ? revNotes : COPY.noAdminSelf,
-        href: tabHref(range, "users"),
+        href: USERS_HREF,
       }}
       upstream={{
         value: upstream,
@@ -471,6 +472,7 @@ function TopPanel({
   otherLabel,
   allLabel,
   onAll,
+  allHref,
   empty,
   foot,
   className,
@@ -483,7 +485,9 @@ function TopPanel({
   nameOf: (r: UsageRow) => string;
   otherLabel: (n: number) => string;
   allLabel: (n: number) => string;
-  onAll: () => void;
+  // 看全部去另一个页面时给 allHref（链接），在本页换标签时给 onAll（按钮）
+  onAll?: () => void;
+  allHref?: string;
   empty: ReactNode;
   foot?: ReactNode;
 }) {
@@ -504,9 +508,15 @@ function TopPanel({
       sub={sub}
       extra={
         sorted.length ? (
-          <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={onAll}>
-            {allLabel(sorted.length)}
-          </button>
+          allHref ? (
+            <Link className="jy-caption-link" href={allHref}>
+              {allLabel(sorted.length)}
+            </Link>
+          ) : (
+            <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={onAll}>
+              {allLabel(sorted.length)}
+            </button>
+          )
         ) : undefined
       }
       foot={foot}
@@ -516,7 +526,7 @@ function TopPanel({
   );
 }
 
-function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t: MyTab) => void }) {
+function TopUsers({ v, range }: { v: OwnView; range: OwnRange }) {
   return (
     <TopPanel
       title={MY_TEXT.topUsers}
@@ -527,7 +537,7 @@ function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t:
       nameOf={(u: any) => `${u.user}${u.isAdmin ? MY_TEXT.adminSuffix : ""}`}
       otherLabel={COPY.otherUsers}
       allLabel={COPY.allUsers}
-      onAll={() => onTab("users")}
+      allHref={USERS_HREF}
       empty={<EmptyState title={COPY.noUsers} desc={COPY.noUsersDesc} />}
     />
   );

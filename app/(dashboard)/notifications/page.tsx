@@ -11,7 +11,7 @@ import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../c
 import Link from "next/link";
 import { App, Button, Form, Grid, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
-import { ALERT_RULES } from "../../../lib/alert-rules";
+import { ALERT_RULES, USER_ALERT_RULES } from "../../../lib/alert-rules";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { SECRET_FIELD_TEXT } from "../../../lib/channel-onboarding";
@@ -23,7 +23,7 @@ import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../com
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { More } from "../../components/more";
-import { etaRuleDisplay } from "../../components/runway";
+import { etaRuleDisplay, etaWindowText } from "../../components/runway";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
 import { COPY } from "./copy";
@@ -68,6 +68,13 @@ const RULES = ALERT_RULES.map((rule) => ({
   desc: (COPY.ruleDesc as Record<string, string>)[rule.ev] || "",
 }));
 
+// 「用户」一组的两条（只管大客户，server/user-ops.js）：和上面几条同一个样子，开关和「发到」一样即时存
+const USER_RULES = USER_ALERT_RULES.map((rule) => ({
+  ev: rule.ev,
+  key: rule.key,
+  title: rule.ev === "userExhaust" ? COPY.users.exhaust : COPY.users.eta,
+  desc: rule.ev === "userExhaust" ? COPY.users.exhaustDesc : COPY.users.etaDesc,
+}));
 
 // 规则里的数字一组存（PUT /api/notifications/rules）；开关和通知方式的选择另外即时存
 const ruleFormOf = (r: any): RuleForm => ({
@@ -196,6 +203,8 @@ export default function NotificationsPage() {
     },
   });
   const [channelsFor, setChannelsFor] = useState<Record<string, string[]>>({});
+  // 大客户名单（/api/users/big，后台算好的）：「用户」一组的第一行字要写现在是哪几位；没设置自营站点或读不到就不放这一组
+  const [bigUsers, setBigUsers] = useState<{ ready: boolean; big: { id: number; username: string }[] } | null>(null);
 
   // 日报的预览、立即发送
   const [previewing, setPreviewing] = useState(false);
@@ -258,6 +267,7 @@ export default function NotificationsPage() {
   useEffect(() => {
     loadNotif();
     loadMeta();
+    api("/api/users/big").then(setBigUsers).catch(() => setBigUsers(null));
   }, [loadNotif, loadMeta]);
 
   // 重新拉取渠道数据：同步渠道绑定（删除渠道时服务端会清理其中的死 id），但不动阈值输入
@@ -657,6 +667,7 @@ export default function NotificationsPage() {
           )}
         </div>
       );
+    if (ruleKey === "onUserEta") return <p className="jy-notifications-note">{COPY.users.etaCond(etaWindowText(rules))}</p>;
     if (ruleKey === "onError")
       return (
         <div className="jy-notifications-cond">
@@ -712,7 +723,7 @@ export default function NotificationsPage() {
 
   const notifFailed = !notifLoaded && !!notifErr;
   // 有提醒或日报要发，却没有能用的通知方式：消息会被悄悄丢掉，放在页首提醒
-  const wantsDelivery = RULES.some((r) => rules[r.key]) || !!settings?.dailyReport?.enabled;
+  const wantsDelivery = [...RULES, ...USER_RULES].some((r) => rules[r.key]) || !!settings?.dailyReport?.enabled;
   // 还没有通知方式时整页只放一件事（ui-copy-spec §8.3）：先加通知方式，提醒规则和日报等加好以后再出现
   const noChannelsYet = notifLoaded && channels.length === 0;
   const noDelivery = notifLoaded && !noChannelsYet && wantsDelivery && !channels.some((c) => c.enabled !== false);
@@ -732,6 +743,45 @@ export default function NotificationsPage() {
   };
   // 版式（ui-design-spec §5.7、#64 第 8 节）：左 8 列提醒规则，右 4 列通知方式和日报；还没有通知方式时整页只放一件事，不分栏。
   // 手机上通知方式在最前：换的是页面里的先后，不只用 CSS 换显示顺序（读屏和键盘跟着看到的先后，§5.1）
+  // 一条规则一行：开关、名字和说明（带附加条件）、发到哪些通知方式
+  const ruleRow = (rule: { ev: string; key: string; title: string; desc: string }) => {
+    const on = !!rules[rule.key];
+    const titleId = `${uid}-rule-${rule.ev}`;
+    return (
+      <tr key={rule.key} className={on ? undefined : "is-off"}>
+        <td className="col-switch">
+          <Switch
+            checked={on}
+            checkedChildren={COPY.on}
+            unCheckedChildren={COPY.off}
+            onChange={() => toggleRule(rule.key)}
+            aria-labelledby={titleId}
+          />
+        </td>
+        <td>
+          <span className="jy-notifications-rule-title" id={titleId}>
+            {rule.title}
+          </span>
+          {rule.desc ? <span className="jy-notifications-rule-desc">{rule.desc}</span> : null}
+          {ruleCondition(rule.key)}
+        </td>
+        <td className="col-to">
+          <Select
+            mode="multiple"
+            allowClear
+            aria-label={COPY.ruleTo(rule.title)}
+            placeholder={channels.length ? COPY.allChannels : COPY.noChannels}
+            maxTagCount="responsive"
+            optionFilterProp="label"
+            value={channelsFor[rule.ev] || []}
+            onChange={(ids) => saveChannelsFor(rule.ev, ids as string[])}
+            options={channelOptions}
+            disabled={!channels.length || !on}
+          />
+        </td>
+      </tr>
+    );
+  };
   const rulesBlock = (
     <>
       {/* 提醒规则 */}
@@ -756,44 +806,32 @@ export default function NotificationsPage() {
                 </tr>
               </thead>
               <tbody>
-                {RULES.map((rule) => {
-                  const on = !!rules[rule.key];
-                  const titleId = `${uid}-rule-${rule.ev}`;
-                  return (
-                    <tr key={rule.key} className={on ? undefined : "is-off"}>
-                      <td className="col-switch">
-                        <Switch
-                          checked={on}
-                          checkedChildren={COPY.on}
-                          unCheckedChildren={COPY.off}
-                          onChange={() => toggleRule(rule.key)}
-                          aria-labelledby={titleId}
-                        />
-                      </td>
-                      <td>
-                        <span className="jy-notifications-rule-title" id={titleId}>
-                          {rule.title}
-                        </span>
-                        {rule.desc ? <span className="jy-notifications-rule-desc">{rule.desc}</span> : null}
-                        {ruleCondition(rule.key)}
-                      </td>
-                      <td className="col-to">
-                        <Select
-                          mode="multiple"
-                          allowClear
-                          aria-label={COPY.ruleTo(rule.title)}
-                          placeholder={channels.length ? COPY.allChannels : COPY.noChannels}
-                          maxTagCount="responsive"
-                          optionFilterProp="label"
-                          value={channelsFor[rule.ev] || []}
-                          onChange={(ids) => saveChannelsFor(rule.ev, ids as string[])}
-                          options={channelOptions}
-                          disabled={!channels.length || !on}
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
+                {RULES.map(ruleRow)}
+                {bigUsers && (
+                  <tr className="jy-notifications-group">
+                    <td colSpan={3}>
+                      <h3>{COPY.users.group}</h3>
+                      <p>
+                        {bigUsers.ready ? (
+                          <>
+                            {COPY.users.bigLead(bigUsers.big.length)}
+                            {bigUsers.big.map((user, index) => (
+                              <span key={user.id}>
+                                {index ? "、" : ""}
+                                <Link className="jy-link" href={`/users?user=${user.id}`}>{user.username}</Link>
+                              </span>
+                            ))}
+                            {COPY.users.bigTail}
+                          </>
+                        ) : (
+                          COPY.users.bigFilling
+                        )}
+                      </p>
+                      <p>{COPY.users.onlyBig}</p>
+                    </td>
+                  </tr>
+                )}
+                {bigUsers && USER_RULES.map(ruleRow)}
               </tbody>
             </table>
           </div>
