@@ -12,6 +12,7 @@ import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE, formatZonedTime } from
 import { describeError } from "../../../lib/error-copy";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
+import { Sym } from "../../components/icons";
 import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { useShellPage } from "../../components/shell-context";
@@ -94,7 +95,12 @@ export default function ModelsPageRoute() {
     <div className="jy-page jy-models-page">
       {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
       <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
-      {page.perfEmpty && <p className="jy-caption jy-models-perf-empty" role="status">{COPY.perfEmpty}</p>}
+      {page.perfEmpty && (
+        <div className="jy-banner" role="status">
+          <Sym kind="warn" />
+          <div className="jy-banner__body"><span>{COPY.perfEmpty}</span></div>
+        </div>
+      )}
       <Panel label={COPY.kpiLabel}>
         <dl className="jy-kpis jy-models-kpis">
           {kpis.map((kpi) => (

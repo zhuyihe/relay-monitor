@@ -1,6 +1,5 @@
 /* 模型供需：只放本页独有的细节，布局和组件样式都在 jy.css */
 .jy-models-note { margin: 0; text-align: right; }
-.jy-models-perf-empty { margin: 0; color: var(--jy-warn-ink, var(--jy-ink-2)); }
 .jy-models-kpis dd.jy-caption { margin: 0; }
 .jy-models-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
 .jy-models-linkbtn:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
@@ -29,6 +28,12 @@
 /* 被自动停用的原因：一行放不下就截短，鼠标放上去（title）看全文 */
 .jy-models-reason { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jy-models-subcards .jy-models-reason { max-width: 100%; }
+/* 抽屉里渠道和上游那张表：固定列宽，再长的停用原因也只占一行（省略号），不撑宽「状态」列、不挤掉别的列 */
+.jy-models-drawer table.jy-models-channels { table-layout: fixed; }
+.jy-models-drawer table.jy-models-channels th { white-space: normal; }
+.jy-models-drawer table.jy-models-channels th, .jy-models-drawer table.jy-models-channels td { padding-left: 8px; padding-right: 8px; overflow: hidden; }
+.jy-models-drawer table.jy-models-channels .jy-cell-two { max-width: 100%; }
+.jy-models-drawer table.jy-models-channels .jy-models-reason { max-width: 100%; }
 
 /* 电脑：整页正好一屏——页高 = 视口 − 顶栏 − 内容区上下边距；主表那块占满剩下的高度，在框里自己滚，表头固定。
    视口太矮时（表不到 220px）退回整页滚。手机照旧整页滚（下面 max-width: 767px 不设高度） */

@@ -449,7 +449,7 @@ function modelsFixture({ perfReadable = true, perfMode = "all" } = {}) {
     ...usage("claude-haiku-4.5", { week: 52.54, prev: 23.9, today: 4, ok: 300 }), ...usage("qwen3-coder", { week: 47.95, today: 5, ok: 100 }), ...usage("glm-4.6", { week: 12.79 }), ...usage("deepseek-v3", { week: 110.13, prev: 128, today: 10, ok: 200 }), ...usage("gpt-5-mini", { week: 81.58, prev: 93, today: 8, ok: 150 }),
   ];
   const channel = (id, name, models, status = 1, priority = 0, extra = {}) => ({ id, name, status, models, priority, weight: 0, ...extra });
-  const longReason = "status code 401: Invalid token (request id: 202611010930123456789) — 上游说这个 Key 已经被停用，请到上游后台重新生成一个 Key，再把新的 Key 填到这个渠道上";
+  const longReason = "status code 401: Invalid token (request id: 202611010930123456789) — 上游说这个 Key 已经被停用，请到上游后台重新生成一个 Key，再把新的 Key 填到这个渠道上。".repeat(6);
   const channels = [
     channel(1, "高速 A", ["claude-sonnet-4.6"], 1, 10), channel(2, "标准 B", ["claude-sonnet-4.6"], 1, 5), channel(3, "高速 C", ["claude-sonnet-4.6"], 3, 0, { statusReason: longReason, statusTime: Date.parse("2026-11-01T09:30:00+08:00") }), channel(4, "渠道 4", ["gpt-5"]), channel(5, "渠道 5", ["gpt-5"]),
     channel(6, "渠道 6", ["gemini-2.5-pro"]), channel(7, "渠道 7", ["claude-haiku-4.5"]), channel(8, "渠道 8", ["claude-haiku-4.5"]), channel(9, "渠道 9", ["qwen3-coder"]), channel(10, "渠道 10", ["glm-4.6"], 2),
@@ -573,6 +573,17 @@ test("模型供需（电脑）：页顶一句、四个数、主表默认只列�
   assert.equal(await channels.locator("tbody tr").nth(2).locator("td").nth(1).locator(".jy-cell-two > span").first().innerText(), "被自动停用 · 11月1日 9:30", "第一行是状态和时间，第二行才是原因");
   assert.equal(await reason.evaluate((node) => node.scrollWidth > node.clientWidth), true, "一行放不下，截短显示");
   assert.equal(await channels.locator(".jy-models-reason").count(), 1);
+  // 几百字的原因也不撑坏这张表：渠道名不折行，最右边的跑道列还在、没被切掉，表不出横向滚动
+  const fit = await channels.evaluate((table) => {
+    const frame = table.getBoundingClientRect(), wrap = table.parentElement;
+    return [...table.querySelectorAll("tbody tr")].map((tr) => {
+      const range = document.createRange(); range.selectNodeContents(tr.cells[0]);
+      const last = tr.cells[5].getBoundingClientRect();
+      return { nameLines: range.getClientRects().length, nameWidth: Math.round(tr.cells[0].getBoundingClientRect().width), runwayText: tr.cells[5].innerText, runwayInside: last.right <= frame.right + 1 && last.width > 60, scrolls: wrap.scrollWidth > wrap.clientWidth };
+    });
+  });
+  assert.equal(fit.length, 3);
+  for (const item of fit) assert.deepEqual([item.nameLines, item.nameWidth >= 80, /约 2 天/.test(item.runwayText), item.runwayInside, item.scrolls], [1, true, true, true, false], JSON.stringify(item));
   // 找货帮手：按价格从低到高；还没在供的有「去绑定渠道」，链到那个上游的绑定渠道小窗口
   const finder = drawer.locator("table").nth(1);
   assert.deepEqual(await finder.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => tr.cells[0].innerText)), ["上游丙", "备用上游", "主力上游", "上游乙"]);
@@ -639,7 +650,10 @@ test("模型供需：成功率读到了但没有这个模型写「没有成功�
   assert.equal(await partial.page.getByText(MODELS_COPY.perfEmpty, { exact: false }).count(), 0, "只是少了一个模型，不写整页的说明");
   assert.equal(await partial.page.getByText(MODELS_COPY.successFew, { exact: true }).count(), 0);
   const empty = await openModelsPage(t, { perfMode: "empty" });
-  await empty.page.getByText(MODELS_COPY.perfEmpty, { exact: true }).waitFor();
+  // 整页说明是带感叹号的提示条（全站的 jy-banner），不是页面底色上的一行字
+  const banner = empty.page.locator(".jy-banner", { hasText: MODELS_COPY.perfEmpty });
+  await banner.waitFor();
+  assert.equal(await banner.locator("svg, .jy-sym").count() > 0, true, "提示条带图标");
   // 有开着的渠道的模型都写「没有成功率数据」，不标卖不出去（gpt-5 在 all 里是卖不出去）
   assert.equal(await empty.page.getByText(MODELS_COPY.successNodata, { exact: true }).count(), 4, "默认列的 5 个有缺口的里，4 个有开着的渠道（glm 没有，写「没有开着的渠道」）");
   assert.equal(await empty.page.locator(".jy-tag", { hasText: "卖不出去" }).count(), 0);

@@ -149,8 +149,9 @@ function Channels({ detail, critDays, phone }: { detail: ModelDetail; critDays: 
   }
   return (
     <div className="jy-table-wrap">
-      <table className="jy-data jy-num jy-data--compact">
+      <table className="jy-data jy-num jy-data--compact jy-models-channels">
         <caption className="sr-only">{COPY.drawer.channelsTitle}</caption>
+        <colgroup><col style={{ width: "19%" }} /><col style={{ width: "22%" }} /><col style={{ width: "9%" }} /><col style={{ width: "13%" }} /><col style={{ width: "17%" }} /><col style={{ width: "20%" }} /></colgroup>
         <thead><tr><th scope="col">{cols.channel}</th><th scope="col">{cols.state}</th><th scope="col" className="r">{cols.priority}</th><th scope="col" className="r">{cols.share}</th><th scope="col">{cols.upstream}</th><th scope="col">{cols.runway}</th></tr></thead>
         <tbody>
           {detail.channels.map((channel) => (
