@@ -142,7 +142,9 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     }
     const averages = dailyAverages(weekRows, tz);
     const eligible = (state.lastUsers || []).filter((user) => user.role < 10 && user.status === 1);
-    const bigIds = bigUsersOf(eligible.map((user) => ({ id: Number(user.id), dailyAvg: averages.get(user.username) || 0 })));
+    const weekByName = new Map();
+    for (const row of weekRows) weekByName.set(row.username, (weekByName.get(row.username) || 0) + row.usd);
+    const bigIds = bigUsersOf(eligible.map((user) => ({ id: Number(user.id), week: weekByName.get(user.username) || 0 })));
     const bigSet = new Set(bigIds);
     const users = new Map();
     for (const user of eligible) {
