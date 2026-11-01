@@ -161,7 +161,7 @@ function Users({ detail, out }: { detail: Loaded; out: boolean }) {
   const D = COPY.drawer, { users } = detail.headroom;
   if (out) return <p className="jy-muted">{D.outUsers}</p>;
   if (!users.top.length && !users.others) return <p className="jy-muted">{D.usersNone}</p>;
-  const biggest = Math.max(1, ...users.top.map((user) => user.blocked));
+  const biggest = Math.max(1, ...users.top.map((user) => user.blockedRequests));
   return (
     <>
       <ul className="jy-models-users">
@@ -170,13 +170,13 @@ function Users({ detail, out }: { detail: Loaded; out: boolean }) {
             <span className="line">
               <Link className="jy-link name" href={userLink(user.userId)} title={user.name}>{user.name}</Link>
               {user.key && <span className="jy-tag jy-tag--info">{D.usersKey}</span>}
-              <b>{D.usersTimes(user.blocked)}</b>
+              <b>{D.usersTimes(user.blockedRequests)}</b>
             </span>
-            <span className="bar"><i style={{ width: `${(user.blocked / biggest) * 100}%` }} /></span>
+            <span className="bar"><i style={{ width: `${(user.blockedRequests / biggest) * 100}%` }} /></span>
           </li>
         ))}
       </ul>
-      {users.others && <p className="jy-caption jy-models-users-others">{D.usersOthers(users.others.count, users.others.blocked)}</p>}
+      {users.others && <p className="jy-caption jy-models-users-others">{D.usersOthers(users.others.count, users.others.blockedRequests)}</p>}
     </>
   );
 }

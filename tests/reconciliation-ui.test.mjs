@@ -479,7 +479,7 @@ function modelsFixture({ mode = "ok", headroomNull = false } = {}) {
       headroom: {
         name, asOf: MODELS_NOW, tz: MODELS_TZ, rate: 7, peak: null, need: null, supply: q("measured", 8812), margin: { value: null, status: "none", kind: "unavailable" }, reco: { kind: "none" }, notBought: null,
         lost: r, hourly: { last24, clock7d }, limitLine: q("measured", 8812), facts: { overLimitHours: [], topReason: null, notBought24: 0, typicalRoom: null },
-        users: { top: [["orange-lab", 41, true, 412], ["wu-team", 42, true, 296], ["wang-lab", 43, true, 170], ["sun_dev", 44, false, 52], ["u5", 45, false, 40]].map(([nameText, userId, key, blocked]) => ({ userId, name: nameText, blocked, key })), others: { count: 18, blocked: 326 } },
+        users: { top: [["orange-lab", 41, true, 412], ["wu-team", 42, true, 296], ["wang-lab", 43, true, 170], ["sun_dev", 44, false, 52], ["u5", 45, false, 40]].map(([nameText, userId, key, blocked]) => ({ userId, name: nameText, blocked: blocked * 3, blockedRequests: blocked, key })), others: { count: 18, blocked: 900, blockedRequests: 326 } },
         channels: [
           channel(1, "高速 A", "on", q("measured", 5000), 120, "rate_limit", { id: "main", name: "主力上游" }),
           channel(2, "标准 B", "on", q("atLeast", 3812), 66, "auth_quota", { id: "backup", name: "备用上游" }),
