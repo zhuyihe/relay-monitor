@@ -257,6 +257,8 @@ test("高峰余量：整页多 headroom（读库里的小时计数，不多读�
   assert.equal(page.headroom.state, "ok", "错误日志读了 10 天");
   // v5：缺货失败（这个夹具的错误桶只有被拒、没有 F 的拆分，渠道 1 的限流算在 429 里；有没有行看 byModelHour 的 finalFailures）
   assert.ok(["ok", "noFailures"].includes(page.headroom.lost.status));
+  const glm = page.headroom.lost.rows.find((row) => row.name === "glm");
+  assert.ok(glm && glm.estimated && glm.lost24 === null && glm.mainCause === "no_channel" && glm.lostMoney24 > 0, "断货的模型（渠道只有停用的）列进主表，少收是估计值");
   assert.ok(Array.isArray(page.headroom.lost.rows) && typeof page.headroom.lost.quietCount === "number");
   assert.equal(page.headroom.consumeLog, true);
   const row = page.headroom.rows.find((item) => item.name === "gpt-5");

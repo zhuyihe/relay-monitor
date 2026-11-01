@@ -80,7 +80,7 @@ async function read(rt, own, now, tz, rate) {
   });
   // 高峰余量（模型供需第 1 步）：只读库里已有的计数和上面读到的数；读不到（没有数据库、读库出错）是 null，老字段照常
   const headroom = await readHeadroom(rt, { own, now, tz, modelRows: rows.value, channels: channels.value, rules: rules.status === "fulfilled" ? rules.value.rules : [], upstreams,
-    weekUsd: new Map(view.rows.map((row) => [row.name, row.week])), small: view.small });
+    weekUsd: new Map(view.rows.map((row) => [row.name, row.week])), small: view.small, outModels: view.outModels });
   // 页面不用的判断中间量（flags、lost）不放进响应：一百个模型能少 1/4 的字节
   const payload = { asOf: now, tz, rate, critDays: etaWindowDays(rt.store.rules), rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable, perfEmpty: view.perfEmpty, headroom: headroom?.page ?? null };
   // 成功率被额度、断路拦下（不是读失败）：这一页先给，但不缓存，额度回来再开就读
