@@ -136,17 +136,18 @@ test("余额快照：变了才写，没变的每天补一条", async (t) => {
   assert.equal(points.get(2).length, 2, "b 没变，满 24 小时补了一条");
 });
 
-test("端到端：两位重点用户一起快用完 → 24 小时后一条推送、按日均消费从高到低；各自降到二级再推一次；小用户不是重点用户不推送；没有重复", async (t) => {
+test("端到端：两位重点用户一起快用完 → 24 小时后一条推送、按日均消费从高到低；各自降到二级再推一次、余额用完再推一次；小用户不是重点用户不推送；没有重复", async (t) => {
   const f = makeSite(t, crowd(), { rules: { renotifyHours: 0 } }); // 0 = 同一级只提醒一次；每天重复提醒另有用例
   await f.stepsTo(72);
-  assert.equal(f.sent.length, 3, f.sent.map((item) => `${item.title}\n${item.body}`).join("\n=====\n"));
-  const [first, second, third] = f.sent;
+  assert.equal(f.sent.length, 4, f.sent.map((item) => `${item.title}\n${item.body}`).join("\n=====\n"));
+  const [first, second, third, fourth] = f.sent;
   assert.equal(first.title, "【重点用户快用完】big1 等 2 位");
   assert.match(first.body.split("\n")[0], /^用户：big1 /);
   assert.match(first.body.split("\n")[1], /^用户：big2 /);
-  assert.match(second.body, /用户：big1 .*余额用完|用户：big1 .*还够/);
+  assert.match(second.body, /用户：big1 .*还够/, "big1 先到二级（预计 1 天内）");
   assert.equal(second.body.split("\n").filter((line) => line.startsWith("用户：")).length, 1);
-  assert.match(third.body, /用户：big2 /);
+  assert.equal(third.title, "【重点用户余额用完】big1", "big1 余额用完是单独一档，当轮就推");
+  assert.match(fourth.body, /用户：big2 /);
   assert.ok(f.sent.every((item) => !item.body.includes("small") && !item.body.includes("mid") && !item.body.includes("idle") && !item.body.includes("root")), "不是重点用户、闲置号、管理员都不推");
   const view = f.ops.getView();
   assert.equal(view.users.get(30).big, false);
@@ -545,4 +546,22 @@ test("重点用户快用完的提醒天数是自己的（rules.userEtaDays），
   await wide.stepsTo(25);
   assert.equal(wide.sent.length, 1, "上游设得再紧，重点用户照自己的 3 天");
   assert.equal(wide.ops.getView().level1Days, 3);
+});
+
+test("余额用完单独算一档：先推了「一天内快用完」（二级），之后余额变 0，当轮就推「余额用完」，不用等 24 小时", async (t) => {
+  const sent = [];
+  const send = async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; };
+  const f = makeSite(t, bigPair(), { send, rules: { renotifyHours: 0 } });
+  await f.stepsTo(26);
+  f.site.users[1].balance = 40; // big2：日均 72，剩 40 = 0.56 天，二级
+  await f.step();
+  assert.ok(sent.some((item) => item.title === "【重点用户快用完】big2 可用不到 1 天"), sent.map((item) => item.title).join("\n"));
+  const before = sent.length;
+  f.site.users[1].balance = 0.0001; // 下一步降到 0
+  await f.step();
+  assert.equal(sent.length, before + 1, "余额变 0 的这一轮就推了");
+  assert.equal(sent.at(-1).title, "【重点用户余额用完】big2");
+  assert.equal((await f.store.getAlertStates("own1")).get(2).level, 3);
+  await f.step();
+  assert.equal(sent.length, before + 1, "同一档不重复");
 });

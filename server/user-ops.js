@@ -196,7 +196,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
       if (!user || user.state === "warming") continue;
       const prev = prevStates.get(id) || null;
       // 只算开着的那几种：余额用完只看「余额用完」规则，快用完（可用天数到线）只看「快用完」规则；都没开的这位当没事
-      const level = user.state === "empty" ? (rules.onUserExhaust === true ? 2 : 0) : user.state === "soon" && rules.onUserEta === true ? user.level : 0;
+      const level = user.state === "empty" ? (rules.onUserExhaust === true ? 3 : 0) : user.state === "soon" && rules.onUserEta === true ? user.level : 0;
       const decision = decideUserAlert({ prev, runway: { ...user, level }, now: at, repushHours: Number(rules.renotifyHours) || 0, level1Days: view.level1Days });
       if (decision.push) due.push({ user, decision, prev });
       else if (!prev || prev.level !== decision.state.level || prev.lastBalanceUsd !== decision.state.lastBalanceUsd) changed.push({ id, state: decision.state });
