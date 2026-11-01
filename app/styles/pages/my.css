@@ -1,14 +1,5 @@
 /* 自营业务：只放本页独有的细节，布局和组件样式都在 jy.css */
 
-/* 可排序表头：整格是按钮，当前排序列带箭头 */
-.jy-my-sort {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer;
-  border-radius: var(--jy-r1); white-space: nowrap;
-}
-.jy-my-sort:hover, .jy-my-sort.is-active { color: var(--jy-ink); }
-.jy-my-sort .jy-icon { width: 12px; height: 12px; }
-
 /* 环比涨跌 50% 以上加粗，方便一眼扫到跳变 */
 .jy-my-delta-big { color: var(--jy-warn-ink); font-weight: 600; }
 
@@ -30,8 +21,6 @@
 .jy-my-lines p { margin: 0; }
 .jy-banner ul.jy-my-list { margin: 4px 0 0; padding-left: 18px; }
 
-/* 长表格可以更高一些 */
-.jy-table-scroll.jy-my-tall { max-height: 560px; }
 
 /* 日志精算的四项汇总 */
 .jy-my-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }

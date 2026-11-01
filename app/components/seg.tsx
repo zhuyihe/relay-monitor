@@ -49,7 +49,8 @@ export function Seg<T extends string>({
   );
 }
 
-export type TabDef<T extends string = string> = { key: T; label: ReactNode };
+// disabled：还没做的标签（灰字，不能点、不进 Tab 顺序，键盘切换跳过）；note 是名字后面的小字（「即将上线」）
+export type TabDef<T extends string = string> = { key: T; label: ReactNode; disabled?: boolean; note?: ReactNode };
 
 const tabId = (prefix: string, key: string) => `${prefix}-tab-${key}`;
 const panelId = (prefix: string, key: string) => `${prefix}-panel-${key}`;
@@ -72,11 +73,14 @@ export function Tabs<T extends string>({
 }) {
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
   const onKeyDown = (e: KeyboardEvent, i: number) => {
+    const enabled = tabs.map((t, k) => (t.disabled ? -1 : k)).filter((k) => k >= 0);
+    if (!enabled.length) return;
+    const at = enabled.indexOf(i);
     let next = -1;
-    if (e.key === "ArrowRight") next = (i + 1) % tabs.length;
-    else if (e.key === "ArrowLeft") next = (i - 1 + tabs.length) % tabs.length;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = tabs.length - 1;
+    if (e.key === "ArrowRight") next = enabled[(at + 1) % enabled.length];
+    else if (e.key === "ArrowLeft") next = enabled[(at - 1 + enabled.length) % enabled.length];
+    else if (e.key === "Home") next = enabled[0];
+    else if (e.key === "End") next = enabled[enabled.length - 1];
     if (next < 0) return;
     e.preventDefault();
     const key = tabs[next].key;
@@ -95,13 +99,15 @@ export function Tabs<T extends string>({
             type="button"
             role="tab"
             id={tabId(idPrefix, t.key)}
-            aria-controls={panelId(idPrefix, t.key)}
+            aria-controls={t.disabled ? undefined : panelId(idPrefix, t.key)}
             aria-selected={t.key === active}
-            tabIndex={t.key === active ? 0 : -1}
-            onClick={() => onChange(t.key)}
+            aria-disabled={t.disabled || undefined}
+            tabIndex={t.key === active && !t.disabled ? 0 : -1}
+            onClick={t.disabled ? undefined : () => onChange(t.key)}
             onKeyDown={(e) => onKeyDown(e, i)}
           >
             {t.label}
+            {t.note != null && <small className="jy-tab-note">{t.note}</small>}
           </button>
         ))}
       </div>

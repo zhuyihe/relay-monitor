@@ -34,6 +34,16 @@ export function defineUserOpsStoreContract({ name, create, cleanup = async () =>
       assert.deepEqual(listed.get(2), [[1500, 9.5]]);
     });
 
+    await t.test("一个用户的用量和快照（抽屉用）：只给这个用户、按时间升序", async () => {
+      const a = id("h");
+      await store.upsertUsageHours(a, [{ username: "u1", hourMs: 12 * H, quota: 5, requests: 1 }, { username: "u1", hourMs: 10 * H, quota: 7, requests: 1 }, { username: "u2", hourMs: 11 * H, quota: 9, requests: 1 }]);
+      assert.deepEqual(await store.listUserUsageHours(a, "u1", 0, 100 * H), [{ hourMs: 10 * H, quota: 7 }, { hourMs: 12 * H, quota: 5 }]);
+      assert.deepEqual(await store.listUserUsageHours(a, "u1", 11 * H, 100 * H), [{ hourMs: 12 * H, quota: 5 }]);
+      await store.addBalancePoints(a, [{ userId: 1, t: 3000, balanceUsd: 3 }, { userId: 1, t: 1000, balanceUsd: 5 }, { userId: 2, t: 2000, balanceUsd: 9 }]);
+      assert.deepEqual(await store.listUserBalancePoints(a, 1, 0), [[1000, 5], [3000, 3]]);
+      assert.deepEqual(await store.listUserBalancePoints(a, 1, 2000), [[3000, 3]]);
+    });
+
     await t.test("进度：只更新给到的字段，没有的站点是 null", async () => {
       const a = id("d");
       assert.equal(await store.getProgress(a), null);

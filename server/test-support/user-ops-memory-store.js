@@ -2,7 +2,7 @@
 const PROGRESS_FIELDS = ["backfillCursorMs", "backfillTargetMs", "backfillStartedMs", "usageSyncedMs", "balanceSyncedMs"];
 
 export class MemoryUserOpsStore {
-  constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0 }; }
+  constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0, usageRowsRead: 0 }; }
 
   async upsertUsageHours(stationId, rows) {
     this.calls.upsertUsageHours += 1;
@@ -12,7 +12,17 @@ export class MemoryUserOpsStore {
 
   async listUsageHours(stationId, fromMs, toMs = Number.MAX_SAFE_INTEGER) {
     this.calls.listUsageHours += 1;
-    return [...this.usage.values()].filter((row) => row.stationId === stationId && row.hourMs >= fromMs && row.hourMs < toMs).map(({ username, hourMs, quota }) => ({ username, hourMs, quota }));
+    const rows = [...this.usage.values()].filter((row) => row.stationId === stationId && row.hourMs >= fromMs && row.hourMs < toMs).map(({ username, hourMs, quota }) => ({ username, hourMs, quota }));
+    this.calls.usageRowsRead += rows.length;
+    return rows;
+  }
+
+  async listUserUsageHours(stationId, username, fromMs, toMs = Number.MAX_SAFE_INTEGER) {
+    return [...this.usage.values()].filter((row) => row.stationId === stationId && row.username === username && row.hourMs >= fromMs && row.hourMs < toMs).sort((a, b) => a.hourMs - b.hourMs).map(({ hourMs, quota }) => ({ hourMs, quota }));
+  }
+
+  async listUserBalancePoints(stationId, userId, sinceMs) {
+    return [...this.points.values()].filter((row) => row.stationId === stationId && row.userId === Number(userId) && row.t >= sinceMs).sort((a, b) => a.t - b.t).map((row) => [row.t, row.balanceUsd]);
   }
 
   async addBalancePoints(stationId, rows) {

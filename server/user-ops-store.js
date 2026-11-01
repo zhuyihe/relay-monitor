@@ -34,6 +34,18 @@ export class UserOpsStore {
     return rows.map((row) => ({ username: row.username, hourMs: Number(row.hour_ms), quota: Number(row.quota) }));
   }
 
+  // 一个用户的按小时用量（抽屉用）
+  async listUserUsageHours(stationId, username, fromMs, toMs = Number.MAX_SAFE_INTEGER) {
+    const [rows] = await this.pool.query("SELECT hour_ms, quota FROM user_usage_hours WHERE station_id = ? AND username = ? AND hour_ms >= ? AND hour_ms < ? ORDER BY hour_ms", [stationId, username, fromMs, toMs]);
+    return rows.map((row) => ({ hourMs: Number(row.hour_ms), quota: Number(row.quota) }));
+  }
+
+  // 一个用户的余额快照（抽屉用），升序 [[t, 美元], …]
+  async listUserBalancePoints(stationId, userId, sinceMs) {
+    const [rows] = await this.pool.query("SELECT t, balance_usd FROM user_balance_points WHERE station_id = ? AND user_id = ? AND t >= ? ORDER BY t", [stationId, Number(userId), sinceMs]);
+    return rows.map((row) => [Number(row.t), Number(row.balance_usd)]);
+  }
+
   async addBalancePoints(stationId, rows) {
     for (let i = 0; i < rows.length; i += CHUNK) {
       const chunk = rows.slice(i, i + CHUNK);
