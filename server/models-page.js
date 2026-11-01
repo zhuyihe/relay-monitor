@@ -78,7 +78,7 @@ async function read(rt, own, now, tz, rate) {
     perf: perf.status === "fulfilled" ? new Map(perf.value.models.map((item) => [item.model, item.successRate])) : null, userIds: userIdsOf(rt),
   });
   // 页面不用的判断中间量（flags、lost）不放进响应：一百个模型能少 1/4 的字节
-  const payload = { asOf: now, tz, rate, critDays: etaWindowDays(rt.store.rules), rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable };
+  const payload = { asOf: now, tz, rate, critDays: etaWindowDays(rt.store.rules), rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable, perfEmpty: view.perfEmpty };
   // 成功率被额度、断路拦下（不是读失败）：这一页先给，但不缓存，额度回来再开就读
   const blocked = perf.status === "rejected" && perf.reason?.code === "BUSY" || flow.status === "rejected" && flow.reason?.code === "BUSY";
   return { payload, details: view.details, upstreams, rules: rules.status === "fulfilled" ? rules.value.rules : [], modelRows: rows.value, grid: view.grid, at: now, blocked };

@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Drawer, Grid } from "antd";
 import { api } from "../../../lib/client";
-import { EMPTY, axisMoney, formatDayKey, formatPct, formatZonedTime, weekdayOfDayKey } from "../../../lib/format";
+import { EMPTY, axisMoney, formatDayKey, formatAsOfTime, formatPct, formatZonedTime, weekdayOfDayKey } from "../../../lib/format";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import { useDrawerEscape } from "../../components/drawer-escape";
 import { Bars } from "../users/charts";
@@ -14,7 +14,7 @@ import { RateLine } from "./charts";
 import { GapTags, RunwayCell } from "./models-table";
 import { COPY } from "./copy";
 import { MY_LINK, bindLink, compareText, deltaText, money, priceText, successText, supplyText, userLink } from "./models-format";
-import type { ModelDetail, ModelsPage } from "./models-format";
+import type { DetailChannel, ModelDetail, ModelsPage } from "./models-format";
 
 export function ModelDrawer({ name, page, onClose }: { name: string | null; page: ModelsPage; onClose: () => void }) {
   const open = name != null;
@@ -119,6 +119,15 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
   );
 }
 
+// 被自动停用的渠道：New API 记的停用原因和时间；一行放不下的截短，鼠标放上去看全文
+function StopReason({ channel, className = "" }: { channel: DetailChannel; className?: string }) {
+  const text = channel.stopReason ?? "";
+  return <span className={`jy-caption jy-models-reason ${className}`.trim()} title={text}>{text}</span>;
+}
+// 状态那一行：被自动停用的带上时间（今天的只写「22:14」，别的天写「10月31日 22:14」）
+const stateText = (channel: DetailChannel, tz: string, asOf: number) => (channel.state === "auto" && channel.stopTime
+  ? COPY.drawer.stateAt(COPY.drawer.channelState.auto, formatAsOfTime(channel.stopTime, tz, asOf)) : COPY.drawer.channelState[channel.state]);
+
 // 渠道和上游：一个渠道一行；被停用的也列（灰字），提醒还有一条路可以开
 function Channels({ detail, critDays, phone }: { detail: ModelDetail; critDays: number; phone: boolean }) {
   const cols = COPY.drawer.channelCols;
@@ -129,7 +138,8 @@ function Channels({ detail, critDays, phone }: { detail: ModelDetail; critDays: 
       <ul className="jy-models-subcards">
         {detail.channels.map((channel) => (
           <li key={channel.channelId} className={channel.state === "on" ? undefined : "jy-models-off"}>
-            <span className="r1"><b>{channel.name}</b><span>{COPY.drawer.channelState[channel.state]}</span></span>
+            <span className="r1"><b>{channel.name}</b><span>{stateText(channel, detail.tz, detail.asOf)}</span></span>
+            {channel.stopReason && <StopReason channel={channel} className="r2" />}
             <span className="r2 jy-caption">{COPY.drawer.channelLine(channel.priority, channel.share == null ? EMPTY : formatPct(channel.share, 0), channel.upstream ? (channel.upstream.name ?? EMPTY) : COPY.drawer.unbound)}</span>
             {channel.upstream && <span className="r3"><RunwayCell runway={channel.upstream.runway} critDays={critDays} /></span>}
           </li>
@@ -139,14 +149,15 @@ function Channels({ detail, critDays, phone }: { detail: ModelDetail; critDays: 
   }
   return (
     <div className="jy-table-wrap">
-      <table className="jy-data jy-num jy-data--compact">
+      <table className="jy-data jy-num jy-data--compact jy-models-channels">
         <caption className="sr-only">{COPY.drawer.channelsTitle}</caption>
+        <colgroup><col style={{ width: "19%" }} /><col style={{ width: "22%" }} /><col style={{ width: "9%" }} /><col style={{ width: "13%" }} /><col style={{ width: "17%" }} /><col style={{ width: "20%" }} /></colgroup>
         <thead><tr><th scope="col">{cols.channel}</th><th scope="col">{cols.state}</th><th scope="col" className="r">{cols.priority}</th><th scope="col" className="r">{cols.share}</th><th scope="col">{cols.upstream}</th><th scope="col">{cols.runway}</th></tr></thead>
         <tbody>
           {detail.channels.map((channel) => (
             <tr key={channel.channelId} className={channel.state === "on" ? undefined : "jy-models-off"}>
               <td>{channel.name}</td>
-              <td>{COPY.drawer.channelState[channel.state]}</td>
+              <td>{channel.stopReason ? (<span className="jy-cell-two"><span>{stateText(channel, detail.tz, detail.asOf)}</span><StopReason channel={channel} /></span>) : stateText(channel, detail.tz, detail.asOf)}</td>
               <td className="r">{channel.priority}</td>
               <td className="r">{channel.share == null ? EMPTY : formatPct(channel.share, 0)}</td>
               <td>{channel.upstream ? (channel.upstream.name ?? EMPTY) : <span className="jy-muted">{COPY.drawer.unbound}</span>}</td>

@@ -6,12 +6,12 @@ import { COPY } from "./copy";
 import type { ChannelState, GapTag } from "./copy";
 
 export type Runway = { days: number | null; noSpend: boolean; level: Level; text: string; failed: boolean; fixed?: boolean };
-export type Success = { state: "none" | "unread" | "few" | "ok"; rate: number | null; requests: number | null };
-export type MainUpstream = { upstreamId: string; name: string | null; share: number; runway: Runway | null };
+export type Success = { state: "none" | "unread" | "nodata" | "few" | "ok"; rate: number | null; requests: number | null };
+export type LongestUpstream = { upstreamId: string; name: string | null; runway: Runway };
 export type ModelRow = {
   name: string; week: number; prev: number; isNew: boolean; success: Success;
   supply: { upstreams: number; open: number; stopped: number };
-  main: MainUpstream | null; tags: GapTag[]; gap: boolean;
+  longest: LongestUpstream | null; tags: GapTag[]; gap: boolean;
 };
 export type ModelsPage = {
   asOf: number; tz: string; rate: number; critDays: number; rows: ModelRow[];
@@ -21,9 +21,9 @@ export type ModelsPage = {
     soon: { count: number; first: { name: string; days: number } | null };
     rising: { count: number; first: { name: string; ratio: number } | null };
   };
-  flowReadable: boolean; perfReadable: boolean;
+  flowReadable: boolean; perfReadable: boolean; perfEmpty: boolean;
 };
-export type DetailChannel = { channelId: number; name: string; state: ChannelState; priority: number; share: number | null; upstream: { id: string; name: string | null; runway: Runway | null } | null };
+export type DetailChannel = { channelId: number; name: string; state: ChannelState; priority: number; stopReason?: string | null; stopTime?: number | null; share: number | null; upstream: { id: string; name: string | null; runway: Runway | null } | null };
 export type Price = { kind: "ratio" | "perCall"; value: number };
 export type FinderRow = {
   upstreamId: string; name: string | null; price: Price | null; readable: boolean; supplying: boolean; runway: Runway | null; bindable: boolean;
@@ -47,7 +47,7 @@ export const roughMoney = (usd: number, rate: number) => {
 
 export const deltaText = (week: number, prev: number) => (prev > 0 ? COPY.vsPrev(formatDeltaPct((week - prev) / prev)) : COPY.vsNone);
 export const successText = (success: Success) => (success.state === "none" ? COPY.successNone : success.state === "unread" ? COPY.successUnread
-  : success.state === "few" ? COPY.successFew : formatPct((success.rate ?? 0) / 100));
+  : success.state === "nodata" ? COPY.successNodata : success.state === "few" ? COPY.successFew : formatPct((success.rate ?? 0) / 100));
 export const supplyText = (row: ModelRow) => COPY.supply(row.supply.upstreams, row.supply.open);
 
 // 四个数
@@ -68,17 +68,24 @@ export const daysText = (days: number) => formatDays(days);
 // 「怎么判断的」里的数：读 MODELS_VIEW 同一份
 export const howNumbers = (rate: number) => ({
   minRequests: MODELS_VIEW.MIN_REQUESTS, failPct: MODELS_VIEW.FAIL_BELOW_PCT, soonDays: MODELS_VIEW.SOON_DAYS, ratio: MODELS_VIEW.RISING_RATIO, minPrev: roughMoney(MODELS_VIEW.RISING_MIN_PREV_USD, rate),
+  minShare: shareText(MODELS_VIEW.MIN_SHARE),
 });
+// 0.001 写「千分之一」、0.01 写「百分之一」，别的写百分数
+function shareText(share: number) {
+  const n = Math.round(1 / share);
+  if (Math.abs(1 / n - share) < 1e-12 && (n === 1000 || n === 100)) return `${n === 1000 ? "千" : "百"}分之一`;
+  return formatPct(share, share < 0.01 ? 1 : 0);
+}
 
 // 表头点一下按那一列排；null 是默认排法（分两段）
-export type SortKey = "model" | "week" | "success" | "supply" | "main" | "gap";
+export type SortKey = "model" | "week" | "success" | "supply" | "runway" | "gap";
 export type Sort = { key: SortKey; dir: "asc" | "desc" } | null;
 const SORT_VALUE: Record<SortKey, (row: ModelRow) => number | string | null> = {
   model: (row) => row.name,
   week: (row) => row.week,
   success: (row) => (row.success.state === "ok" || row.success.state === "few" ? row.success.rate : null),
   supply: (row) => row.supply.open,
-  main: (row) => (row.main?.runway ? (row.main.runway.noSpend ? Infinity : row.main.runway.days) : null),
+  runway: (row) => (row.longest ? (row.longest.runway.noSpend ? Infinity : row.longest.runway.days) : null),
   gap: (row) => row.tags.length,
 };
 export const SORT_KEYS = Object.keys(SORT_VALUE) as SortKey[];

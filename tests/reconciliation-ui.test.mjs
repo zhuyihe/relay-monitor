@@ -435,7 +435,7 @@ test("每日利润小毛病：人民币时顶上四个数不折行、四格一�
 
 // ---- 模型供需页：夹具用真的 buildModelsView（判断规则）、dailySuccessLine、priceInUpstream / comparePrice / arrangeFinder，所以标签、分段、找货帮手的价格是一整条链 ----
 const MODELS_TZ = "Asia/Shanghai", MODELS_NOW = Date.parse("2026-11-02T16:50:00+08:00");
-function modelsFixture({ perfReadable = true } = {}) {
+function modelsFixture({ perfReadable = true, perfMode = "all" } = {}) {
   const grid = dayGrid(MODELS_NOW, MODELS_TZ, MODELS_VIEW.DAYS), N = grid.days, QUOTA = 500000;
   const row = (model, idx, usd, hour, requests) => ({ key: model, t: grid.starts[idx] + hour * 3600000, cost: usd, requests });
   // 数按人民币写（汇率 7，和设计稿里的数一样），读进来是美元
@@ -448,24 +448,27 @@ function modelsFixture({ perfReadable = true } = {}) {
     ...usage("claude-sonnet-4.6", { week: 711.79, prev: 512.8, today: 60, ok: 400 }), ...usage("gpt-5", { week: 340.14, prev: 355.4, today: 30, ok: 120 }), ...usage("gemini-2.5-pro", { week: 203.19, prev: 190.6, today: 20, ok: 300 }),
     ...usage("claude-haiku-4.5", { week: 52.54, prev: 23.9, today: 4, ok: 300 }), ...usage("qwen3-coder", { week: 47.95, today: 5, ok: 100 }), ...usage("glm-4.6", { week: 12.79 }), ...usage("deepseek-v3", { week: 110.13, prev: 128, today: 10, ok: 200 }), ...usage("gpt-5-mini", { week: 81.58, prev: 93, today: 8, ok: 150 }),
   ];
-  const channel = (id, name, models, status = 1, priority = 0) => ({ id, name, status, models, priority, weight: 0 });
+  const channel = (id, name, models, status = 1, priority = 0, extra = {}) => ({ id, name, status, models, priority, weight: 0, ...extra });
+  const longReason = "status code 401: Invalid token (request id: 202611010930123456789) — 上游说这个 Key 已经被停用，请到上游后台重新生成一个 Key，再把新的 Key 填到这个渠道上。".repeat(6);
   const channels = [
-    channel(1, "高速 A", ["claude-sonnet-4.6"], 1, 10), channel(2, "标准 B", ["claude-sonnet-4.6"], 1, 5), channel(3, "高速 C", ["claude-sonnet-4.6"], 3), channel(4, "渠道 4", ["gpt-5"]), channel(5, "渠道 5", ["gpt-5"]),
+    channel(1, "高速 A", ["claude-sonnet-4.6"], 1, 10), channel(2, "标准 B", ["claude-sonnet-4.6"], 1, 5), channel(3, "高速 C", ["claude-sonnet-4.6"], 3, 0, { statusReason: longReason, statusTime: Date.parse("2026-11-01T09:30:00+08:00") }), channel(4, "渠道 4", ["gpt-5"]), channel(5, "渠道 5", ["gpt-5"]),
     channel(6, "渠道 6", ["gemini-2.5-pro"]), channel(7, "渠道 7", ["claude-haiku-4.5"]), channel(8, "渠道 8", ["claude-haiku-4.5"]), channel(9, "渠道 9", ["qwen3-coder"]), channel(10, "渠道 10", ["glm-4.6"], 2),
     channel(11, "渠道 11", ["deepseek-v3"]), channel(12, "渠道 12", ["deepseek-v3"]), channel(13, "渠道 13", ["deepseek-v3"]), channel(14, "渠道 14", ["gpt-5-mini"]), channel(15, "渠道 15", ["gpt-5-mini"]),
   ];
   const runway = (days, extra = {}) => ({ days, noSpend: false, level: days != null && days <= 3 ? "crit" : "good", text: days == null ? "—" : `约 ${days} 天`, failed: false, ...extra });
   const upstreams = new Map([["main", { id: "main", name: "主力上游", type: "newapi", runway: runway(2) }], ["backup", { id: "backup", name: "备用上游", type: "newapi", runway: runway(18) }],
     ["b", { id: "b", name: "上游乙", type: "newapi", runway: runway(9) }], ["c", { id: "c", name: "上游丙", type: "newapi", runway: runway(40) }], ["d", { id: "d", name: "上游丁", type: "sub2api", runway: runway(null) }]]);
-  const ruleOf = new Map(Object.entries({ 1: "main", 2: "backup", 3: "main", 4: "backup", 5: "main", 6: "b", 7: "backup", 8: "b", 9: "c", 10: "d", 11: "c", 12: "backup", 13: "b", 14: "backup", 15: "main" }).map(([id, up]) => [Number(id), { upstreamStationId: up }]));
+  const ruleOf = new Map(Object.entries({ 1: "main", 2: "main", 3: "main", 4: "backup", 5: "main", 6: "b", 7: "backup", 8: "b", 9: "c", 10: "d", 11: "c", 12: "backup", 13: "b", 14: "backup", 15: "main" }).map(([id, up]) => [Number(id), { upstreamStationId: up }]));
   const flow = [
     ...[["orange-lab", 31.5], ["wu-team", 24.4], ["wang-lab", 17.3], ["sun_dev", 9.2], ["u5", 5.7], ["u6", 5.4], ["u7", 4.3], ["u8", 1.7], ["u9", 1.1], ["u10", 0.7], ["u11", 0.4]].map(([user, usd]) => ({ user, model: "claude-sonnet-4.6", channelId: usd > 10 ? 1 : 2, cost: usd })),
     { user: "x", model: "gpt-5", channelId: 4, cost: 30 }, { user: "x", model: "gemini-2.5-pro", channelId: 6, cost: 5 }, { user: "x", model: "claude-haiku-4.5", channelId: 7, cost: 5 }, { user: "x", model: "qwen3-coder", channelId: 9, cost: 5 },
     { user: "x", model: "glm-4.6", channelId: 10, cost: 1 }, { user: "x", model: "deepseek-v3", channelId: 11, cost: 5 }, { user: "x", model: "gpt-5-mini", channelId: 14, cost: 5 },
   ];
-  const perf = perfReadable ? new Map([["claude-sonnet-4.6", 97.8], ["gpt-5", 86], ["gemini-2.5-pro", 99.2], ["claude-haiku-4.5", 99.9], ["qwen3-coder", 99], ["deepseek-v3", 99.8], ["gpt-5-mini", 99.5]]) : null;
+  const perfAll = new Map([["claude-sonnet-4.6", 97.8], ["gpt-5", 86], ["gemini-2.5-pro", 99.2], ["claude-haiku-4.5", 99.9], ["qwen3-coder", 99], ["deepseek-v3", 99.8], ["gpt-5-mini", 99.5]]);
+  // all 都有；partial 读到了但没有 gemini；empty 读到了但整个是空的；读不到是 null
+  const perf = !perfReadable ? null : perfMode === "empty" ? new Map() : perfMode === "partial" ? new Map([...perfAll].filter(([name]) => name !== "gemini-2.5-pro")) : perfAll;
   const view = buildModelsView({ now: MODELS_NOW, tz: MODELS_TZ, modelRows, flowRows: flow, channels, ruleOf, upstreams, perf, userIds: new Map([["orange-lab", 41], ["wu-team", 42]]) });
-  const data = { asOf: MODELS_NOW, tz: MODELS_TZ, rate: 7, critDays: 3, rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable };
+  const data = { asOf: MODELS_NOW, tz: MODELS_TZ, rate: 7, critDays: 3, rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable, perfEmpty: view.perfEmpty };
   const table = (model, ratio) => ({ models: new Map([[model, { model_name: model, quota_type: 0, model_ratio: ratio }]]), groupRatio: new Map([["default", 1]]) });
   const detail = (name) => {
     const d = view.details.get(name), r = view.rows.find((item) => item.name === name);
@@ -480,8 +483,8 @@ function modelsFixture({ perfReadable = true } = {}) {
   };
   return { data, detail, view };
 }
-async function openModelsPage(t, { viewport, search = "", perfReadable = true } = {}) {
-  const fixture = modelsFixture({ perfReadable }), requests = [];
+async function openModelsPage(t, { viewport, search = "", perfReadable = true, perfMode = "all" } = {}) {
+  const fixture = modelsFixture({ perfReadable, perfMode }), requests = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
@@ -493,22 +496,37 @@ async function openModelsPage(t, { viewport, search = "", perfReadable = true } 
   return { page, requests };
 }
 
-test("模型供需（电脑）：页顶一句、四个数、主表分两段（有缺口的 6 个在前）、标签先后和颜色；点表头排序时不分段；点名字开抽屉：每天卖多少、成功率线、渠道和上游、找货帮手、谁在用", async (t) => {
+test("模型供需（电脑）：页顶一句、四个数、主表默认只列有缺口的 6 个、其余收在按钮后面（点开分两段）、标签先后和颜色；整页一屏、表在框里滚；点表头排序时不分段；点名字开抽屉：每天卖多少、成功率线、渠道和上游、找货帮手、谁在用", async (t) => {
   const { page, requests } = await openModelsPage(t, {});
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByText(MODELS_COPY.readNote("16:50"), { exact: true }).waitFor();
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
   assert.match(await kpi(MODELS_COPY.kpi.missing).innerText(), /2 个[\s\S]*估计每天少收约 ¥/);
-  assert.match(await kpi(MODELS_COPY.kpi.single).innerText(), /2 个[\s\S]*合起来占全站消费 \d+%/);
-  assert.match(await kpi(MODELS_COPY.kpi.soon).innerText(), /1 个[\s\S]*claude-sonnet-4\.6[\s\S]*主要上游余额只够约 2 天/);
+  assert.match(await kpi(MODELS_COPY.kpi.single).innerText(), /3 个[\s\S]*合起来占全站消费 \d+%/);
+  assert.match(await kpi(MODELS_COPY.kpi.soon).innerText(), /1 个[\s\S]*claude-sonnet-4\.6[\s\S]*最后一家上游约 2 天后没钱/);
   assert.match(await kpi(MODELS_COPY.kpi.rising).innerText(), /1 个[\s\S]*claude-haiku-4\.5[\s\S]*近 7 天是前 7 天的 2\.\d 倍/);
-  // 分两段：有缺口的 6 个（claude-sonnet、gpt-5、gemini、haiku、qwen、glm），没缺口的 2 个
-  assert.deepEqual(await page.locator("tr.jy-data-group").allInnerTexts(), [MODELS_COPY.segGap(6), MODELS_COPY.segNone(2)]);
+  // 默认只列有缺口的 6 个（claude-sonnet、gpt-5、gemini、haiku、qwen、glm），没缺口的 2 个收在表下面的按钮后面
   const names = () => page.locator(".jy-models-name .jy-models-linkbtn").allInnerTexts();
+  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gpt-5", "gemini-2.5-pro", "claude-haiku-4.5", "qwen3-coder", "glm-4.6"]);
+  assert.deepEqual(await page.locator("tr.jy-data-group").allInnerTexts(), [MODELS_COPY.segGap(6)]);
+  // 一屏：1440×900 整页不出滚动条；表占满剩下的高度，表头固定
+  const fits = () => page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight);
+  assert.equal(await fits(), true, "1440×900 整页不出滚动条");
+  const box = page.locator(".jy-models-panel .jy-table-scroll");
+  const panelBottom = async () => (await page.locator(".jy-models-panel").boundingBox());
+  assert.ok((await panelBottom()).height >= 220, "表那块占着剩下的高度");
+  await page.getByText(MODELS_COPY.restNote(2), { exact: true }).waitFor();
+  await page.getByRole("button", { name: MODELS_COPY.restShow(2), exact: true }).click();
+  assert.deepEqual(await page.locator("tr.jy-data-group").allInnerTexts(), [MODELS_COPY.segGap(6), MODELS_COPY.segNone(2)]);
   assert.deepEqual(await names(), ["claude-sonnet-4.6", "gpt-5", "gemini-2.5-pro", "claude-haiku-4.5", "qwen3-coder", "glm-4.6", "deepseek-v3", "gpt-5-mini"]);
+  assert.equal(await fits(), true, "展开其余以后整页还是不出滚动条（表在框里滚）");
+  // 框里能滚：滚到底，表头还在框的最上面，最后一行进到框里
+  const scrolled = await box.evaluate((node) => { node.scrollTop = node.scrollHeight; const head = node.querySelector("thead th").getBoundingClientRect(), frame = node.getBoundingClientRect(), last = node.querySelector("tbody tr:last-child").getBoundingClientRect(); return { overflow: node.scrollHeight > node.clientHeight, headTop: Math.round(head.top - frame.top), lastInside: last.bottom <= frame.bottom + 1 }; });
+  assert.deepEqual(scrolled, { overflow: true, headTop: 0, lastInside: true });
+  await box.evaluate((node) => { node.scrollTop = 0; });
   const row = (name) => page.locator("tbody tr").filter({ has: page.getByRole("button", { name: MODELS_COPY.rowOpen(name), exact: true }) });
   const tags = async (name) => (await row(name).locator(".jy-models-tags .jy-tag").allInnerTexts());
-  assert.deepEqual(await tags("claude-sonnet-4.6"), ["快断货"]);
+  assert.deepEqual(await tags("claude-sonnet-4.6"), ["快断货", "只有一家"]);
   assert.deepEqual(await tags("gpt-5"), ["卖不出去"]);
   assert.deepEqual(await tags("glm-4.6"), ["断货"]);
   assert.equal(await row("glm-4.6").locator(".jy-tag--crit").count(), 1, "断货标红");
@@ -524,7 +542,9 @@ test("模型供需（电脑）：页顶一句、四个数、主表分两段（�
   // 「怎么判断的」默认收起，展开后数字读同一份常数
   await page.getByRole("button", { name: MODELS_COPY.how.title }).click();
   await page.getByText(`请求不到 ${MODELS_VIEW.MIN_REQUESTS} 次的不判`, { exact: false }).waitFor();
-  await page.getByText(`余额不够 ${MODELS_VIEW.SOON_DAYS} 天`, { exact: false }).waitFor();
+  await page.getByText(`也不够 ${MODELS_VIEW.SOON_DAYS} 天`, { exact: false }).waitFor();
+  await page.getByText(MODELS_COPY.how.small("千分之一"), { exact: false }).waitFor();
+  await page.getByText(MODELS_COPY.how.supply, { exact: false }).waitFor();
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-page-1440x900.png` }); }
   // 点表头：按那一列排，不分段
   await page.getByRole("button", { name: MODELS_COPY.cols.model, exact: true }).click();
@@ -546,12 +566,30 @@ test("模型供需（电脑）：页顶一句、四个数、主表分两段（�
   assert.deepEqual(await drawer.locator(".jy-models-drawer-kpis dt").allInnerTexts(), [MODELS_COPY.drawer.kpiWeek, MODELS_COPY.drawer.kpiVs, MODELS_COPY.drawer.kpiSuccess, MODELS_COPY.drawer.kpiSupply]);
   // 渠道和上游：被自动停用的也列出来（灰字）
   const channels = drawer.locator("table").first();
-  assert.deepEqual(await channels.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => [tr.cells[0].innerText, tr.cells[1].innerText, tr.className])), [["高速 A", "启用", ""], ["标准 B", "启用", ""], ["高速 C", "被自动停用", "jy-models-off"]]);
+  assert.deepEqual(await channels.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => [tr.cells[0].innerText, tr.cells[1].innerText.split("\n")[0], tr.className])), [["高速 A", "启用", ""], ["标准 B", "启用", ""], ["高速 C", "被自动停用 · 11月1日 9:30", "jy-models-off"]]);
+  // 被自动停用的渠道写上停用时间和原因：太长的截短，鼠标放上去看全文；启用着的没有这一行
+  const reason = channels.locator("tbody tr").nth(2).locator(".jy-models-reason");
+  assert.match(await reason.getAttribute("title"), /^status code 401: Invalid token[\s\S]*重新生成一个 Key/);
+  assert.equal(await channels.locator("tbody tr").nth(2).locator("td").nth(1).locator(".jy-cell-two > span").first().innerText(), "被自动停用 · 11月1日 9:30", "第一行是状态和时间，第二行才是原因");
+  assert.equal(await reason.evaluate((node) => node.scrollWidth > node.clientWidth), true, "一行放不下，截短显示");
+  assert.equal(await channels.locator(".jy-models-reason").count(), 1);
+  // 几百字的原因也不撑坏这张表：渠道名不折行，最右边的跑道列还在、没被切掉，表不出横向滚动
+  const fit = await channels.evaluate((table) => {
+    const frame = table.getBoundingClientRect(), wrap = table.parentElement;
+    return [...table.querySelectorAll("tbody tr")].map((tr) => {
+      const range = document.createRange(); range.selectNodeContents(tr.cells[0]);
+      const last = tr.cells[5].getBoundingClientRect();
+      return { nameLines: range.getClientRects().length, nameWidth: Math.round(tr.cells[0].getBoundingClientRect().width), runwayText: tr.cells[5].innerText, runwayInside: last.right <= frame.right + 1 && last.width > 60, scrolls: wrap.scrollWidth > wrap.clientWidth };
+    });
+  });
+  assert.equal(fit.length, 3);
+  for (const item of fit) assert.deepEqual([item.nameLines, item.nameWidth >= 80, /约 2 天/.test(item.runwayText), item.runwayInside, item.scrolls], [1, true, true, true, false], JSON.stringify(item));
   // 找货帮手：按价格从低到高；还没在供的有「去绑定渠道」，链到那个上游的绑定渠道小窗口
   const finder = drawer.locator("table").nth(1);
   assert.deepEqual(await finder.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => tr.cells[0].innerText)), ["上游丙", "备用上游", "主力上游", "上游乙"]);
   assert.equal(await finder.getByRole("link", { name: /去绑定渠道：上游丙/ }).getAttribute("href"), "/stations?action=channels&stationId=c&bind=1");
-  assert.equal(await finder.getByRole("link", { name: /去绑定渠道：备用上游/ }).count(), 0, "已经在供的没有这个链接");
+  assert.equal(await finder.getByRole("link", { name: /去绑定渠道：主力上游/ }).count(), 0, "已经在供的没有这个链接");
+  assert.equal(await finder.getByRole("link", { name: /去绑定渠道：备用上游/ }).count(), 1, "没在供的有");
   await finder.getByText("现在主要用的", { exact: true }).waitFor();
   await finder.getByText("便宜 20%", { exact: true }).waitFor();
   await drawer.getByText(MODELS_COPY.drawer.finderNote, { exact: true }).waitFor();
@@ -567,11 +605,14 @@ test("模型供需（手机 375）：一个模型一张卡片、段标题照样�
   const { page } = await openModelsPage(t, { viewport: { width: 375, height: 812 } });
   const cards = page.locator(".jy-models-card");
   await cards.first().waitFor();
+  assert.equal(await cards.count(), 6, "手机也是默认只列有缺口的");
+  assert.deepEqual(await page.locator(".jy-models-seg").allInnerTexts(), [MODELS_COPY.segGap(6)]);
+  await page.getByRole("button", { name: MODELS_COPY.restShow(2), exact: true }).click();
   assert.equal(await cards.count(), 8);
   assert.deepEqual(await page.locator(".jy-models-seg").allInnerTexts(), [MODELS_COPY.segGap(6), MODELS_COPY.segNone(2)]);
   assert.match(await cards.first().innerText(), /claude-sonnet-4\.6[\s\S]*快断货[\s\S]*¥711\.79/);
   assert.match(await cards.first().innerText(), /比前 7 天 \+38\.8% · 97\.8%/);
-  assert.match(await cards.first().innerText(), /2 个上游 · 2 个渠道开着 · 主力上游/);
+  assert.match(await cards.first().innerText(), /1 个上游 · 2 个渠道开着 · 主力上游/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-page-375x812.png` }); }
   await cards.first().click();
@@ -583,6 +624,7 @@ test("模型供需（手机 375）：一个模型一张卡片、段标题照样�
   const channelCards = drawer.locator(".jy-models-subcards").first().locator("> li");
   assert.equal(await channelCards.count(), 3);
   assert.match(await channelCards.first().innerText(), /高速 A\s*启用[\s\S]*优先级 10 · 近 7 天占 72% · 主力上游/);
+  assert.match(await channelCards.nth(2).innerText(), /高速 C\s*被自动停用 · 11月1日 9:30[\s\S]*status code 401/);
   assert.match(await drawer.locator(".jy-models-subcards").nth(1).locator("> li").first().innerText(), /上游丙[\s\S]*还没在供[\s\S]*0\.80 倍 · 便宜 20%[\s\S]*去绑定渠道/);
   assert.ok(await channelCards.first().locator("strong, b").first().evaluate((node) => node.getBoundingClientRect().width > 40), "渠道名不是一个字一行");
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "抽屉打开也不横向滚动");
@@ -593,9 +635,29 @@ test("模型供需：成功率读不到时那一列写「读不到」、不标�
   const { page } = await openModelsPage(t, { perfReadable: false, search: "model=gpt-5" });
   await page.locator(".jy-models-drawer").getByText(MODELS_COPY.drawer.kpiWeek, { exact: true }).waitFor();
   await page.keyboard.press("Escape");
+  // 成功率读不到时 gpt-5 不判卖不出去，没有缺口，收在「其余」里
+  await page.getByRole("button", { name: /^显示其余 \d+ 个模型$/ }).click();
   const row = page.locator("tbody tr").filter({ has: page.getByRole("button", { name: MODELS_COPY.rowOpen("gpt-5"), exact: true }) });
   await row.getByText(MODELS_COPY.successUnread, { exact: true }).waitFor();
   assert.deepEqual(await row.locator(".jy-models-tags .jy-tag").allInnerTexts(), []);
+  assert.equal(await page.getByText(MODELS_COPY.perfEmpty, { exact: false }).count(), 0, "读不到不是「没有记录」，不写那句说明");
+});
+
+test("模型供需：成功率读到了但没有这个模型写「没有成功率数据」，和「请求太少」分开；整个是空的时页上多一句说明", async (t) => {
+  const partial = await openModelsPage(t, { perfMode: "partial" });
+  const gemini = partial.page.locator("tbody tr").filter({ has: partial.page.getByRole("button", { name: MODELS_COPY.rowOpen("gemini-2.5-pro"), exact: true }) });
+  await gemini.getByText(MODELS_COPY.successNodata, { exact: true }).waitFor();
+  assert.equal(await partial.page.getByText(MODELS_COPY.perfEmpty, { exact: false }).count(), 0, "只是少了一个模型，不写整页的说明");
+  assert.equal(await partial.page.getByText(MODELS_COPY.successFew, { exact: true }).count(), 0);
+  const empty = await openModelsPage(t, { perfMode: "empty" });
+  // 整页说明是带感叹号的提示条（全站的 jy-banner），不是页面底色上的一行字
+  const banner = empty.page.locator(".jy-banner", { hasText: MODELS_COPY.perfEmpty });
+  await banner.waitFor();
+  assert.equal(await banner.locator("svg, .jy-sym").count() > 0, true, "提示条带图标");
+  // 有开着的渠道的模型都写「没有成功率数据」，不标卖不出去（gpt-5 在 all 里是卖不出去）
+  assert.equal(await empty.page.getByText(MODELS_COPY.successNodata, { exact: true }).count(), 4, "默认列的 5 个有缺口的里，4 个有开着的渠道（glm 没有，写「没有开着的渠道」）");
+  assert.equal(await empty.page.locator(".jy-tag", { hasText: "卖不出去" }).count(), 0);
+  if (process.env.UI_SHOT_DIR) await empty.page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-page-perf-empty.png` });
 });
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
