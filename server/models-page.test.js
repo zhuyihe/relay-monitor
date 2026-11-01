@@ -9,6 +9,7 @@ import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget
 import { modelDetail, modelsPage, MODELS_FAIL_TTL_MS, MODELS_TTL_MS } from "./models-page.js";
 import { ERROR_SPEC } from "./own-log-store.js";
 import { HEADROOM } from "../lib/models-headroom.js";
+import { publicBaseUrl } from "./models-headroom.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 
 const H = 3600000;
@@ -297,4 +298,26 @@ test("高峰余量：渠道桶（错误日志 + 整站消费日志）超过 60 �
   assert.equal(page.headroom, null);
   assert.equal(page.rows.length, 4, "老字段照常");
   assert.equal(HEADROOM.MAX_BUCKET_ROWS, 600000);
+});
+
+test("动作链接的地址清洗：只要 http / https，别的协议（javascript: 等）给 null；去掉用户名密码、查询串、#、末尾斜杠；令牌不进链接", async (t) => {
+  assert.equal(publicBaseUrl("https://up1.test/"), "https://up1.test");
+  assert.equal(publicBaseUrl("http://up1.test:3000/sub/"), "http://up1.test:3000/sub");
+  assert.equal(publicBaseUrl("https://user:pass@up1.test/path?token=sk-secret&x=1#frag"), "https://up1.test/path");
+  for (const bad of ["javascript:alert(1)", "JavaScript://x%0aalert(1)", "data:text/html,<script>", "file:///etc/passwd", "ftp://up1.test", "//up1.test", "up1.test", "", null, undefined, "https://"]) assert.equal(publicBaseUrl(bad), null, String(bad));
+  // 整页：带 user:pass@ 的上游地址、javascript: 开头的上游地址都不会原样进响应
+  const { rt } = makeRt(t, world());
+  await withStores(rt);
+  const stations = rt.store.list();
+  stations.find((s) => s.id === "up1").baseUrl = "https://alice:hunter2@up1.test/?access_token=sk-leak";
+  stations.find((s) => s.id === "up2").baseUrl = "javascript:alert(1)";
+  const page = await modelsPage(rt, { now: NOW });
+  const links = page.headroom.links;
+  assert.deepEqual(links.upstreams.up1, { baseUrl: "https://up1.test", type: "newapi" });
+  assert.equal(links.upstreams.up2, null);
+  const text = JSON.stringify(links);
+  for (const secret of ["alice", "hunter2", "sk-leak", "access_token", "javascript", "tok"]) assert.equal(text.includes(secret), false, secret);
+  rt.store.list().find((s) => s.isOwn).baseUrl = "ftp://own.test";
+  rt._modelsPage = null;
+  assert.equal((await modelsPage(rt, { now: NOW + MODELS_TTL_MS + 1 })).headroom.links.own, null);
 });
