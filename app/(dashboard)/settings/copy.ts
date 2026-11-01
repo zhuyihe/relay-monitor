@@ -6,7 +6,7 @@ export const COPY = Object.freeze({
   // 区块名（§11：告警阈值 → 余额提醒线，历史数据留存 → 历史数据保留）
   refresh: "刷新与数据",
   retention: "历史数据保留",
-  account: "账户安全",
+  account: "账号安全",
   about: "关于",
   readFailed: "读不到系统设置",
   reading: "读取中…",
@@ -63,12 +63,12 @@ export const COPY = Object.freeze({
   cleanupHint: "设了保留天数，系统才会自动删掉更早的记录",
   lastCheck: "上次检查",
   lastDeleted: "上次删掉",
-  // 账户安全
-  accountFailed: "读不到账户信息",
-  username: "用户名",
+  // 账号安全
+  accountFailed: "读不到账号信息",
+  username: "账号",
   usernameKeep: (name: string) => `留空保持 ${name}`,
   usernameKeepAny: "留空就不改",
-  currentUser: (name: string) => `当前用户：${name}。要改用户名时填新名字，留空就不改`,
+  currentUser: (name: string) => `当前账号：${name}。要改账号时填新名字，留空就不改`,
   oldPassword: "原密码",
   newPassword: "新密码",
   confirmPassword: "确认新密码",
