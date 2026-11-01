@@ -3,7 +3,7 @@
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
 import { normalizeOffPeriods } from "../lib/consume-log.js";
-import { ALERT_RULE_KEYS, CHANNEL_EVENT_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
+import { ALERT_RULE_KEYS, CHANNEL_EVENT_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, USER_MAIL_CHANNEL_TYPES, resetNoRenewalAlertState } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
@@ -544,6 +544,8 @@ export class Store {
           if (Array.isArray(cf[k])) cf[k] = cf[k].filter((x) => x !== id);
         }
       }
+      // 给重点用户发邮件用的那个通知方式没了：选择清掉、开关一起关
+      if (notifications.rules.userMailChannelId === id) { notifications.rules.userMailChannelId = null; notifications.rules.onUserMail = false; }
       const dr = settings.dailyReport;
       if (Array.isArray(dr?.channelIds)) dr.channelIds = dr.channelIds.filter((x) => x !== id);
       return notifications.channels.length < n;
@@ -565,6 +567,18 @@ export class Store {
         if (Number.isFinite(v) && v > 0) r.etaDays = Math.max(1 / 24, Math.round(v * 10000) / 10000);
       }
       if ("etaUnit" in patch) r.etaUnit = patch.etaUnit === "hours" ? "hours" : "days";
+      // 给重点用户发邮件：用哪个通知方式（只能是已有的 smtp / resend，不存在就当没选）、充值页地址（http/https，空 = 站点地址加 /wallet）、开关（没选通知方式不能开）
+      if ("userMailChannelId" in patch) {
+        const channel = notifications.channels.find((c) => c.id === String(patch.userMailChannelId ?? "") && USER_MAIL_CHANNEL_TYPES.includes(c.type));
+        r.userMailChannelId = channel ? channel.id : null;
+      }
+      if ("userMailPayUrl" in patch) {
+        const url = String(patch.userMailPayUrl ?? "").trim();
+        if (!url) r.userMailPayUrl = "";
+        else if (/^https?:\/\/\S+$/i.test(url) && url.length <= 500) r.userMailPayUrl = url;
+      }
+      if ("onUserMail" in patch) r.onUserMail = patch.onUserMail === true;
+      if (!r.userMailChannelId) r.onUserMail = false;
       // 重点用户快用完的提醒天数：规则同上游的（非法保留原值，下限 1 小时），各存各的
       if ("userEtaDays" in patch) {
         const v = Number(patch.userEtaDays);

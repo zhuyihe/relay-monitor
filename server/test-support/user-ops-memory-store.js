@@ -2,7 +2,7 @@
 const PROGRESS_FIELDS = ["backfillCursorMs", "backfillTargetMs", "backfillStartedMs", "usageSyncedMs", "balanceSyncedMs"];
 
 export class MemoryUserOpsStore {
-  constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0, usageRowsRead: 0 }; }
+  constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.mails = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0, usageRowsRead: 0 }; }
 
   async upsertUsageHours(stationId, rows) {
     this.calls.upsertUsageHours += 1;
@@ -64,6 +64,16 @@ export class MemoryUserOpsStore {
     this.alerts.set(`${stationId}|${Number(userId)}`, { level: state.level, notifiedAt: state.notifiedAt ?? null, lastBalanceUsd: state.lastBalanceUsd ?? null });
   }
 
+  async getMailStates(stationId) {
+    const out = new Map();
+    for (const [key, state] of this.mails) { const [station, user] = key.split("|"); if (station === stationId) out.set(Number(user), { ...state }); }
+    return out;
+  }
+
+  async saveMailState(stationId, userId, state) {
+    this.mails.set(`${stationId}|${Number(userId)}`, { level: state.level, retryAt: state.retryAt ?? null, tries: Number(state.tries) || 0 });
+  }
+
   async prune(stationId, { usageBeforeMs, balanceBeforeMs }, limit = 5000) {
     let usage = 0, balance = 0;
     for (const [key, row] of this.usage) if (usage < limit && row.stationId === stationId && row.hourMs < usageBeforeMs) { this.usage.delete(key); usage += 1; }
@@ -75,5 +85,6 @@ export class MemoryUserOpsStore {
     for (const map of [this.usage, this.points]) for (const [key, row] of map) if (row.stationId === stationId) map.delete(key);
     this.progress.delete(stationId);
     for (const key of [...this.alerts.keys()]) if (key.startsWith(`${stationId}|`)) this.alerts.delete(key);
+    for (const key of [...this.mails.keys()]) if (key.startsWith(`${stationId}|`)) this.mails.delete(key);
   }
 }

@@ -12,7 +12,7 @@ const QUOTA_PER_UNIT = 500000;
 const own = { id: "own1", name: "我的站点", isOwn: true, type: "newapi", baseUrl: "https://own.test", accessToken: "tok" };
 
 // users：[{ id, username, role?, status?, balance, burn（每小时花多少美元，余额每步跟着降，用量表按小时生成） }]
-function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1", enabled: true, type: "webhook", name: "钉" }], send = null, tweak = {} } = {}) {
+function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1", enabled: true, type: "webhook", name: "钉" }], send = null, mail = null, tweak = {} } = {}) {
   resetOwnRequestBudget();
   const clock = { now: START };
   t.mock.method(Date, "now", () => clock.now);
@@ -27,7 +27,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
     const soft = { status: 200, text: async () => JSON.stringify({ success: false, message: "busy" }) };
     if (url.pathname === "/api/user/") {
       if (site.soft) return soft;
-      return reply({ total: site.users.length, items: site.users.map((user) => ({ id: user.id, username: user.username, display_name: "", role: user.role, status: user.status, quota: Math.round(user.balance * QUOTA_PER_UNIT), used_quota: 0 })) });
+      return reply({ total: site.users.length, items: site.users.map((user) => ({ id: user.id, username: user.username, display_name: "", email: user.email, role: user.role, status: user.status, quota: Math.round(user.balance * QUOTA_PER_UNIT), used_quota: 0 })) });
     }
     if (url.pathname === "/api/data/users") {
       const start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
@@ -58,7 +58,9 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
   const sent = [];
   const rt = { store: { list: () => [own], settings: { ...settings }, rules: { onUserExhaust: true, onUserEta: true, renotifyHours: 24, etaDays: 3, userEtaDays: 3, ...rules }, channels } };
   const store = new MemoryUserOpsStore();
-  const api = { ops: createUserOps(rt, { store, send: send || (async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; }) }) };
+  const mails = [];
+  const sendMail = mail || (async (channel, to, content) => { mails.push({ channelId: channel.id, to, subject: content.subject, text: content.text, html: content.html }); return { ok: true }; });
+  const api = { ops: createUserOps(rt, { store, mail: sendMail, send: send || (async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; }) }) };
   // 一步：时钟走 10 分钟，余额按每小时的花费降，然后跑一轮（api.ops 可以换成「重启以后」新建的那个）
   const step = async (options) => {
     clock.now += 10 * MIN;
@@ -67,7 +69,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
   };
   const stepsTo = async (hours) => { while (clock.now < START + hours * H) await step(); };
   const count = (path) => site.requests.filter((item) => item.startsWith(path)).length;
-  return Object.assign(api, { site, clock, rt, store, sent, step, stepsTo, count, rules: rt.store.rules, newOps: () => createUserOps(rt, { store, send: async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; } }) });
+  return Object.assign(api, { site, clock, rt, store, sent, mails, step, stepsTo, count, rules: rt.store.rules, newOps: () => createUserOps(rt, { store, mail: sendMail, send: async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; } }) });
 }
 
 // 一群用户：两位重点用户（日均 120、72）、十位中等用户（日均 48，凑出全站的八成要用到这些人）、一位小用户、一位闲置号、一位管理员
@@ -564,4 +566,152 @@ test("余额用完单独算一档：先推了「一天内快用完」（二级�
   assert.equal((await f.store.getAlertStates("own1")).get(2).level, 3);
   await f.step();
   assert.equal(sent.length, before + 1, "同一档不重复");
+});
+
+// ===== 给重点用户发邮件 =====
+const mailChannel = { id: "m1", enabled: true, type: "smtp", name: "邮件", config: { host: "smtp.test", from: "我的站点 <noreply@own.test>", to: "owner@own.test" } };
+const mailRules = { onUserMail: true, userMailChannelId: "m1" };
+// 两位重点用户：big1 钱多（不会快用完），big2 余额 220、每天花 72，约 24 小时后进 3 天，约 51 小时后进 1 天，约 73 小时用完；都填了邮箱；另有十位中等用户（凑出全站八成）
+const mailUsers = (extra = {}) => [
+  { id: 1, username: "big1", balance: 5000, burn: 5, email: "big1@mail.test" },
+  { id: 2, username: "big2", balance: 220, burn: 3, email: "big2@mail.test", ...extra },
+  ...Array.from({ length: 10 }, (_, index) => ({ id: 10 + index, username: `mid${index}`, balance: 5000, burn: 2, email: `mid${index}@mail.test` })),
+];
+const mailSite = (t, users = mailUsers(), { rules = {}, ...rest } = {}) => makeSite(t, users, { channels: [mailChannel], ...rest, rules: { renotifyHours: 0, ...mailRules, ...rules } });
+
+test("给用户发邮件：第一封在可用天数进提醒天数时，第二封在 1 天以内，用完不再发第三封；只发给重点用户、用站长选的通知方式、写自营站点的名字", async (t) => {
+  const f = mailSite(t);
+  await f.stepsTo(40);
+  assert.equal(f.mails.length, 1, f.mails.map((item) => item.subject).join("\n"));
+  const first = f.mails[0];
+  assert.deepEqual([first.channelId, first.to], ["m1", "big2@mail.test"]);
+  assert.match(first.subject, /^我的站点 账户余额快用完了，还能用约 2 天$/);
+  assert.match(first.text, /^您好，big2：/);
+  assert.match(first.text, /充值页：|去充值：https:\/\/own\.test\/wallet/);
+  assert.ok(!first.text.includes("炬元") && !first.html.includes("炬元"), "邮件里不出现控制台的名字");
+  assert.match(first.html, /href="https:\/\/own\.test\/wallet"/);
+  await f.stepsTo(60);
+  assert.equal(f.mails.length, 2);
+  assert.match(f.mails[1].subject, /^我的站点 账户余额快用完了，大约只够用 (1 天|\d+ 小时)$/);
+  await f.stepsTo(90);
+  assert.equal(f.mails.length, 2, "余额用完不再发第三封（一轮最多两封）");
+  assert.equal(f.ops.getView().users.get(2).state, "empty");
+  assert.ok(f.mails.every((item) => item.to !== "big1@mail.test" && !item.to.startsWith("mid")), "只发给重点用户里快用完的，没快用完的不发");
+  const states = await f.store.getMailStates("own1");
+  assert.deepEqual([states.get(2).level, states.get(2).retryAt], [2, null], "发成功以后清掉重试时刻");
+});
+
+test("给用户发邮件：开关默认关；关着不发也不补发——只把级别记到当前，打开以后只有新的一级才发", async (t) => {
+  const f = mailSite(t, mailUsers(), { rules: { onUserMail: false } });
+  await f.stepsTo(40);
+  assert.equal(f.mails.length, 0);
+  assert.equal((await f.store.getMailStates("own1")).get(2).level, 1, "关着也记着级别");
+  f.rules.onUserMail = true;
+  await f.stepsTo(45);
+  assert.equal(f.mails.length, 0, "打开的时候已经在第一级，不补发第一封");
+  await f.stepsTo(60);
+  assert.equal(f.mails.length, 1, "到了第二级才发第二封");
+  assert.match(f.mails[0].subject, /大约只够用/);
+});
+
+test("给用户发邮件：没选通知方式、选的被停用或不是邮件类、用户没填邮箱，都不发；没填邮箱的不写状态", async (t) => {
+  const none = mailSite(t, mailUsers(), { rules: { userMailChannelId: null } });
+  await none.stepsTo(40);
+  assert.equal(none.mails.length, 0, "没选通知方式");
+  const disabled = mailSite(t, mailUsers(), { channels: [{ ...mailChannel, enabled: false }] });
+  await disabled.stepsTo(40);
+  assert.equal(disabled.mails.length, 0);
+  const wrongType = mailSite(t, mailUsers(), { channels: [{ ...mailChannel, type: "webhook" }] });
+  await wrongType.stepsTo(40);
+  assert.equal(wrongType.mails.length, 0);
+  const noEmail = mailSite(t, mailUsers({ email: "" }));
+  await noEmail.stepsTo(40);
+  assert.equal(noEmail.mails.length, 0);
+  assert.equal((await noEmail.store.getMailStates("own1")).has(2), false, "没邮箱：不写状态，填了以后下一轮再看");
+  noEmail.site.users[1].email = "late@mail.test";
+  await noEmail.step();
+  assert.equal(noEmail.mails.length, 1, "后来填了邮箱，当前这一级补上");
+  assert.equal(noEmail.mails[0].to, "late@mail.test");
+});
+
+test("给用户发邮件：一轮最多 5 封，多的下一轮接着发", async (t) => {
+  const users = Array.from({ length: 10 }, (_, index) => ({ id: 10 + index, username: `u${index}`, balance: 220, burn: 3, email: `u${index}@mail.test` }));
+  const f = mailSite(t, users);
+  let counts = [];
+  let before = 0;
+  while (f.clock.now < START + 30 * H) {
+    await f.step();
+    if (f.mails.length !== before) { counts.push(f.mails.length - before); before = f.mails.length; }
+  }
+  assert.deepEqual(counts, [5, 3], `重点用户 8 位（占全站八成）：第一轮 5 封，下一轮 3 封（${counts}）`);
+  assert.equal(new Set(f.mails.map((item) => item.to)).size, 8, "没有重复发给同一个人");
+});
+
+test("给用户发邮件：先写级别再发；没发出去 30 分钟后再试一次，只试一次", async (t) => {
+  let calls = 0, stateAtSend = null;
+  const holder = {};
+  const mail = async (channel, to, content) => {
+    calls += 1;
+    stateAtSend = (await holder.f.store.getMailStates("own1")).get(2);
+    return { ok: false, code: "NETWORK_UNREACHABLE" };
+  };
+  const f = mailSite(t, mailUsers(), { mail });
+  holder.f = f;
+  await f.stepsTo(24);
+  while (calls === 0) await f.step();
+  assert.equal(calls, 1);
+  assert.deepEqual([stateAtSend.level, stateAtSend.tries, stateAtSend.retryAt != null], [1, 1, true], "发之前级别和重试时刻已经在库里");
+  await f.step(); await f.step();
+  assert.equal(calls, 1, "30 分钟内不重试");
+  await f.step();
+  assert.equal(calls, 2, "30 分钟后试一次");
+  for (let n = 0; n < 12; n += 1) await f.step();
+  assert.equal(calls, 2, "只试一次，再失败就不发了");
+  assert.deepEqual((await f.store.getMailStates("own1")).get(2), { level: 1, retryAt: null, tries: 2 });
+});
+
+test("给用户发邮件：重启以后不重复发（级别在库里）；充值充到够用以后重新开始一轮", async (t) => {
+  const f = mailSite(t);
+  await f.stepsTo(30);
+  assert.equal(f.mails.length, 1);
+  f.ops = f.newOps();
+  for (let n = 0; n < 6; n += 1) await f.step();
+  assert.equal(f.mails.length, 1, "重启不重复");
+  f.site.users[1].balance += 2000; // 充值：天数回到提醒线的 1.2 倍以上
+  await f.step();
+  assert.equal((await f.store.getMailStates("own1")).get(2).level, 0, "清零，重新开始一轮");
+  f.site.users[1].balance = 150; // 又降到 3 天以内
+  await f.stepsTo(32);
+  assert.equal(f.mails.length, 2, "新的一轮又发第一封");
+  assert.match(f.mails[1].subject, /账户余额快用完了/);
+});
+
+test("邮箱只在内存里：不进日志、不进库、不进整页和抽屉的响应、不进推送；发信失败也不留收件人", async (t) => {
+  const logs = [];
+  for (const name of ["log", "info", "warn", "error", "debug"]) t.mock.method(console, name, (...args) => { logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")); });
+  const f = mailSite(t, mailUsers(), { mail: async (channel, to) => ({ ok: false, code: "NETWORK_UNREACHABLE", error: `550 <${to}> user unknown` }) });
+  await f.stepsTo(60);
+  const page = await usersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+  const detail = await userDetail(f.rt, f.ops, f.store, 2, { now: f.clock.now });
+  const dump = JSON.stringify([
+    logs, page, detail, f.sent,
+    [...f.ops.getView().users.values()], f.ops.getUsers(),
+    [...f.store.usage.values()], [...f.store.points.values()], [...f.store.progress.values()], [...f.store.alerts.values()], [...f.store.mails.values()], [...f.store.mails.keys()],
+  ]);
+  assert.ok(!dump.includes("@mail.test"), "整个运行过程里没有任何用户邮箱");
+});
+
+test("给用户发邮件：用户填的邮箱带逗号、换行、尖括号的，当没填邮箱——不发、不写状态；填干净的以后下一轮补当前这一级", async (t) => {
+  const bad = ["big2@mail.test,victim@x.test", "big2@mail.test，victim@x.test", "a@b.test\r\nBcc: victim@x.test", "Big <big2@mail.test>"];
+  for (const email of bad) {
+    const f = mailSite(t, mailUsers({ email }));
+    await f.stepsTo(40);
+    assert.deepEqual(f.mails, [], JSON.stringify(email));
+    assert.equal((await f.store.getMailStates("own1")).has(2), false);
+  }
+  const f = mailSite(t, mailUsers({ email: "x@y.test,victim@x.test" }));
+  await f.stepsTo(40);
+  f.site.users[1].email = "big2@mail.test";
+  await f.step();
+  assert.deepEqual(f.mails.map((item) => item.to), ["big2@mail.test"]);
 });
