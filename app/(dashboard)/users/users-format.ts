@@ -49,14 +49,24 @@ export const backfillLine = (page: UsersPage, withTrend: boolean) => (page.backf
 // 补数据补完了、余额还没记满 24 小时
 export const balanceWarmLine = (page: UsersPage) => (page.backfill.done && page.ready.balance === false ? COPY.balanceWarm : null);
 
-// 筛选：大客户 + 状态。快用完那一类含余额用完
+// 「重点」小标签的提示：这位占近 7 天消费的百分之几，全部重点用户合起来占百分之几（两个数都取整，用页上近 7 天的消费算）；
+// 近 7 天消费还没补到、或全站是 0 时只写「重点用户」
+export function bigTipText(row: UsersRow, page: UsersPage): string {
+  const total = page.summary?.weekCost ?? 0;
+  if (!page.ready.week || !(total > 0)) return COPY.bigTipPlain;
+  const bigRows = page.users.filter((user) => user.big);
+  const group = bigRows.reduce((sum, user) => sum + user.week, 0);
+  return COPY.bigTip(Math.round((row.week / total) * 100), bigRows.length, Math.round((group / total) * 100));
+}
+
+// 筛选：重点用户 + 状态。快用完那一类含余额用完
 const lowOf = (row: UsersRow) => row.status === "soon" || row.status === "empty";
 export const matchesFilter = (row: UsersRow, only: Filter) => (only === "all" ? true : only === "low" ? lowOf(row) : only === "down" ? row.status === "down" : only === "new" ? row.isNew : row.status === "inactive");
 export function filterRows(rows: UsersRow[], { big, only, q }: { big: boolean; only: Filter; q: string }): UsersRow[] {
   const key = q.trim().toLowerCase();
   return rows.filter((row) => (!big || row.big) && matchesFilter(row, only) && (!key || row.username.toLowerCase().includes(key)));
 }
-// 每个状态的人数（跟着「只看大客户」算，搜索不影响）；还判不了的类（在下滑要补满 17 天，快用完要余额记满 24 小时）是 null，写「—」
+// 每个状态的人数（跟着「只看重点用户」算，搜索不影响）；还判不了的类（在下滑要补满 17 天，快用完要余额记满 24 小时）是 null，写「—」
 export function filterCounts(page: UsersPage, big: boolean): Record<Filter, number | null> {
   const rows = big ? page.users.filter((row) => row.big) : page.users;
   return {
@@ -128,7 +138,7 @@ export function overviewSentence(page: UsersPage): SentencePart[] {
     else parts.push(text(COPY.overview.downMany(down.length)));
     if (down.length <= 2) parts.push(text(` ${COPY.overview.down}`));
   }
-  // 快用完只说大客户；大客户名单、余额记满 24 小时之前不提
+  // 快用完只说重点用户；重点用户名单、余额记满 24 小时之前不提
   if (page.big.ready && page.ready.balance) {
     const soon = page.users.filter((row) => row.big && (row.status === "soon" || row.status === "empty")).length;
     parts.push(text("；"), soon > 0 ? { kind: "soon", text: COPY.overview.soon(soon) } : text(COPY.overview.soonNone));

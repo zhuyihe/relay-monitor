@@ -27,10 +27,12 @@
 
 /* ─── 用户表 ─── */
 .jy-users-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; }
+/* 「重点」的提示一句话放得下（antd 默认最宽 250px，会折成两行） */
+.jy-users-big-tip { max-width: min(460px, 92vw); }
 /* 名字太长时一行放不下就截断（悬停看全名），不撑高行 */
 .jy-users-name .jy-users-linkbtn { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jy-users-week { font-weight: 600; font-variant-numeric: tabular-nums; }
-/* 大客户小标记：灰框白底、11px、深灰字，不填色，比状态标签还轻 */
+/* 重点用户小标记：灰框白底、11px、深灰字，不填色，比状态标签还轻 */
 .jy-users-big {
   display: inline-block; flex: none; padding: 0 5px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r1);
   background: var(--jy-sheet); color: var(--jy-ink-2); font-size: 11px; line-height: 16px; font-weight: 400; white-space: nowrap;
@@ -47,6 +49,11 @@ table.jy-data tbody tr.is-clickable { cursor: pointer; }
 table.jy-data .jy-cell-runway { justify-content: flex-start; }
 table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 .jy-users-empty { margin: 0; padding: 32px 16px; text-align: center; }
+
+/* 用户表下面收起区里的「用户和分组」 */
+.jy-users-groups-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.jy-users-groups-head p { margin: 0; }
+.jy-users-groups-head .spacer { flex: 1; }
 
 /* 手机：一人一张卡片，三行 */
 .jy-users-cards { list-style: none; margin: 0; padding: 0; }

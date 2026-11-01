@@ -143,7 +143,7 @@ export default function SettingsPage() {
     label: COPY.expectedCost,
     save: async (v) => (await putSettings({ expectedCost: v })).expectedCost !== false,
   });
-  // 「读取用户数据」开关：一改就存；关了用户运营页和大客户提醒就不再更新，也不再对自营站点发请求
+  // 「读取用户数据」开关：一改就存；关了用户运营页和重点用户提醒就不再更新，也不再对自营站点发请求
   const userOps = useAutoSave<boolean>(true, {
     queue,
     label: COPY.userOps,

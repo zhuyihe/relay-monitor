@@ -705,7 +705,7 @@ test("accountUse（K2c）：上游账号是不是只给自营站点的渠道用�
   assert.equal(store.get(fresh.id).accountUse, null, "不认识的值当没回答，不抛错");
 });
 
-test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认开；只有明确关（false）才关；规则「大客户余额用完」「大客户快用完」默认开，通知方式只接受存在的 id，删通知方式时一起清掉", async () => {
+test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认开；只有明确关（false）才关；规则「重点用户余额用完」「重点用户快用完」默认开，通知方式只接受存在的 id，删通知方式时一起清掉", async () => {
   const store = await new Store(fakePool([])).load();
   assert.equal(store.settings.userOpsEnabled, true);
   await store.updateSettings({ userOpsEnabled: false });

@@ -7,6 +7,9 @@ import { usersPage } from "../../../server/user-ops-page.js";
 
 export const GET = withAuth(async (request, rt) => {
   const { ops, store } = userOpsOf(rt);
+  // 页面来取数 = 有人在看：续 90 秒，后台每分钟读一次用户列表和最近的用量（不等它读完，页面拿现有的；读完下一次来取就是新的）
+  ops.markViewing();
+  ops.runOnce().catch(() => {});
   // 没有数据库（store 空）时后台一轮都没跑过，usersPage 在读库前就返回 starting
   const page = await usersPage(rt, ops, store);
   if (page.unset) return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);

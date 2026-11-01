@@ -11,7 +11,7 @@ import { useDrawerEscape } from "../../components/drawer-escape";
 import { BalanceLine, Bars } from "./charts";
 import { COPY } from "./copy";
 import { BigTag, StatusTag } from "./users-tab";
-import { deltaText, lastUsedText, money, runwayText } from "./users-format";
+import { bigTipText, deltaText, lastUsedText, money, runwayText } from "./users-format";
 import type { UserDetail, UsersPage, UsersRow } from "./users-format";
 
 const HOUR_MS = 3600000;
@@ -123,7 +123,7 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
       }}
       title={
         <div className="jy-users-drawer-title">
-          <span className="who"><strong>{name}</strong>{row?.big && <BigTag />}{row && <StatusTag status={row.status} />}</span>
+          <span className="who"><strong>{name}</strong>{row?.big && <BigTag tip={bigTipText(row, page)} />}{row && <StatusTag status={row.status} />}</span>
           {row && <span className="jy-caption">{COPY.drawer.lastUsed(lastUsedText(row, page, true))}</span>}
         </div>
       }

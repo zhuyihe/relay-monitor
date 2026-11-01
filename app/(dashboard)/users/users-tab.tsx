@@ -1,8 +1,8 @@
 "use client";
 // 用户：一个用户表（design 用户运营 v6 §3、v7 §3）。默认按近 7 天消费从高到低；每列都能点表头排；
-// 上面一行：只看大客户（勾选框）| 全部 / 快用完 / 在下滑 / 新用户 / 不活跃，右边搜索；点一行开抽屉。手机是一人一张卡片。
+// 上面一行：只看重点用户（勾选框）| 全部 / 快用完 / 在下滑 / 新用户 / 不活跃，右边搜索；点一行开抽屉。手机是一人一张卡片。
 import { useMemo, useState } from "react";
-import { Grid, Input } from "antd";
+import { Grid, Input, Tooltip } from "antd";
 import { EMPTY } from "../../../lib/format";
 import { Icon } from "../../components/icons";
 import { Panel } from "../../components/panel";
@@ -11,12 +11,20 @@ import { Seg } from "../../components/seg";
 import { DataTable } from "../my/shared";
 import type { Col } from "../my/shared";
 import { SparkLine } from "./charts";
+import { UserGroups } from "./groups-panel";
 import { COPY } from "./copy";
-import { FILTERS, FILTER_LABEL, bigLabel, defaultOrder, deltaText, filterCounts, filterRows, lastUsedText, money, runwayText, sortValue, sparkValues } from "./users-format";
+import { FILTERS, FILTER_LABEL, bigLabel, bigTipText, defaultOrder, deltaText, filterCounts, filterRows, lastUsedText, money, runwayText, sortValue, sparkValues } from "./users-format";
 import type { Filter, UsersPage, UsersRow } from "./users-format";
 
-export function BigTag() {
-  return <span className="jy-users-big">{COPY.big}</span>;
+// 「重点」小标签；提示写这位占多少、全部重点用户合起来占多少。表里和抽屉里鼠标停上去（键盘聚焦、点一下）出提示；
+// 手机卡片整张是个按钮（点了开抽屉），标签里放不了第二个按钮，只带 title，抽屉标题上的那个点一下有提示
+export function BigTag({ tip, plain }: { tip: string; plain?: boolean }) {
+  if (plain) return <span className="jy-users-big" title={tip}>{COPY.big}</span>;
+  return (
+    <Tooltip title={tip} trigger={["hover", "focus", "click"]} overlayClassName="jy-users-big-tip">
+      <span className="jy-users-big" tabIndex={0} aria-label={tip} onClick={(event) => event.stopPropagation()}>{COPY.big}</span>
+    </Tooltip>
+  );
 }
 export function StatusTag({ status }: { status: UsersRow["status"] }) {
   if (!status) return null;
@@ -56,7 +64,7 @@ export function UsersTab({
   const name = (row: UsersRow) => (
     <span className="jy-users-name">
       <button type="button" className="jy-link jy-users-linkbtn" title={row.username} aria-label={COPY.users.rowOpen(row.username)} onClick={(event) => { event.stopPropagation(); onOpenUser(row.id); }}>{row.username}</button>
-      {row.big && <BigTag />}
+      {row.big && <BigTag tip={bigTipText(row, page)} />}
       {row.disabled && <span className="jy-tag jy-tag--muted">{COPY.disabled}</span>}
     </span>
   );
@@ -75,6 +83,7 @@ export function UsersTab({
   const empty = searching ? COPY.users.noMatch : page.users.length === 0 ? COPY.users.noUsers : COPY.users.noOnly;
 
   return (
+    <>
     <Panel
       title={COPY.users.tableTitle}
       className="jy-users-panel"
@@ -109,7 +118,7 @@ export function UsersTab({
               <li key={row.id}>
                 <button type="button" className="jy-users-card" aria-label={COPY.users.rowOpen(row.username)} onClick={() => onOpenUser(row.id)}>
                   <span className="r1">
-                    <span className="jy-users-name"><b>{row.username}</b>{row.big && <BigTag />}<StatusTag status={row.status} /></span>
+                    <span className="jy-users-name"><b>{row.username}</b>{row.big && <BigTag plain tip={bigTipText(row, page)} />}<StatusTag status={row.status} /></span>
                     <b className="jy-users-week">{weekOk ? money(row.week, rate) : EMPTY}</b>
                   </span>
                   <span className="r2">
@@ -141,5 +150,7 @@ export function UsersTab({
         />
       )}
     </Panel>
+    <UserGroups />
+    </>
   );
 }

@@ -1,7 +1,7 @@
 // 用户运营的后台（server/user-ops.js）：假的自营站点（用户列表、按小时用量），内存存储，假时钟；一步 10 分钟
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createUserOps } from "./user-ops.js";
+import { createUserOps, forgetUserOps } from "./user-ops.js";
 import { bigUsersSummary, userDetail, usersPage } from "./user-ops-page.js";
 import { MemoryUserOpsStore } from "./test-support/user-ops-memory-store.js";
 import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
@@ -21,6 +21,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
     const url = new URL(String(input));
     if (url.host !== "own.test") return { status: 404, text: async () => "{}" };
     site.requests.push(`${url.pathname}${url.pathname === "/api/data/users" ? `?${Number(url.searchParams.get("end_timestamp")) - Number(url.searchParams.get("start_timestamp")) > 4 * 3600 ? "day" : "recent"}` : ""}`);
+    if (site.gate) await site.gate;
     if (site.hard) return { status: 500, text: async () => "{}" };
     const reply = (data) => ({ status: 200, text: async () => JSON.stringify({ success: true, data }) });
     const soft = { status: 200, text: async () => JSON.stringify({ success: false, message: "busy" }) };
@@ -69,7 +70,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
   return Object.assign(api, { site, clock, rt, store, sent, step, stepsTo, count, rules: rt.store.rules, newOps: () => createUserOps(rt, { store, send: async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; } }) });
 }
 
-// 一群用户：两位大客户（日均 120、72）、十位中等用户（日均 48，凑出全站的八成要用到这些人）、一位小用户、一位闲置号、一位管理员
+// 一群用户：两位重点用户（日均 120、72）、十位中等用户（日均 48，凑出全站的八成要用到这些人）、一位小用户、一位闲置号、一位管理员
 const crowd = (extra = {}) => [
   { id: 1, username: "big1", balance: 280, burn: 5 },
   { id: 2, username: "big2", balance: 280, burn: 3 },
@@ -134,18 +135,18 @@ test("余额快照：变了才写，没变的每天补一条", async (t) => {
   assert.equal(points.get(2).length, 2, "b 没变，满 24 小时补了一条");
 });
 
-test("端到端：两位大客户一起快用完 → 24 小时后一条推送、按日均消费从高到低；各自降到二级再推一次；小用户不是大客户不推送；没有重复", async (t) => {
+test("端到端：两位重点用户一起快用完 → 24 小时后一条推送、按日均消费从高到低；各自降到二级再推一次；小用户不是重点用户不推送；没有重复", async (t) => {
   const f = makeSite(t, crowd(), { rules: { renotifyHours: 0 } }); // 0 = 同一级只提醒一次；每天重复提醒另有用例
   await f.stepsTo(72);
   assert.equal(f.sent.length, 3, f.sent.map((item) => `${item.title}\n${item.body}`).join("\n=====\n"));
   const [first, second, third] = f.sent;
-  assert.match(first.title, /2 位大用户/);
+  assert.equal(first.title, "【重点用户快用完】big1 等 2 位");
   assert.match(first.body.split("\n")[0], /^用户：big1 /);
   assert.match(first.body.split("\n")[1], /^用户：big2 /);
   assert.match(second.body, /用户：big1 .*余额用完|用户：big1 .*还够/);
   assert.equal(second.body.split("\n").filter((line) => line.startsWith("用户：")).length, 1);
   assert.match(third.body, /用户：big2 /);
-  assert.ok(f.sent.every((item) => !item.body.includes("small") && !item.body.includes("mid") && !item.body.includes("idle") && !item.body.includes("root")), "不是大客户、闲置号、管理员都不推");
+  assert.ok(f.sent.every((item) => !item.body.includes("small") && !item.body.includes("mid") && !item.body.includes("idle") && !item.body.includes("root")), "不是重点用户、闲置号、管理员都不推");
   const view = f.ops.getView();
   assert.equal(view.users.get(30).big, false);
   assert.ok(view.users.get(30).level >= 1, "小用户列表里照样有状态，只是不推送");
@@ -163,7 +164,7 @@ test("推送在 24 小时之后才出：快照不满 24 小时写「—」、不
   assert.equal(f.sent.length, 1);
 });
 
-test("两条规则（大客户余额用完、大客户快用完）都关：不推送，也不记提醒状态", async (t) => {
+test("两条规则（重点用户余额用完、重点用户快用完）都关：不推送，也不记提醒状态", async (t) => {
   const f = makeSite(t, crowd(), { rules: { onUserExhaust: false, onUserEta: false } });
   await f.stepsTo(40);
   assert.equal(f.sent.length, 0);
@@ -179,7 +180,7 @@ test("重启以后不重复推：提醒状态在库里", async (t) => {
   assert.equal(f.sent.length, 1, "同一级 24 小时内不重复");
 });
 
-test("充值：余额涨了，这一级的提醒清零重新计数，这一刻不推送（余额已经够）", async (t) => {
+test("充到够用：预计天数回到一级线的 1.2 倍以上，这一级的提醒清零重新计数，这一刻不推送", async (t) => {
   const f = makeSite(t, crowd());
   await f.stepsTo(25);
   assert.equal(f.sent.length, 1);
@@ -235,7 +236,7 @@ test("读用户列表失败不拖垮别的：这一轮用量照样读、错误�
 });
 
 test("一级提醒一直没好：按 renotifyHours（默认 24 小时）每天最多再提醒一次", async (t) => {
-  // 三位用户都是大客户；A 每天花 24 美元，24 小时时余额 60（还够 2.5 天，一级），到 49 小时还是一级（还够 1.5 天）
+  // 三位用户都是重点用户；A 每天花 24 美元，24 小时时余额 60（还够 2.5 天，一级），到 49 小时还是一级（还够 1.5 天）
   const f = makeSite(t, [{ id: 1, username: "A", balance: 84, burn: 1 }, { id: 2, username: "B", balance: 9000, burn: 1 }, { id: 3, username: "C", balance: 9000, burn: 1 }], { rules: { renotifyHours: 24 } });
   await f.stepsTo(24 + 23);
   assert.equal(f.sent.length, 1, "A 一级推过一次，23 小时后还没到再提醒的时候");
@@ -246,7 +247,7 @@ test("一级提醒一直没好：按 renotifyHours（默认 24 小时）每天�
 // ===== 用户运营页的接口（server/user-ops-page.js）=====
 const pageOf = (f) => usersPage(f.rt, f.ops, f.store, { now: f.clock.now });
 
-test("整页：补完 30 天以后，用户表、概览的数、大客户、趋势都出来；状态来自余额和用量", async (t) => {
+test("整页：补完 30 天以后，用户表、概览的数、重点用户、趋势都出来；状态来自余额和用量", async (t) => {
   const f = makeSite(t, crowd());
   for (let run = 0; run < 12; run += 1) await f.step();
   const page = await pageOf(f);
@@ -266,7 +267,7 @@ test("整页：补完 30 天以后，用户表、概览的数、大客户、趋�
   assert.equal(page.users.find((row) => row.username === "idle").status, null);
 });
 
-test("整页：回补没补完时，比前 7 天、在下滑这些不判，大客户不出；没读到过数时是 starting", async (t) => {
+test("整页：回补没补完时，比前 7 天、在下滑这些不判，重点用户不出；没读到过数时是 starting", async (t) => {
   const f = makeSite(t, crowd());
   const before = await pageOf(f);
   assert.equal(before.starting, true);
@@ -381,7 +382,7 @@ test("某一种的通知方式没送到：只退回这一种的提醒状态（�
   assert.ok(states.get(2).level >= 1, "快用完记了已发");
 });
 
-test("告警中心那句「现在是 N 个大客户」的名单：近 7 天补到以后才有，按每天花得多的排；没补到是 ready: false、名单空；没设置自营站点是 unset", async (t) => {
+test("告警中心那句「现在是 N 个重点用户」的名单：近 7 天补到以后才有，按每天花得多的排；没补到是 ready: false、名单空；没设置自营站点是 unset", async (t) => {
   const f = makeSite(t, crowd());
   assert.deepEqual(bigUsersSummary(f.rt, f.ops, { now: f.clock.now }), { ready: false, big: [] }, "一轮都没跑");
   await f.step();
@@ -407,4 +408,127 @@ test("预收「比 7 天前」：快照满 7 天才有；7 天前的预收 = 那
   // 起点后 24 小时（= 现在往前 7 天）：big1 280−120、big2 280−72、十位中等用户各 5000−48、small 3−2.4、idle 0
   assert.ok(Math.abs(page.summary.prepaidAgo - (160 + 208 + 10 * 4952 + 0.6)) < 0.01, String(page.summary.prepaidAgo));
   assert.ok(page.summary.prepaid < page.summary.prepaidAgo, "余额一直在降");
+});
+
+test("删除自营站点（或改地址）时正在跑的那一轮：迟到的写不会把数据写回来，下一轮从头来", async (t) => {
+  const f = makeSite(t, crowd());
+  f.rt.pool = {};
+  f.rt._userOpsStore = f.store;
+  await f.step();
+  assert.ok((await f.store.listUsageHours("own1", 0)).length > 0);
+  let release;
+  f.site.gate = new Promise((resolve) => { release = resolve; });
+  const running = f.step(); // 对自营站点的第一个请求挂住
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await forgetUserOps(f.rt, "own1");
+  release();
+  assert.deepEqual(await running, { skipped: "changed" }, "站点没了，这一轮结束，不记成错误");
+  assert.equal((await f.store.listUsageHours("own1", 0)).length, 0);
+  assert.equal((await f.store.listBalancePoints("own1", 0)).size, 0);
+  assert.equal(await f.store.getProgress("own1"), null, "进度行没有被写回来（写回来的话回补目标是空的，一路往 1970 年读）");
+  assert.equal(f.ops.getView(), null);
+  f.site.gate = null;
+  const next = await f.step();
+  assert.equal(next.backfill.steps, 3, "下一轮从头回补");
+  assert.ok((await f.store.getProgress("own1")).backfillTargetMs > START - 31 * 24 * H);
+  assert.equal(f.ops._state.lastUsers.length, f.site.users.length, "用户列表是新读的");
+});
+
+test("回补进度行只有半截（回补目标是空的）：重新初始化，不会一路往 1970 年读", async (t) => {
+  const f = makeSite(t, crowd());
+  await f.store.saveProgress("own1", { backfillCursorMs: START, balanceSyncedMs: START });
+  const out = await f.step();
+  assert.equal(out.backfill.steps, 3);
+  const progress = await f.store.getProgress("own1");
+  assert.ok(progress.backfillTargetMs > START - 31 * 24 * H && progress.backfillTargetMs < START - 29 * 24 * H, String(progress.backfillTargetMs));
+  assert.equal(f.count("/api/data/users?day"), 3);
+});
+
+test("一直在充小额：余额每小时都在涨、预计天数一直在提醒线以内，不会每小时推一次", async (t) => {
+  const f = makeSite(t, crowd());
+  await f.stepsTo(25);
+  assert.equal(f.sent.length, 1);
+  for (let hour = 0; hour < 22; hour += 1) {
+    for (let n = 0; n < 6; n += 1) await f.step();
+    f.site.users[0].balance += 6; // big1 每小时花 5，充 6：余额涨，预计天数还在 3 天以内
+  }
+  assert.equal(f.sent.length, 1, f.sent.map((item) => item.title).join("\n"));
+});
+
+// ===== 有人在看：每分钟一档 =====
+const minuteStep = (f) => async () => {
+  f.clock.now += MIN;
+  for (const user of f.site.users) if (user.burn > 0) user.balance = Math.max(0, user.balance - user.burn / 60);
+  return f.ops.runOnce();
+};
+
+test("页面开着（页面来取数续 90 秒）：每分钟读一次用户列表和最近 3 小时的用量，不写快照；到 10 分钟照旧整轮；没人看就只有 10 分钟一档", async (t) => {
+  const f = makeSite(t, crowd());
+  for (let run = 0; run < 12; run += 1) await f.step(); // 回补补完，整轮刚跑过
+  const minute = minuteStep(f);
+  // 没人看：1 分钟后什么都不读
+  let before = f.site.requests.length;
+  assert.deepEqual(await minute(), { skipped: "interval" });
+  assert.equal(f.site.requests.length, before);
+  // 有人看：每分钟 2 个请求（用户列表 1 + data/users 最近几个小时 1），不写余额快照
+  const points = f.store.calls.addBalancePoints;
+  f.ops.markViewing();
+  before = f.site.requests.length;
+  const live = await minute();
+  assert.equal(live.live, true);
+  assert.deepEqual(f.site.requests.slice(before), ["/api/user/", "/api/data/users?recent"]);
+  assert.equal(f.store.calls.addBalancePoints, points, "实时一档不写快照");
+  // 没有页面再来取：下一分钟就不读了
+  assert.deepEqual(await minute(), { skipped: "interval" });
+  // 页面来取一次续 90 秒：89 秒后还算在看，91 秒后不算
+  f.ops.markViewing();
+  f.clock.now += 89000;
+  assert.equal((await f.ops.runOnce()).live, true);
+  f.ops.markViewing();
+  f.clock.now += 91000;
+  assert.deepEqual(await f.ops.runOnce(), { skipped: "interval" });
+  // 页面每分钟来一次：一直是实时一档；第 10 分钟整轮到点，照旧写快照、重算
+  f.ops.markViewing();
+  while (f.clock.now < f.ops.getView().at + 9 * MIN) { f.ops.markViewing(); assert.equal((await minute()).live, true, String(f.clock.now - f.ops.getView().at)); }
+  f.ops.markViewing();
+  const full = await minute();
+  assert.equal(full.live, undefined, "第 10 分钟是整轮");
+  assert.ok(f.store.calls.addBalancePoints > points && full.snapshots > 0);
+  assert.equal(f.ops.getView().at, f.clock.now, "整轮重算了");
+});
+
+test("实时一档：页面上的余额、数据截至的时刻每分钟更新；还能用几天、重点用户、提醒不动；额度紧时不读", async (t) => {
+  const f = makeSite(t, crowd());
+  for (let run = 0; run < 12; run += 1) await f.step();
+  const minute = minuteStep(f);
+  const first = await pageOf(f);
+  const fullAt = f.ops.getView().at;
+  assert.equal(first.syncedMs, fullAt);
+  f.ops.markViewing();
+  await minute();
+  const page = await pageOf(f);
+  assert.ok(page !== first, "数更新了，整页重算");
+  assert.equal(page.syncedMs, f.clock.now);
+  const big1 = f.site.users.find((user) => user.username === "big1");
+  assert.ok(Math.abs(page.users.find((row) => row.username === "big1").balanceUsd - big1.balance) < 1e-4, "余额是这一分钟读到的");
+  assert.equal(f.ops.getView().at, fullAt, "整轮的结果（可用天数、重点用户）没重算");
+  assert.equal(await pageOf(f), page, "同一时刻再取：用缓存");
+  for (let n = 0; n < 220; n += 1) noteOwnRequest("https://own.test/api/x", { status: 200, now: f.clock.now });
+  f.ops.markViewing();
+  const before = f.site.requests.length;
+  assert.deepEqual(await minute(), { skipped: "budget" });
+  assert.equal(f.site.requests.length, before, "额度紧：一个请求都不发");
+});
+
+test("实时一档：回补没补完时接着补，页面上的补全进度跟着走；对自营站点每分钟的请求：用户列表 1 + data/users 1，回补最多再加 3", async (t) => {
+  const f = makeSite(t, crowd());
+  await f.step();
+  assert.equal(f.ops.getView().backfill.days, 3);
+  const minute = minuteStep(f);
+  f.ops.markViewing();
+  const before = f.site.requests.length;
+  const out = await minute();
+  assert.equal(out.backfill.steps, 3);
+  assert.equal(f.ops.getView().backfill.days, 6, "补全进度跟着走");
+  assert.equal(f.site.requests.length - before, 5, "用户列表 1 + 最近 3 小时 1 + 回补 3");
 });

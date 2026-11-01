@@ -16,7 +16,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 
 const { COPY } = await import("./copy.ts");
 const {
-  backfillEta, backfillLine, balanceWarmLine, bigLabel, defaultOrder, deltaText, filterCounts, filterRows, lastUsedText, money, overviewKpis, overviewSentence,
+  backfillEta, backfillLine, balanceWarmLine, bigLabel, bigTipText, defaultOrder, deltaText, filterCounts, filterRows, lastUsedText, money, overviewKpis, overviewSentence,
   parseOnly, parseTab, runwayText, seriesOf, sortValue, sparkValues, SOON_LINK,
 } = await import("./users-format.ts");
 const { EMPTY } = await import("../../../lib/format.js");
@@ -53,7 +53,7 @@ test("钱按汇率换算：没有数写「—」，不写 0", () => {
   assert.equal(money(0, 7.5), "¥0.00");
 });
 
-test("筛选：只看大客户和状态能叠着用；「快用完」含余额用完；搜索不分大小写", () => {
+test("筛选：只看重点用户和状态能叠着用；「快用完」含余额用完；搜索不分大小写", () => {
   const users = [
     row({ id: 1, username: "Orange", big: true, status: "soon", week: 300 }),
     row({ id: 2, username: "wu", big: true, status: "empty", week: 200 }),
@@ -67,12 +67,12 @@ test("筛选：只看大客户和状态能叠着用；「快用完」含余额�
   assert.deepEqual(ids(filterRows(users, { big: false, only: "all", q: "" })), [1, 2, 3, 4, 5, 6, 7]);
   assert.deepEqual(ids(filterRows(users, { big: true, only: "all", q: "" })), [1, 2, 4]);
   assert.deepEqual(ids(filterRows(users, { big: false, only: "low", q: "" })), [1, 2, 3], "快用完含余额用完");
-  assert.deepEqual(ids(filterRows(users, { big: true, only: "low", q: "" })), [1, 2], "从概览点「N 个大客户快用完」过来的那一屏");
+  assert.deepEqual(ids(filterRows(users, { big: true, only: "low", q: "" })), [1, 2], "从概览点「N 个重点用户快用完」过来的那一屏");
   assert.deepEqual(ids(filterRows(users, { big: false, only: "down", q: "" })), [4]);
   assert.deepEqual(ids(filterRows(users, { big: false, only: "new", q: "" })), [5]);
   assert.deepEqual(ids(filterRows(users, { big: false, only: "idle", q: "" })), [6]);
   assert.deepEqual(ids(filterRows(users, { big: false, only: "all", q: "  ORANGE " })), [1]);
-  assert.deepEqual(filterCounts(page({ users }), true), { all: 3, low: 2, down: 1, new: 0, idle: 0 }, "勾上大客户，个数只算大客户");
+  assert.deepEqual(filterCounts(page({ users }), true), { all: 3, low: 2, down: 1, new: 0, idle: 0 }, "勾上重点用户，个数只算重点用户");
   assert.deepEqual(filterCounts(page({ users }), false), { all: 7, low: 3, down: 1, new: 1, idle: 1 });
 });
 
@@ -82,9 +82,21 @@ test("还判不了的类个数是 null（页面写「—」）：在下滑要补
   assert.deepEqual(counts, { all: 1, low: null, down: null, new: 1, idle: null });
 });
 
-test("「只看大客户 N」：名单还没算出来（近 7 天没补到）写「—」", () => {
+test("「只看重点用户 N」：名单还没算出来（近 7 天没补到）写「—」", () => {
   assert.equal(bigLabel(page({ big: { ready: true, ids: [1, 2, 3], count: 3 } })), COPY.users.onlyBig("3"));
   assert.equal(bigLabel(page({ big: { ready: false, ids: [], count: 0 } })), COPY.users.onlyBig(EMPTY));
+});
+
+test("「重点」小标签的提示：这位占近 7 天消费的百分之几、重点用户合起来占百分之几（取整）；没补到近 7 天或全站是 0 只写「重点用户」", () => {
+  const users = [
+    row({ id: 1, username: "a", big: true, week: 260 }), row({ id: 2, username: "b", big: true, week: 570 }),
+    row({ id: 3, username: "c", big: false, week: 170 }),
+  ];
+  const p = page({ users, summary: { ...page().summary, weekCost: 1000 } });
+  assert.equal(bigTipText(users[0], p), "重点用户：占近 7 天消费 26%。2 个重点用户合起来占 83%");
+  assert.equal(bigTipText(users[1], p), "重点用户：占近 7 天消费 57%。2 个重点用户合起来占 83%");
+  assert.equal(bigTipText(users[0], page({ users, ready: { ...READY, week: false } })), COPY.bigTipPlain);
+  assert.equal(bigTipText(users[0], page({ users, summary: { ...page().summary, weekCost: 0 } })), COPY.bigTipPlain);
 });
 
 test("默认排法：近 7 天消费从高到低，一样多按今天，再按名字", () => {
@@ -135,7 +147,7 @@ test("小趋势线：补数据还没补到的天是 null，从昨天往前数补
   assert.deepEqual(sparkValues(r, 0), Array(14).fill(null));
 });
 
-test("概览那一句（补满以后）：近 7 天、比前 7 天、涨得最多、在下滑、几个大客户快用完", () => {
+test("概览那一句（补满以后）：近 7 天、比前 7 天、涨得最多、在下滑、几个重点用户快用完", () => {
   const users = [
     row({ id: 1, username: "orange-lab", week: 400, prevWeek: 340 }),
     row({ id: 2, username: "wang-lab", week: 100, prevWeek: 300, status: "down" }),
@@ -144,18 +156,18 @@ test("概览那一句（补满以后）：近 7 天、比前 7 天、涨得最�
     row({ id: 5, username: "small", status: "soon", week: 5, prevWeek: 5 }),
   ];
   const parts = overviewSentence(page({ users }));
-  assert.equal(text(parts), "近 7 天用户消费 ¥1,000.00，比前 7 天少 20.0%；orange-lab 涨得最多（+¥60.00），wang-lab 在下滑；2 个大客户快用完。");
+  assert.equal(text(parts), "近 7 天用户消费 ¥1,000.00，比前 7 天少 20.0%；orange-lab 涨得最多（+¥60.00），wang-lab 在下滑；2 个重点用户快用完。");
   assert.deepEqual(parts.filter((part) => part.kind === "user").map((part) => [part.id, part.name]), [[1, "orange-lab"], [2, "wang-lab"]], "两个名字是链接，点了开抽屉");
-  assert.equal(parts.filter((part) => part.kind === "soon").length, 1, "「N 个大客户快用完」是链接");
+  assert.equal(parts.filter((part) => part.kind === "soon").length, 1, "「N 个重点用户快用完」是链接");
   assert.equal(SOON_LINK, "/users?tab=users&big=1&only=low");
 });
 
-test("概览那一句：不是大客户的快用完不提；没有快用完的大客户写原话、不加链接；没有在下滑的不写那半句；三个以上在下滑只写个数", () => {
+test("概览那一句：不是重点用户的快用完不提；没有快用完的重点用户写原话、不加链接；没有在下滑的不写那半句；三个以上在下滑只写个数", () => {
   const base = [row({ id: 1, username: "a", week: 130, prevWeek: 100 }), row({ id: 2, username: "b", status: "soon", week: 5, prevWeek: 5 })];
   const none = overviewSentence(page({ users: base }));
-  assert.match(text(none), /；没有快用完的大客户。$/);
+  assert.match(text(none), /；没有快用完的重点用户。$/);
   assert.ok(!text(none).includes("在下滑"));
-  assert.ok(!text(none).includes("b"), "不是大客户的快用完，这句话不提");
+  assert.ok(!text(none).includes("b"), "不是重点用户的快用完，这句话不提");
   assert.equal(none.filter((part) => part.kind === "soon").length, 0);
   const downs = ["d1", "d2", "d3"].map((name, index) => row({ id: 10 + index, username: name, status: "down", week: 10, prevWeek: 100 + index }));
   assert.match(text(overviewSentence(page({ users: downs }))), /3 个用户在下滑/);
@@ -163,7 +175,7 @@ test("概览那一句：不是大客户的快用完不提；没有快用完的�
   assert.match(two, /d2、d1 在下滑|d1、d2 在下滑/);
 });
 
-test("概览那一句：前 7 天没有消费、持平、涨了；名单没算出来（近 7 天没补到）或余额没记满时不提大客户", () => {
+test("概览那一句：前 7 天没有消费、持平、涨了；名单没算出来（近 7 天没补到）或余额没记满时不提重点用户", () => {
   const flat = overviewSentence(page({ summary: { ...page().summary, weekCost: 100, prevWeekCost: 100 }, users: [] }));
   assert.match(text(flat), /和前 7 天一样/);
   const first = overviewSentence(page({ summary: { ...page().summary, weekCost: 100, prevWeekCost: 0 }, users: [] }));
@@ -171,9 +183,9 @@ test("概览那一句：前 7 天没有消费、持平、涨了；名单没算�
   const up = overviewSentence(page({ summary: { ...page().summary, weekCost: 150, prevWeekCost: 100 }, users: [] }));
   assert.match(text(up), /比前 7 天多 50.0%/);
   const noBig = text(overviewSentence(page({ big: { ready: false, ids: [], count: 0 }, users: [] })));
-  assert.ok(!noBig.includes("大客户"));
+  assert.ok(!noBig.includes("重点用户"));
   const warming = text(overviewSentence(page({ ready: { ...READY, balance: false }, users: [] })));
-  assert.ok(!warming.includes("大客户"), "余额没记满 24 小时不判快用完，也就不说「没有快用完的大客户」");
+  assert.ok(!warming.includes("重点用户"), "余额没记满 24 小时不判快用完，也就不说「没有快用完的重点用户」");
 });
 
 test("概览那一句（补数据中）：只说近 7 天消费，后面写「补满以后再说谁在涨、谁在掉」，不点名、不提快用完", () => {

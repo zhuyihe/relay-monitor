@@ -20,7 +20,10 @@ export const COPY = Object.freeze({
   etaMinutes: (n: number) => `${n} 分钟`,
   etaHours: (n: number) => `${n} 小时`,
   status: Object.freeze({ empty: BALANCE_STATE_TEXT.empty, soon: BALANCE_STATE_TEXT.soon, down: "在下滑", inactive: "不活跃", new: "新用户" } as Record<UserStatus, string>),
-  big: "大客户",
+  // 表里、卡片上、抽屉标题上的小标签只写「重点」（地方窄），鼠标停上去（抽屉里点一下）写全 bigTip
+  big: "重点",
+  bigTip: (own: number, count: number, group: number) => `重点用户：占近 7 天消费 ${own}%。${count} 个重点用户合起来占 ${group}%`,
+  bigTipPlain: "重点用户",
   disabled: "已禁用",
   // 概览
   overview: Object.freeze({
@@ -33,8 +36,8 @@ export const COPY = Object.freeze({
     riser: (delta: string) => ` 涨得最多（${delta}）`,
     down: "在下滑",
     downMany: (n: number) => `${n} 个用户在下滑`,
-    soon: (n: number) => `${n} 个大客户快用完`,
-    soonNone: "没有快用完的大客户",
+    soon: (n: number) => `${n} 个重点用户快用完`,
+    soonNone: "没有快用完的重点用户",
     afterFill: "补满以后再说谁在涨、谁在掉。",
     kpiToday: "今天消费",
     kpiWeek: "近 7 天消费",
@@ -66,7 +69,7 @@ export const COPY = Object.freeze({
   // 用户页签
   users: Object.freeze({
     tableTitle: "用户",
-    onlyBig: (n: string) => `只看大客户 ${n}`,
+    onlyBig: (n: string) => `只看重点用户 ${n}`,
     filterLabel: "状态筛选",
     filterAll: "全部",
     search: "搜索用户",
@@ -87,6 +90,14 @@ export const COPY = Object.freeze({
     cardDays: (days: string) => `可用天数 ${days}`,
     rowOpen: (name: string) => `打开 ${name} 的详情`,
     staleNote: "用户数据超过 30 分钟没读到，下面是上一次读到的。",
+  }),
+  // 用户表下面收起区里的「用户和分组」（原来在自营业务的「用户」标签里，原样搬过来）
+  groups: Object.freeze({
+    title: "用户和分组",
+    sub: "按消费从高到低，最多 15 项，用来找出是谁在哪个分组涨了。",
+    caption: "用户与分组组合的消费",
+    rangeLabel: "时间范围",
+    unreadable: "读不到用户和分组的消费",
   }),
   // 抽屉
   drawer: Object.freeze({

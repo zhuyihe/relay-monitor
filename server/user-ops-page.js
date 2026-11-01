@@ -1,6 +1,6 @@
 // 用户运营页的接口（概览、用户两个页签和抽屉）：读后台采集存下来的东西（server/user-ops.js），不发请求给自营站点——
 // 唯一的例外是抽屉里的「按模型分」：点开一个用户才读 /api/data/?username=，按用户名缓存 10 分钟，同一时间只读一个，额度紧就不读。
-// 每 10 分钟采集一轮、页面算一次（按采集那一轮的时刻缓存），页面每分钟来取也不会重算；
+// 每 10 分钟采集一轮（有人在看时每分钟再读一次用户列表和最近的用量）、页面算一次（按最近一次读到的时刻缓存），页面每分钟来取，数没更新就不重算；
 // 按天的消费：整天（已经结束、而且回补读到了的）算一次就记在内存里，每次只重读最近两天的按小时用量。
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { rateSnapshotOf } from "../lib/profit.js";
@@ -25,7 +25,8 @@ export async function usersPage(rt, ops, store, { now = Date.now() } = {}) {
   const view = ops.getView(), users = ops.getUsers();
   if (!view || !users) return emptyHint(own, rate, now);
   const tz = businessTimeZone();
-  const key = `${view.at}|${tz}|${own.id}|${rate}`;
+  const liveAt = ops.getLiveAt();
+  const key = `${liveAt}|${tz}|${own.id}|${rate}`;
   if (rt._userOpsPageCache?.key === key) return rt._userOpsPageCache.payload;
 
   const grid = dayGrid(now, tz);
@@ -70,7 +71,7 @@ export async function usersPage(rt, ops, store, { now = Date.now() } = {}) {
   for (const day of cache.days.keys()) if (day < grid.keys[0]) cache.days.delete(day);
 
   // 余额快照最早一条的时刻、7 天前的预收：后台那一轮已经算好放在 view 里，页面不再读快照
-  const payload = { ...buildUsersView({ now, tz, users, daily, recentHours, runways: view.users, backfill: view.backfill, pointsFirstMs: view.pointsFirstMs, prepaidAgo: view.prepaidAgo, syncedMs: view.at, fresh: view.fresh }), rate, ownStationId: own.id, level1Days: view.level1Days };
+  const payload = { ...buildUsersView({ now, tz, users, daily, recentHours, runways: view.users, backfill: view.backfill, pointsFirstMs: view.pointsFirstMs, prepaidAgo: view.prepaidAgo, syncedMs: liveAt, fresh: view.fresh }), rate, ownStationId: own.id, level1Days: view.level1Days };
   rt._userOpsPageCache = { key, payload };
   return payload;
 }
@@ -129,7 +130,7 @@ export async function userDetail(rt, ops, store, id, { now = Date.now() } = {}) 
   return { ...detail, user: row || null, rate: page.rate, ready: page.ready, backfill: page.backfill, models };
 }
 
-// 告警中心「用户」一组里「现在是 N 个：……」那一句要的数：大客户名单，按每天花得多的排；近 7 天还没补到时 ready 是 false、名单空。
+// 告警中心「用户」一组里「现在是 N 个：……」那一句要的数：重点用户名单，按每天花得多的排；近 7 天还没补到时 ready 是 false、名单空。
 // 只读后台算好的（不读库、不读自营站点）
 export function bigUsersSummary(rt, ops, { now = Date.now() } = {}) {
   const own = ownOf(rt);

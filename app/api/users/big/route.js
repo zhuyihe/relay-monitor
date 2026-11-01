@@ -1,4 +1,4 @@
-// GET /api/users/big —— 告警中心「用户」一组里「现在是 N 个大客户：……」要的名单：后台算好的，不读库、不读自营站点。
+// GET /api/users/big —— 告警中心「用户」一组里「现在是 N 个重点用户：……」要的名单：后台算好的，不读库、不读自营站点。
 // ready 是 false（近 7 天还没补到）时名单是空的，页面写「数据补全中」。没设置自营站点是 400 OWN_STATION_UNSET。
 import { withAuth, json } from "../../../../lib/api.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";

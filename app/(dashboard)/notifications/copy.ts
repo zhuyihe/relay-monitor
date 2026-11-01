@@ -54,17 +54,17 @@ export const COPY = Object.freeze({
   errAfter: "才通知（填 1 就是第一次读不到就通知）",
   errLabel: "连续读不到的次数",
   times: "次",
-  // 「用户」一组（大客户余额用完、快用完；design 用户运营 v7 §5）
+  // 「用户」一组（重点用户余额用完、快用完；design 用户运营 v7 §5）
   users: Object.freeze({
     group: "用户",
-    bigLead: (n: number) => `合起来占全站消费八成的用户算大客户（至少 3 个），现在是 ${n} 个：`,
+    bigLead: (n: number) => `合起来占全站消费八成的用户算重点用户（至少 3 个），现在是 ${n} 个：`,
     bigTail: "。系统按近 7 天的消费自己算，不用手动加减。",
-    bigFilling: "数据补全中，补完近 7 天就能算出大客户。",
-    onlyBig: "下面两条只管大客户；别的用户快用完、余额用完，只在用户运营页标出来，不推送。",
-    exhaust: "大客户余额用完",
-    exhaustDesc: "大客户的余额用完时通知",
-    eta: "大客户快用完",
-    etaDesc: "大客户的可用天数进提醒天数以内时通知；几个一起快用完时，每天花得多的排在前面",
+    bigFilling: "数据补全中，补完近 7 天就能算出重点用户。",
+    onlyBig: "下面两条只管重点用户；别的用户快用完、余额用完，只在用户运营页标出来，不推送。",
+    exhaust: "重点用户余额用完",
+    exhaustDesc: "重点用户的余额用完时通知",
+    eta: "重点用户快用完",
+    etaDesc: "重点用户的可用天数进提醒天数以内时通知；几个一起快用完时，每天花得多的排在前面",
     etaCond: (window: string) => `可用天数在 ${window}以内时提醒，和上面「${BALANCE_STATE_TEXT.soon}」用同一个提醒天数。`,
   }),
   // 提醒节奏

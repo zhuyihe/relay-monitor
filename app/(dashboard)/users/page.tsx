@@ -1,7 +1,7 @@
 "use client";
 // 用户运营：自营站点上用户的消费、余额，谁在涨、谁在掉、谁快用完了（design 用户运营 v5–v7）。
 // 数据来自 /api/users（后台每 10 分钟采集一轮，页面每 60 秒来取，不会多读自营站点）；顶栏没有时间范围：这一页的数口径固定（今天、近 7 天、近 30 天）。
-// 页签、「只看大客户」、状态筛选、打开的用户都写进地址栏，刷新、分享链接、后退键都回到同一屏。
+// 页签、「只看重点用户」、状态筛选、打开的用户都写进地址栏，刷新、分享链接、后退键都回到同一屏。
 import "../../styles/pages/users.css";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";

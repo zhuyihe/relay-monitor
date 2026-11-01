@@ -68,7 +68,7 @@ const RULES = ALERT_RULES.map((rule) => ({
   desc: (COPY.ruleDesc as Record<string, string>)[rule.ev] || "",
 }));
 
-// 「用户」一组的两条（只管大客户，server/user-ops.js）：和上面几条同一个样子，开关和「发到」一样即时存
+// 「用户」一组的两条（只管重点用户，server/user-ops.js）：和上面几条同一个样子，开关和「发到」一样即时存
 const USER_RULES = USER_ALERT_RULES.map((rule) => ({
   ev: rule.ev,
   key: rule.key,
@@ -203,7 +203,7 @@ export default function NotificationsPage() {
     },
   });
   const [channelsFor, setChannelsFor] = useState<Record<string, string[]>>({});
-  // 大客户名单（/api/users/big，后台算好的）：「用户」一组的第一行字要写现在是哪几位；没设置自营站点或读不到就不放这一组
+  // 重点用户名单（/api/users/big，后台算好的）：「用户」一组的第一行字要写现在是哪几位；没设置自营站点或读不到就不放这一组
   const [bigUsers, setBigUsers] = useState<{ ready: boolean; big: { id: number; username: string }[] } | null>(null);
 
   // 日报的预览、立即发送
