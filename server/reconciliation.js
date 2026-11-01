@@ -4071,20 +4071,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (cacheOnly && results.some((row) => row.todayReading)) rt._reconciliationPollKick?.();
       // 多天范围里没算进来的天（没固定、今天现读失败、半天）：页面写一句，不悄悄算少
       const notCountedDays = { count: daily ? new Set(daily.notCounted.map((item) => item.day)).size : 0 };
-      // 看一天时点开那一行给近 7 天的小格：更早 6 天已固定的账一起读（同一条语句，只是日期范围往前多 6 天），小格才不会把早就固定的天写成「还在读取」；
-      // 范围里的事实（整页的数、差额、固定成本）只取范围里的那几天
-      const inRange = (fact) => fact.billDate >= labels[0] && fact.billDate <= labels.at(-1);
-      const wideFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels.length === 1 ? shiftDayLabel(labels[0], -6) : labels[0], labels.at(-1)) : [];
-      const dayFacts = wideFacts.filter(inRange);
-      // 看一天时「没算进的模型」的名字从那天的明细里拿（只有那几行、一行一次）
-      const missing = new Map();
-      if (labels.length === 1) {
-        for (const fact of dayFacts.filter((item) => item.gapReason === "MODEL_PRICE_MISSING")) {
-          const row = results.find((item) => item.rule.id === fact.ruleId);
-          const entry = row ? await repository.latestLedgerEntry(fact.ruleId, row.window).catch(() => null) : null;
-          missing.set(fact.ruleId, (entry?.detail?.expected?.missingPriceModels || []).map((model) => model.model).filter(Boolean));
-        }
-      }
+      const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
       // 永远不固定的日子（KEY_CONFLICT_GAP、OWN_CONSUME_LOG_GAP 这类 sticky 原因，状态行记着）：整页按天、行的合计里「只去掉那几天」，不当成还在读取（审核 #133 第 4 轮 M3，和 R2「关过的日子」同口径）
       let stickyDays = new Map(), heldDays = new Map(), stuckDays = new Map();
       if (labels.length && results.length) {
@@ -4101,7 +4088,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const live = daily ? daily.liveKeys : new Map(labels.length === 1 && labels[0] === todayLabel ? results.filter((row) => row.upstreamKeys?.length).map((row) => [row.rule.id, row.upstreamKeys]) : []);
         keyData = { fixed, live, dayKeys: recorded };
       }
-      const page = buildProfitPage({ results, dayFacts, dailyFacts: wideFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays, keyData,
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, stickyDays, keyData,
         unreadDays: daily ? new Map([...daily.unreadDays].map(([ruleId, days]) => [ruleId, new Set(days)])) : new Map(), stuckDays, heldDays, partialDays: daily ? daily.partialDays : new Map(),
         lastSaleOf: window.preset === "today" ? (ruleIds) => lastSaleAtOf(rt._saleSeen || new Map(), ruleIds, dayKeyInTz(now, tz)) : null });
       if (rawInput.preset === "since") page.range = { ...page.range, preset: "since" };

@@ -348,7 +348,6 @@ export function ratioText(ratio: number | null | undefined) {
 // 分组和倍率「vip 分组 ×0.8」；分组读不到不写
 export const groupText = (groupName: string | null | undefined, ratio: number | null | undefined) =>
   groupName ? COPY.detail.group(groupName, ratioText(ratio) || EMPTY) : "";
-export const tokensText = (tokens: number | null | undefined) => (tokens == null ? EMPTY : formatCompact(tokens));
 export function modelUsageText(model: ProfitDetailResponse["expected"]["byModel"][number]) {
   const cache = (model.cacheReadTokens || 0) + (model.cacheWriteTokens || 0);
   return cache > 0 ? COPY.detail.usageCache(formatCompact(model.inputTokens), formatCompact(model.outputTokens), formatCompact(cache)) : COPY.detail.usage(formatCompact(model.inputTokens), formatCompact(model.outputTokens));

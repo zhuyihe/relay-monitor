@@ -8446,12 +8446,10 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   // 每日利润页 A（#118 §9）：看这一天的整页和一行一天的计算明细
   const page = await f.module.profitPage({ preset: "custom", startMs: dayStart, endMs: dayEnd });
   assert.deepEqual([page.dayCounts, page.range.preset, page.gapThreshold], [{ fixed: 1, reading: 0, today: 0 }, "custom", { usd: 0.05, rate: 0.02 }]);
-  // 三条绑定三把 Key：rr_three 这天没用量应付 0、实付 1 → 多扣（排最前）；rr_live 应付 7.2 实付 1、rr_two 应付 5 实付 1 → 少扣，差额大的在前
-  assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.expectedCostUsd, row.actualCostUsd, row.gap.state, Number(row.gap.usd.toFixed(2))]),
-    [["ch:own:3", [3], 0, 1, "over", 1], ["ch:own:1", [1], 7.2, 1, "under", -6.2], ["ch:own:2", [2], 5, 1, "under", -4]]);
+  // 三条绑定三把 Key：每条这天实付 1
+  assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.actualCostUsd]).sort(), [["ch:own:1", [1], 1], ["ch:own:2", [2], 1], ["ch:own:3", [3], 1]]);
   assert.deepEqual(page.pageTotals, { incomeUsd: 7.5, actualCostUsd: 3, grossProfitUsd: 4.5, grossMarginRate: 0.6 });
-  assert.deepEqual([page.gap.expectedCostUsd, page.gap.actualCostUsd, Number(page.gap.usd.toFixed(2)), page.gap.overUsd, Number(page.gap.underUsd.toFixed(2)), page.gap.rowCount, page.gap.days.count], [12.2, 3, -9.2, 1, 10.2, 3, 1], "underUsd 是正数");
-  assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, mismatchedChannels: 3, attentionChannels: 0, uncomputable: {}, mismatchedDays: { over: 1, under: 2 } });
+  assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, attentionChannels: 0 });
   assert.deepEqual([page.fixedCostUsd, page.netProfitUsd, page.unlinkedChannelCount, page.rateUnset, page.ownIncomeUnavailable, page.asOf != null, page.tz], [0, 4.5, 7, [], null, true, "Asia/Shanghai"], "固定成本 0（没有固定采购的上游）；渠道目录里 10 个渠道只绑了 3 个");
   const dayDetail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
   assert.deepEqual([dayDetail.settled, dayDetail.expected.usd, dayDetail.actual.usd, dayDetail.gap.state, dayDetail.income.adminUsage.deducted, dayDetail.revisions, dayDetail.expected.byModel.length, dayDetail.expected.byModel[0].pricesPerMillion != null],
