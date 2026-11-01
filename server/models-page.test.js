@@ -258,6 +258,9 @@ test("高峰余量：整页多 headroom（读库里的小时计数，不多读�
   assert.ok(row && row.peak && row.peak.hours.length >= 2, "有高峰时段");
   assert.equal(row.supply.kind === "unavailable" || row.supply.kind === "accumulating", false);
   assert.deepEqual(page.rows.map((item) => item.name), ["claude-x", "gpt-5", "glm", "deepseek-ai/DeepSeek-V3"], "老字段不变");
+  assert.equal(page.headroom.links.own, "https://own.test");
+  assert.deepEqual(Object.values(page.headroom.links.upstreams).every((link) => link == null || (/^https:\/\/up\d\.test$/.test(link.baseUrl) && link.type)), true, "只有公开地址和类型");
+  assert.equal(JSON.stringify(page.headroom.links).includes("accessToken") || JSON.stringify(page.headroom.links).includes("tok"), false);
   const before = requests.length;
   const detail = await modelDetail(rt, "gpt-5", { now: NOW });
   assert.equal(detail.headroom.name, "gpt-5");

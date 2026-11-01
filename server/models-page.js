@@ -38,7 +38,7 @@ export function runwayOf(rt, station) {
 // 上游运行时的样子（页面和抽屉都用）：Map(id → { id, name, type, runway })
 function upstreamsOf(rt) {
   return new Map(rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && !station.archivedAt)
-    .map((station) => [String(station.id), { id: String(station.id), name: stationDisplayName(station), type: station.type, runway: runwayOf(rt, station) }]));
+    .map((station) => [String(station.id), { id: String(station.id), name: stationDisplayName(station), type: station.type, baseUrl: String(station.baseUrl || "").replace(/\/+$/, "") || null, runway: runwayOf(rt, station) }]));
 }
 
 // 用户运营页认得的用户（用户名 → id），「谁在用」点名字能打开那边的用户抽屉；那边没有数据时没有链接

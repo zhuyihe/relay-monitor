@@ -76,7 +76,9 @@ export type UpstreamHeadroom = {
 };
 
 export type HeadroomPage = {
-  // ok 都有；noErrorLog 没开错误日志（reason：switchOff 控制台里关了、noRecords 开着但读到现在一条错误都没有）；accumulating 错误日志读了不到 7 天
+  // ok 都有；accumulating 错误日志读了不到 7 天；
+  // noErrorLog 没有错误日志可用：switchOff 控制台里关了「读取错误日志」（能给、上限、余量、没买到、被挡都拿不到）；
+  //   noRecords 开着但读了 ≥1 天一条错误都没有（可能站没开，也可能真没出过错）：能给、上限照样是「至少 X」（最高成交量是真的），余量、没买到、被挡写「—」
   state: "ok" | "noErrorLog" | "accumulating";
   noErrorLogReason: "switchOff" | "noRecords" | null;
   errorLog: { coveredDays: number | null; needDays: number; daysLeft: number | null }; // 读了几天、要几天、还差几天
@@ -90,6 +92,8 @@ export type HeadroomPage = {
   rows: HeadroomRow[]; // 已经排好：缺的在前按缺口 × 每次卖多少排，余的在后余量越薄越靠前，量很小的最后
   upstreams: UpstreamHeadroom[];
   numbers: HeadroomNumbers; // 「怎么算的」里的数，读 lib/models-headroom.js 的 HEADROOM 同一处
+  // 动作链接要去的地方：只有公开地址，没有令牌和账号。own 是自营站点地址（去掉末尾斜杠）；upstreams 的 key 是上游 id，读不到是 null
+  links: { own: string | null; upstreams: Record<string, { baseUrl: string; type: string } | null> };
 };
 export type HeadroomNumbers = {
   needDays: number; minAttempts: number; minSuccessShare: number; minRateLimitShare: number; limitPercentile: number;

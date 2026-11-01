@@ -27,13 +27,18 @@ export async function readHeadroom(rt, ctx) {
       const info = channelUpstream.get(Number(channel.id));
       return { channelId: Number(channel.id), name: channel.name, state: ({ 1: "on", 3: "auto" })[channel.status] || "off", models: channel.models || [], upstreamId: info?.upstreamStationId != null ? String(info.upstreamStationId) : null, ruleId: info?.ruleId ?? null };
     });
-    return buildHeadroom({
+    const result = buildHeadroom({
       now, tz,
       errorLog: { switchOn: settings.ownErrorLog !== false, cursor: errorCursor, hasRecords: latest != null },
       consume: { on: settings.expectedCost === true && !!consumeCursor, cursor: consumeCursor },
       modelHours: ctx.modelRows.map((row) => ({ model: row.key, t: row.t, requests: row.requests || 0, cost: row.cost || 0 })),
       cells: supply.cells, byModelHour: supply.byModelHour, rejectedUsers, usersById, channels, upstreams: ctx.upstreams, weekUsd: ctx.weekUsd, small: ctx.small,
     });
+    // 动作链接要去的地方：公开地址，不给令牌和账号
+    const links = { own: String(own.baseUrl || "").replace(/\/+$/, "") || null, upstreams: {} };
+    for (const card of result.page.upstreams) if (card.upstreamId != null) { const up = ctx.upstreams.get(card.upstreamId); links.upstreams[card.upstreamId] = up?.baseUrl ? { baseUrl: up.baseUrl, type: up.type } : null; }
+    result.page.links = links;
+    return result;
   } catch (error) {
     console.debug("models-headroom", error?.code || error?.message || "failed");
     return null;
