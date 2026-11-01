@@ -19,7 +19,9 @@ export type Peak = { hours: number[] };
 // 余量：能给 − 今晚要。status：
 //   short   缺（value 是负的，能给是测到的）；thin 余量少于 THIN_MARGIN（余量很薄）；ok 余量够；
 //   unknown 能给只是「至少」、而且比要的少：不能说缺（写「上限还没测到」）；none 算不出（今晚要的或能给的拿不到）
-export type Margin = { value: number | null; status: "short" | "thin" | "ok" | "unknown" | "none" };
+// kind 跟着能给（supply.kind）：测到的上限算出来的缺口写「约」；能给是「至少」时这个差其实是「最多缺」/「至少余」；accumulating / unavailable 时 value 是 null。
+// 今晚要多少里的没买到是下限、按小时测的上限又偏低，两个偏差方向相反：先统一照 kind 写，审核 2 有结论再改
+export type Margin = { value: number | null; status: "short" | "thin" | "ok" | "unknown" | "none"; kind: QuantityKind };
 
 // 建议，按这个顺序判，只给数、不替用户改站：
 //   topup      先给 X 家充值：主要供这个模型的上游里有撑不到今晚高峰结束的（hoursLeft 是还能撑几小时）
