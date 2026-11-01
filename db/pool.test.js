@@ -63,6 +63,8 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
     "ALTER TABLE reconciliation_fixed_cost_days ADD INDEX idx_fixed_cost_days_date (bill_date)",
     "ALTER TABLE own_log_cursor ADD COLUMN disabled_from_ms BIGINT NULL",
     "ALTER TABLE own_log_cursor ADD COLUMN disabled_to_ms BIGINT NULL",
+    "ALTER TABLE user_ops_alert ADD COLUMN soon_since_ms BIGINT NULL",
+    "ALTER TABLE user_ops_progress ADD COLUMN alert_pushed_ms BIGINT NULL",
   ]);
   assert.equal(alters.some((sql) => sql.includes("IF NOT EXISTS")), false);
 });
@@ -71,7 +73,7 @@ test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => 
   const pool = schemaPool({
     columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id", "ratio_observed_at_ms", "ratio_source",
       "billing_policy", "scope_version", "billing_effective_from_ms", "archived_at_ms", "accounting_floor_ms", "bound_at_ms", "cost_coverage", "provider", "canonical_key", "source_binding",
-      "key_issue_code", "key_issue_since_ms", "identity_scheme", "expected_cost_usd", "gap_reason", "tokens", "basis", "yielded", "disabled_from_ms", "disabled_to_ms"],
+      "key_issue_code", "key_issue_since_ms", "identity_scheme", "expected_cost_usd", "gap_reason", "tokens", "basis", "yielded", "disabled_from_ms", "disabled_to_ms", "soon_since_ms", "alert_pushed_ms"],
     indexes: ["idx_reconciliation_snapshot_segment", "idx_reconciliation_rule_token", "idx_fixed_cost_days_date"],
   });
   await ensureSchema(pool);

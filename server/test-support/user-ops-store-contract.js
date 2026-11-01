@@ -60,12 +60,19 @@ export function defineUserOpsStoreContract({ name, create, cleanup = async () =>
       const a = id("e"), b = id("f");
       await store.saveAlertState(a, 7, { level: 1, notifiedAt: 1000, lastBalanceUsd: 3.5 });
       await store.saveAlertState(a, 7, { level: 2, notifiedAt: 2000, lastBalanceUsd: 1.5 });
-      await store.saveAlertState(a, 8, { level: 0, notifiedAt: null, lastBalanceUsd: null });
+      await store.saveAlertState(a, 8, { level: 0, notifiedAt: null, lastBalanceUsd: null, soonSince: 7000 });
       await store.saveAlertState(b, 7, { level: 1, notifiedAt: 1, lastBalanceUsd: 1 });
       const states = await store.getAlertStates(a);
-      assert.deepEqual(states.get(7), { level: 2, notifiedAt: 2000, lastBalanceUsd: 1.5 });
-      assert.deepEqual(states.get(8), { level: 0, notifiedAt: null, lastBalanceUsd: null });
+      assert.deepEqual(states.get(7), { level: 2, notifiedAt: 2000, lastBalanceUsd: 1.5, soonSince: null });
+      assert.deepEqual(states.get(8), { level: 0, notifiedAt: null, lastBalanceUsd: null, soonSince: 7000 }, "第一次判成快用完的时刻也存（重启以后接着算）");
+      await store.saveAlertState(a, 8, { level: 0, notifiedAt: null, lastBalanceUsd: null, soonSince: null });
+      assert.equal((await store.getAlertStates(a)).get(8).soonSince, null, "清掉");
       assert.equal(states.size, 2);
+      // 上一条用户提醒推出去的时刻：站点一份，存在进度里
+      await store.saveProgress(a, { alertPushedMs: 123456 });
+      assert.equal((await store.getProgress(a)).alertPushedMs, 123456);
+      await store.saveProgress(a, { usageSyncedMs: 5 });
+      assert.equal((await store.getProgress(a)).alertPushedMs, 123456, "别的字段更新不动它");
     });
 
     await t.test("清理：只删早的、按批；删站点全清", async () => {

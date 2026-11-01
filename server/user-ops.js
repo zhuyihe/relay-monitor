@@ -15,7 +15,7 @@ import { broadcast } from "../lib/notify.js";
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { formatZonedDateTime } from "../lib/format.js";
 import { OWN_RATE_LIMIT, ownRequestState } from "../lib/own-request-budget.js";
-import { USER_BALANCE, bigUsersOf, dailyAverages, decideUserAlert, userBalanceMessage, userRunway } from "../lib/user-balance.js";
+import { USER_BALANCE, bigUsersOf, dailyAverages, planUserAlerts, userBalanceMessage, userRunway } from "../lib/user-balance.js";
 import { getOwnUsers } from "./own-helpers.js";
 import { UserOpsStore } from "./user-ops-store.js";
 
@@ -184,41 +184,51 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     return rt._userOpsView;
   }
 
-  // 站长提醒：只推送重点用户；状态先写再推，一条都没送到就退回原状态，下一轮再试
+  // 站长提醒：只推送重点用户；规矩（防刷屏）在 lib/user-balance.js 的 planUserAlerts：快用完要持续 30 分钟才推、余额用完当轮就推、
+  // 上一条推出去不满 30 分钟新触发的快用完攒着合成一条、余额用完插队时带上攒着的。
+  // 状态先写再推，一条都没送到就退回原状态（第一次判成快用完的时刻留着），下一轮再试；第一次判成快用完的时刻、上一条推出去的时刻都存在库里，重启以后接着算
   async function alerts(ops, own, at, view) {
     const rules = rt.store?.rules || {};
-    // 规则「重点用户余额用完」「重点用户快用完」（告警中心「用户」一组）：两个都关就不推
-    if (!(rules.onUserExhaust === true || rules.onUserEta === true) || !view.pushAllowed) return { pushed: 0 };
     const prevStates = await ops.getAlertStates(own.id);
-    const due = [], changed = [];
+    // 规则「重点用户余额用完」「重点用户快用完」两个都关、或者数据不靠谱（快照不满 24 小时、读到的数超过 30 分钟没更新、回补没完）：不推；
+    // 看不见这段时间的数，不能算「持续」，第一次判成快用完的时刻也清掉，数据恢复以后重新计 30 分钟
+    if (!(rules.onUserExhaust === true || rules.onUserEta === true) || !view.pushAllowed) {
+      for (const [id, prev] of prevStates) if (prev.soonSince != null) await ops.saveAlertState(own.id, id, { ...prev, soonSince: null }, at);
+      return { pushed: 0 };
+    }
+    const entries = [];
     for (const id of view.bigIds) {
       const user = view.users.get(id);
       if (!user || user.state === "warming") continue;
-      const prev = prevStates.get(id) || null;
       // 只算开着的那几种：余额用完只看「余额用完」规则，快用完（可用天数到线）只看「快用完」规则；都没开的这位当没事
       const level = user.state === "empty" ? (rules.onUserExhaust === true ? 2 : 0) : user.state === "soon" && rules.onUserEta === true ? user.level : 0;
-      const decision = decideUserAlert({ prev, runway: { ...user, level }, now: at, repushHours: Number(rules.renotifyHours) || 0, level1Days: view.level1Days });
-      if (decision.push) due.push({ user, decision, prev });
-      else if (!prev || prev.level !== decision.state.level || prev.lastBalanceUsd !== decision.state.lastBalanceUsd) changed.push({ id, state: decision.state });
+      entries.push({ id, runway: user, level, prev: prevStates.get(id) || null });
     }
-    for (const item of changed) await ops.saveAlertState(own.id, item.id, item.state, at);
-    if (!due.length) return { pushed: 0 };
-    for (const item of due) await ops.saveAlertState(own.id, item.user.id, item.decision.state, at);
+    // 不在重点用户名单里的（掉出名单、停用）：持续不再有意义，清掉
+    const inList = new Set(entries.map((entry) => entry.id));
+    for (const [id, prev] of prevStates) if (!inList.has(id) && prev.soonSince != null) await ops.saveAlertState(own.id, id, { ...prev, soonSince: null }, at);
+    const progress = await ops.getProgress(own.id);
+    const plan = planUserAlerts({ entries, now: at, repushHours: Number(rules.renotifyHours) || 0, level1Days: view.level1Days, lastPushAt: progress?.alertPushedMs ?? null });
+    for (const item of plan.updates) await ops.saveAlertState(own.id, item.id, item.state, at);
+    if (!plan.push.length) return { pushed: 0, ...(plan.held ? { held: plan.held } : {}) };
+    for (const item of plan.push) await ops.saveAlertState(own.id, item.id, item.state, at);
     alive();
-    // 余额用完、快用完各有各的「发到」：分两组，各推一条（一组里几位一起推）；哪一组一条都没送到，就把这一组的状态退回去，下一轮再试
-    const time = formatZonedDateTime(at, businessTimeZone());
-    let pushed = 0, failed = 0;
-    for (const [eventKey, group] of [["userExhaust", due.filter(({ user }) => user.state === "empty")], ["userEta", due.filter(({ user }) => user.state !== "empty")]]) {
-      if (!group.length) continue;
-      const channels = channelsForEvent(rt.store?.channels, rules, eventKey);
-      const { title, body } = userBalanceMessage(group.map(({ user }) => user), time);
-      let sent = [];
-      try { sent = await send(channels, title, body); } catch { sent = []; }
-      if (sent.some((result) => result.ok)) { pushed += group.length; continue; }
-      for (const item of group) await ops.saveAlertState(own.id, item.user.id, item.prev || { level: 0, notifiedAt: null, lastBalanceUsd: item.prev?.lastBalanceUsd ?? null }, at);
-      failed += group.length;
+    // 一条推出去（几位一起）：只有一种发到那种的「发到」；既有余额用完又有快用完（合成一条）发到两个「发到」的并集
+    const kinds = new Set(plan.push.map((item) => item.kind));
+    const byId = new Map();
+    for (const eventKey of [kinds.has("empty") ? "userExhaust" : null, kinds.has("soon") ? "userEta" : null]) {
+      if (eventKey) for (const channel of channelsForEvent(rt.store?.channels, rules, eventKey)) byId.set(channel.id, channel);
     }
-    return failed ? { pushed, failed } : { pushed };
+    const { title, body } = userBalanceMessage(plan.push.map((item) => view.users.get(item.id)), formatZonedDateTime(at, businessTimeZone()));
+    let sent = [];
+    try { sent = await send([...byId.values()], title, body); } catch { sent = []; }
+    if (sent.some((result) => result.ok)) {
+      await ops.saveProgress(own.id, { alertPushedMs: at }, at);
+      return { pushed: plan.push.length };
+    }
+    // 一条都没送到：退回级别和提醒时刻，第一次判成快用完的时刻留着，下一轮再试
+    for (const item of plan.push) await ops.saveAlertState(own.id, item.id, { level: item.prev?.level ?? 0, notifiedAt: item.prev?.notifiedAt ?? null, lastBalanceUsd: item.prev?.lastBalanceUsd ?? null, soonSince: item.state.soonSince }, at);
+    return { pushed: 0, failed: plan.push.length };
   }
 
   async function pruneIfDue(ops, own, at) {

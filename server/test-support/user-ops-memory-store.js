@@ -1,5 +1,5 @@
 // UserOpsStore 的内存实现（单测用），接口和 server/user-ops-store.js 一样，跑同一组契约用例
-const PROGRESS_FIELDS = ["backfillCursorMs", "backfillTargetMs", "backfillStartedMs", "usageSyncedMs", "balanceSyncedMs"];
+const PROGRESS_FIELDS = ["backfillCursorMs", "backfillTargetMs", "backfillStartedMs", "usageSyncedMs", "balanceSyncedMs", "alertPushedMs"];
 
 export class MemoryUserOpsStore {
   constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0, usageRowsRead: 0 }; }
@@ -61,7 +61,7 @@ export class MemoryUserOpsStore {
   }
 
   async saveAlertState(stationId, userId, state) {
-    this.alerts.set(`${stationId}|${Number(userId)}`, { level: state.level, notifiedAt: state.notifiedAt ?? null, lastBalanceUsd: state.lastBalanceUsd ?? null });
+    this.alerts.set(`${stationId}|${Number(userId)}`, { level: state.level, notifiedAt: state.notifiedAt ?? null, lastBalanceUsd: state.lastBalanceUsd ?? null, soonSince: state.soonSince ?? null });
   }
 
   async prune(stationId, { usageBeforeMs, balanceBeforeMs }, limit = 5000) {
