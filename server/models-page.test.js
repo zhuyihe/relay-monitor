@@ -130,6 +130,11 @@ test("渠道列表读不到、或按小时用量读不到：整页读不到（�
   assert.ok(requests.length > before, "失败的不缓存");
   const second = makeRt(t, { ...world(), failures: { "/api/data/": 500 } });
   await assert.rejects(modelsPage(second.rt, { now: NOW }));
+  // 站点读不到时 10 分钟内不再去读（同一个错直接给），不是每次打开页面都重读
+  const reads = () => second.requests.filter((r) => r.startsWith("/api/data/") && !r.startsWith("/api/data/flow")).length;
+  const first = reads();
+  await assert.rejects(modelsPage(second.rt, { now: NOW + 60000 }));
+  assert.equal(reads(), first, "按小时用量读失败后 10 分钟内不再读");
 });
 
 test("没设置自营站点：unset", async (t) => {
@@ -147,7 +152,7 @@ test("抽屉：多读成功率时间序列一个请求（模型名里的「/」�
   assert.deepEqual(pathsOf(requests.slice(before)), ["/api/perf-metrics"], "抽屉只多读自营站点 1 个请求");
   assert.equal(requests.at(-1), "/api/perf-metrics?model=gpt-5&hours=720");
   assert.equal(detail.successLine.points.length, 30);
-  assert.equal(detail.successLine.points[N - 3].rate, 95, "两个小时各 1 个、成功 20 个的那一小时按成功请求数加权前都是 90、100；这里一天里只有这两个点");
+  assert.equal(detail.successLine.points[N - 3].rate, 95, "一天里有数据的两个小时（90、100）等权平均");
   assert.deepEqual(detail.channels.map((c) => [c.channelId, c.state, c.upstream?.id ?? null]), [[1, "on", "up1"], [2, "on", "up2"], [6, "off", "up3"]]);
   assert.deepEqual(detail.users.top.map((u) => [u.user, u.userId]), [["alice", 7], ["bob", null], ["root", null]], "管理员用户运营不认得，没有链接");
   await modelDetail(rt, "gpt-5", { now: NOW + 60000 });

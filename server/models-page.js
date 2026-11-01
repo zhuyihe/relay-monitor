@@ -49,9 +49,9 @@ async function read(rt, own, now, tz, rate) {
   rt.reconciliation ||= createReconciliationModule(rt);
   const channelProfit = (rt.channelProfit ||= createChannelProfitModule(rt));
   const [rows, channels, flow, perf, rules] = await Promise.allSettled([
-    readOwnRows(rt, own, "model", grid.starts[0], now, { ttlMs: MODELS_TTL_MS, now }),
+    readOwnRows(rt, own, "model", grid.starts[0], now, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now }),
     ownChannelList(rt, own),
-    readOwnRows(rt, own, "flow", flowFrom, flowTo, { ttlMs: MODELS_TTL_MS, now }),
+    readOwnRows(rt, own, "flow", flowFrom, flowTo, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now }),
     queryOwnPerfSummary(own, MODELS_VIEW.SUCCESS_HOURS),
     channelProfit.channelRules(own.id),
   ]);
@@ -158,13 +158,11 @@ export async function modelDetail(rt, name, options = {}) {
   const detail = ctx.details.get(name);
   if (!row || !detail) return { notFound: true };
   const [series, finder] = await Promise.all([seriesOf(rt, ctx.own, name, now), finderOf(rt, ctx, name, detail)]);
-  const hourSuccesses = new Map();
-  for (const item of ctx.modelRows) if (item.key === name && item.requests > 0) hourSuccesses.set(item.t, (hourSuccesses.get(item.t) || 0) + item.requests);
   const grid = dayGrid(now, ctx.payload.tz, MODELS_VIEW.DAYS);
   return {
     name, row, rate: ctx.payload.rate, tz: ctx.payload.tz, asOf: ctx.payload.asOf, critDays: ctx.payload.critDays,
     dayBars: grid.keys.map((day, i) => ({ day, cost: detail.dayCost[i] })),
-    successLine: series ? dailySuccessLine({ now, tz: ctx.payload.tz, groups: series.groups, hourSuccesses }) : null,
+    successLine: series ? dailySuccessLine({ now, tz: ctx.payload.tz, groups: series.groups }) : null,
     channels: detail.channels, users: detail.users, finder,
     flowReadable: ctx.payload.flowReadable,
   };
