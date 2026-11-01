@@ -27,10 +27,11 @@ const emptyRejected = () => ({ ...Object.fromEntries(REJECTED_REASONS.map((reaso
 // 大多数格子（渠道 × 模型 × 小时）没有错误：共用一份冻住的空对象，第一次加错误时才复制（写时复制），省下几十万个小对象
 const SHARED_REJECTED = Object.freeze(emptyRejected());
 const SHARED_ATTEMPTS = Object.freeze({ retryable: Object.freeze(new Array(MAX_ATTEMPT).fill(0)), nonRetryable: Object.freeze(new Array(MAX_ATTEMPT).fill(0)) });
+const NO_FAILURES = Object.freeze({ rate_limit: 0, upstream: 0, auth_quota: 0 }); // 没有错误的格子（大多数）共用一份冻住的零
 export const SUPPLY_CHUNK_SLOTS = 24; // 读桶一次读多少个小时（分批读，不一次读成两个大数组）
 // sampled：这里面有几个窗口的被拒数是按样本估的（错误太多的窗口只读 300 条，按窗口总条数摊；0 = 都是实数）
 const emptyAgg = () => ({ rejected: emptyRejected(), rejectedRequests: 0, badRequest: 0, success: 0, sampled: 0 });
-const lazyAgg = () => ({ rejected: SHARED_REJECTED, rejectedRequests: 0, badRequest: 0, success: 0, sampled: 0 });
+const lazyAgg = () => ({ rejected: SHARED_REJECTED, rejectedRequests: 0, badRequest: 0, success: 0, sampled: 0, finalFailuresByReason: NO_FAILURES });
 const emptyAttempts = () => ({ retryable: new Array(MAX_ATTEMPT).fill(0), nonRetryable: new Array(MAX_ATTEMPT).fill(0) });
 function addError(agg, bucket) {
   if (bucket.reason === "bad_request") { agg.badRequest += bucket.count; return; }
@@ -103,7 +104,7 @@ export const wallHourOf = (slotMs, tz = DEFAULT_BUSINESS_TIME_ZONE) => wallHourO
  *   byChannel: [{ channelId, ruleId, upstreamStationId, ...agg, hours: [{ slotMs, ...agg }] }]——这个渠道所有模型加起来的成交和被拒，按小时，测上限用；
  *   byHour: [{ slotMs, dayKey, hour, repeated, ...agg, finalFailures }]（每个小时都有，没有的是 0）；
  *   byModelHour: [{ slotMs, model, ...agg, finalFailures, finalFailuresByReason: { rate_limit, upstream, auth_quota }（加起来是 finalFailures）, retriedOrStopped }]；
- *   cells: [{ slotMs, channelId, model, success, rejected, rejectedRequests, attempts: { retryable: [1–10 档], nonRetryable: [1–10 档] } }]（渠道 × 模型 × 小时，有数的才有）
+ *   cells: [{ slotMs, channelId, model, success, rejected, rejectedRequests, finalFailuresByReason（这个格子的最终失败数按原因拆，各格子加起来是 byModelHour 的 finalFailuresByReason）, attempts: { retryable: [1–10 档], nonRetryable: [1–10 档] } }]（渠道 × 模型 × 小时，有数的才有）
  * }
  */
 export async function queryErrorSupply({ errors, consume, stationId, fromMs, toMs, channelUpstream = new Map(), tz = DEFAULT_BUSINESS_TIME_ZONE, retry = null, maxRows = Infinity }) {
@@ -141,11 +142,14 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
       const cell = cellOf(bucket.slotMs, bucket.channelId, bucket.model), modelHour = modelHourOf(bucket.slotMs, bucket.model);
       addError(cell, bucket); addAttempts(cell, bucket);
       addError(modelHour, bucket); addAttempts(modelHour, bucket);
-      // 按原因分开记尝试数：F 按原因拆（主要原因），拆开的各项加起来正好是 F
-      if (!NOT_IN_F.has(bucket.reason)) {
-        const byReason = (modelHour.reasonAttempts ||= {});
-        const holder = (byReason[bucket.reason] ||= { attempts: SHARED_ATTEMPTS });
-        addAttempts(holder, bucket);
+      // 按原因拆 F：重试次数在读桶之前就定了（读到的、或推的），所以每个桶算不算最终失败直接定得了——不能重试的，或者能重试而且正好是第 R + 1 档（R 不知道时只有前一种），
+      // 和 estimateFinalFailures 同一个规矩（有测试核对各原因加起来 = F）。格子（渠道 × 模型 × 小时）和「模型 × 小时」各记一份：出在哪个渠道、哪家上游一清二楚，
+      // 各格子加起来正好是「模型 × 小时」的数
+      if (!NOT_IN_F.has(bucket.reason) && (!bucket.retryable || (retryTimes != null && Math.min(MAX_ATTEMPT, Math.max(1, bucket.attempt)) === Math.min(MAX_ATTEMPT, retryTimes + 1)))) {
+        for (const owner of [modelHour, cell]) {
+          if (owner.finalFailuresByReason === NO_FAILURES) owner.finalFailuresByReason = { rate_limit: 0, upstream: 0, auth_quota: 0 };
+          owner.finalFailuresByReason[bucket.reason] += bucket.count;
+        }
       }
     }
     for (const bucket of consumeBuckets) {
@@ -174,14 +178,13 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
     let hourAgg = channel.hourMap.get(cell.slotMs); if (!hourAgg) channel.hourMap.set(cell.slotMs, hourAgg = { slotMs: cell.slotMs, ...emptyAgg() }); merge(hourAgg, cell);
     const hour = hours.get(cell.slotMs); if (hour) merge(hour, cell);
   }
+  const cellList = [...cells.values()];
   // F 按「模型 × 小时」算，再往上加
   const byModelHour = [];
   for (const entry of modelHours.values()) {
     const { finalFailures, retriedOrStopped } = estimateFinalFailures(entry.attempts, retryTimes);
-    const { attempts, reasonAttempts, ...rest } = entry;
-    const finalFailuresByReason = { rate_limit: 0, upstream: 0, auth_quota: 0 };
-    for (const [reason, holder] of Object.entries(reasonAttempts || {})) finalFailuresByReason[reason] = estimateFinalFailures(holder.attempts, retryTimes).finalFailures;
-    byModelHour.push({ ...rest, finalFailures, finalFailuresByReason, retriedOrStopped });
+    const { attempts, ...rest } = entry;
+    byModelHour.push({ ...rest, finalFailures, retriedOrStopped });
     total.finalFailures += finalFailures;
     models.get(entry.model).finalFailures += finalFailures;
     const hour = hours.get(entry.slotMs); if (hour) hour.finalFailures += finalFailures;
@@ -197,7 +200,7 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
     byChannel: [...channels.values()].map(({ hourMap, ...channel }) => ({ ...channel, hours: [...hourMap.values()].sort((a, b) => a.slotMs - b.slotMs) })).sort((a, b) => a.channelId - b.channelId),
     byHour: [...hours.values()],
     byModelHour: byModelHour.sort((a, b) => a.slotMs - b.slotMs || a.model.localeCompare(b.model)),
-    cells: [...cells.values()].sort((a, b) => a.slotMs - b.slotMs || a.channelId - b.channelId || a.model.localeCompare(b.model)),
+    cells: cellList.sort((a, b) => a.slotMs - b.slotMs || a.channelId - b.channelId || a.model.localeCompare(b.model)),
   };
 }
 
