@@ -166,14 +166,20 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
   // 每日利润页每个渠道一个「选 Key」下拉框：没绑过的渠道先选它用的是哪个上游、再选 Key，选了就建绑定开始算（从今天 0 点）；
   // 绑过的渠道换 Key = 改这条绑定的 Key（一个渠道一条规则，换上游要先停止再选）。Key 列表是 GET /api/reconciliation/upstreams/:id/keys（绑定页原来读 Key 的那套）。
   // 渠道地址能对上已加的上游的，下拉框先选上那个（matchCostStations）；对不上的（代理、内网地址）用户自己选上游。
+  // 这个自营站点上现在在算的绑定，和渠道 → 绑定的对应（每个渠道最多一条）：渠道绑定的抽屉、小窗口和模型供需页共用这一份
+  async function channelRules(ownStationId) {
+    const rules = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId);
+    const ruleOf = new Map();
+    for (const rule of rules) for (const channel of rule.channels) ruleOf.set(Number(channel.channelId), rule);
+    return { rules, ruleOf };
+  }
+
   async function options(ownStationId) {
     ownStationOf(ownStationId);
     const catalogue = onboarding()?.getSourceCatalogue?.();
     if (!catalogue?.ownSource || catalogue.stale) return { ok: false, code: "CHANNEL_CATALOGUE_STALE" };
-    const rules = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId);
+    const { rules, ruleOf } = await channelRules(ownStationId);
     const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && !station.archivedAt && BILLING_TYPES.has(station.type));
-    const ruleOf = new Map();
-    for (const rule of rules) for (const channel of rule.channels) ruleOf.set(Number(channel.channelId), rule);
     // 抽屉要的：每个渠道绑在哪个上游、哪把 Key（名、分组）、从哪天绑的；还没绑的渠道带它自己的地址和地址对得上的上游。
     // 上游的 Key 列表走现有的 5 分钟缓存，不新读用户的 New API；两处（抽屉、小窗口）共用这一个读
     const tokensOf = new Map();
@@ -346,5 +352,5 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { stopped, optedOut };
   }
 
-  return { status, start, stop, autoStart, options, selectKey };
+  return { status, start, stop, autoStart, options, selectKey, channelRules };
 }

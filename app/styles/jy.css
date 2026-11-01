@@ -422,6 +422,18 @@ table.jy-data tr:last-child td { border-bottom: 0; }
 table.jy-data tbody tr:hover td { background: color-mix(in srgb, var(--jy-sunken) 55%, var(--jy-sheet)); }
 table.jy-data .r { text-align: right; white-space: nowrap; }
 table.jy-data--compact th, table.jy-data--compact td { padding: 8px 12px; }
+/* 点一行做什么的表（用户运营、模型供需）：行上手形；表在面板里贴边时去掉自己的边框；分段的表（DataTable 的 rowGroup）段标题一行灰底 */
+table.jy-data tbody tr.is-clickable { cursor: pointer; }
+.jy-panel-body--flush > .jy-table-scroll { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; }
+table.jy-data tbody tr.jy-data-group th { padding: 6px 16px; background: var(--jy-sunken); border-bottom: 1px solid var(--jy-rule-soft); font-size: 12px; line-height: 18px; font-weight: 500; text-align: left; color: var(--jy-ink-2); }
+table.jy-data tbody tr.jy-data-group:hover th { background: var(--jy-sunken); }
+/* 表里的跑道格：靠左放 */
+table.jy-data .jy-cell-runway { justify-content: flex-start; }
+table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
+/* 表里一格两行（上面是要比的数或名字，下面是说明或跑道） */
+.jy-cell-two { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.jy-cell-two--r { align-items: flex-end; }
+.jy-cell-two .jy-caption { margin: 0; }
 table.jy-data tfoot th, table.jy-data tfoot td {
   position: sticky; bottom: 0; top: auto;
   background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); border-bottom: 0;
