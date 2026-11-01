@@ -20,8 +20,10 @@ const MODELS_DAYS = 30;
 const toUsd = (quota) => quota / QUOTA_PER_UNIT;
 
 // 今天到现在，对比过去 7 天同一时段：每位用户 { today, usual（过去 7 天同一时段的平均）, usualDay（过去 7 天整天的平均）}；
-// 还算不了（过去 7 个整天没补全、刚过 0 点没满 1 小时）是 null；upTo 是「今天到几点」（上一个整点，毫秒），页面写「平时到 14:00 → 今天到 14:00」
-export async function sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom }) {
+// 还算不了（过去 7 个整天没补全、刚过 0 点没满 1 小时、用户数据超过 30 分钟没读到）是 null；upTo 是「今天到几点」（上一个整点，毫秒），页面写「平时到 14:00 → 今天到 14:00」
+export async function sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom, fresh = true }) {
+  // 用户数据超过 30 分钟没读到（页面上已经有「超过 30 分钟没读到」的提示）：今天的用量不全，拿它比「平时」会把所有人都标成少了，这一类先不判
+  if (!fresh) return null;
   const N = grid.days, todayStart = grid.starts[N - 1];
   const whole = Math.floor((now - SAME_LAG_MS - todayStart) / HOUR_MS);
   if (whole < 1) return null;
@@ -83,7 +85,8 @@ async function mainModels(rt, own, { now, tz }) {
     if (request.broken || request.used + 1 > USER_OPS.BUDGET_MAX_USED) throw Object.assign(new Error("busy"), { code: "BUSY" });
   };
   try {
-    const rows = await readOwnRows(rt, own, "flow", startMs, now, { ttlMs: MODELS_TTL_MS, now, beforeRead });
+    // 读失败也挡 10 分钟：404、权限不够这种一直会失败的，不能每分钟都去用户的站上再跑一次 30 天的汇总
+    const rows = await readOwnRows(rt, own, "flow", startMs, now, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead });
     const byUser = new Map();
     for (const row of rows) {
       if (!row.user || !(row.cost > 0)) continue;
@@ -112,7 +115,7 @@ export async function churnResponse(rt, ops, store, params, { now = Date.now() }
   const grid = dayGrid(now, tz);
   const filledFrom = filledFromOf(page.backfill, now);
   const [sameTime, models] = await Promise.all([
-    sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom }),
+    sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom, fresh: page.fresh !== false }),
     mainModels(rt, own, { now, tz }),
   ]);
   const view = buildChurnView({ now, tz, rows: page.users, daily: cache.daily, sameTime: sameTime?.users ?? null, models: models.models, ready: page.ready, backfill: page.backfill });

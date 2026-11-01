@@ -18,8 +18,10 @@ export const OWN_ROW_READERS = Object.freeze({
 });
 
 // kind：model | user | flow；返回读到的行（调用方不要改它：同一份会给几个调用方）
-// beforeRead：真的要发请求之前问一下（额度紧、断路时抛错就不发）；命中缓存、跟着别人那一次读的不问
-export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 120000, now = Date.now(), readers = OWN_ROW_READERS, beforeRead = null } = {}) {
+// beforeRead：真的要发请求之前问一下（额度紧、断路时抛错就不发，这种不算「读失败」，不记）；命中缓存、跟着别人那一次读的不问
+// failTtlMs：读失败了，这个窗口在这么久之内不再重试，直接给同一个错（默认 0，失败不缓存、下一次照读）。404、权限不够这种一直会失败的，
+// 流失页签每分钟来取一次也不该每分钟都去用户的站上跑一次 30 天的汇总；只有传了它的调用方受影响，别的调用方（自营业务）行为不变
+export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 120000, now = Date.now(), readers = OWN_ROW_READERS, beforeRead = null, failTtlMs = 0 } = {}) {
   const read = readers[kind];
   if (!read) throw new Error(`unknown own rows kind: ${kind}`);
   const cache = (rt._ownRawRows ||= new Map());
@@ -27,9 +29,14 @@ export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 12000
   const key = [kind, own.id, own.baseUrl, own.userId || "", own.authVersion ?? "", startMs, endMs >= now - OPEN_WINDOW_MS ? "open" : endMs].join("|");
   const hit = cache.get(key);
   if (hit?.rows && now - hit.at < ttlMs) return hit.rows;
+  if (hit?.error && failTtlMs > 0 && now - hit.at < failTtlMs) throw hit.error;
   if (hit?.promise) return hit.promise;
   const startedAt = now;
-  const promise = Promise.resolve().then(() => { beforeRead?.(); return read(own, startMs, endMs); }).then((rows) => {
+  let skipped = false; // beforeRead 拦下的，没发请求
+  const promise = (async () => {
+    if (beforeRead) { try { beforeRead(); } catch (error) { skipped = true; throw error; } }
+    return read(own, startMs, endMs);
+  })().then((rows) => {
     if (cache.get(key)?.promise === promise) {
       const entry = { at: startedAt, rows };
       cache.set(key, entry);
@@ -38,7 +45,13 @@ export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 12000
     }
     return rows;
   }, (error) => {
-    if (cache.get(key)?.promise === promise) cache.delete(key);
+    if (cache.get(key)?.promise === promise) {
+      if (failTtlMs > 0 && !skipped) {
+        const entry = { at: startedAt, error };
+        cache.set(key, entry);
+        setTimeout(() => { if (cache.get(key) === entry) cache.delete(key); }, failTtlMs).unref?.();
+      } else cache.delete(key);
+    }
     throw error;
   });
   cache.set(key, { promise, at: startedAt });

@@ -838,6 +838,14 @@ test("流失页：每位用户主要用的模型来自 /api/data/flow 一个请�
   const failed = await churnPage(h);
   assert.ok(failed.modelsError);
   assert.equal(failed.list.rows.find((row) => row.username === "drop").status, "todayLow");
+  // 一直读不成（404、权限不够）：10 分钟内每分钟来取，也只去用户的站上读一次
+  const flowCount = () => h.site.requests.filter((item) => item === "/api/data/flow").length;
+  assert.equal(flowCount(), 1);
+  for (let minute = 1; minute <= 9; minute += 1) { h.clock.now += MIN; await churnPage(h); }
+  assert.equal(flowCount(), 1, "失败也挡 10 分钟");
+  h.clock.now += MIN;
+  await churnPage(h);
+  assert.equal(flowCount(), 2, "过了 10 分钟再试一次");
 });
 
 test("流失页：没读到过数是 starting，没设置自营站点是 unset；过去 7 个整天没补全时今天明显少了不判（ready.today 是 false），别的照常", async (t) => {
@@ -849,4 +857,24 @@ test("流失页：没读到过数是 starting，没设置自营站点是 unset�
   assert.deepEqual(page.summary.retention, null);
   const none = { store: { list: () => [], settings: {}, rules: {}, channels: [] } };
   assert.equal((await churnResponse(none, f.ops, f.store, new URLSearchParams())).unset, true);
+});
+
+test("流失页：用户数据超过 30 分钟没读到时，今天明显少了先不判（不会把所有人都标上）；恢复以后照常", async (t) => {
+  const f = makeSite(t, churnUsers());
+  await f.stepsTo(10.5);
+  assert.equal((await churnPage(f)).list.rows.some((row) => row.status === "todayLow"), true);
+  f.site.soft = true; // 用户列表、用量都读不到
+  await f.stepsTo(13);
+  assert.equal(f.ops.getView().fresh, false);
+  const stale = await churnPage(f);
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.ready.today, false);
+  assert.equal(stale.sameUntilMs, null);
+  assert.equal(stale.list.rows.some((row) => row.status === "todayLow"), false, "一个都没标");
+  assert.equal(stale.list.counts.only.todayLow, null, "个数写「—」，不是 0");
+  f.site.soft = false;
+  await f.step();
+  const back = await churnPage(f);
+  assert.equal(back.ready.today, true);
+  assert.equal(back.list.rows.find((row) => row.username === "drop")?.status, "todayLow");
 });
