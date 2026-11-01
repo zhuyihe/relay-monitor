@@ -41,7 +41,7 @@ function StateBanners({ page }: { page: LoadedPage }) {
       {state === "noErrorLog" && noErrorLogReason === "noRecords" && (
         <div className="jy-banner jy-banner--info" role="status">
           <Sym kind="info" />
-          <div className="jy-banner__body"><span>{B.noRecordsLead}</span></div>
+          <div className="jy-banner__body"><span>{B.noRecordsLead} {B.noRecords}</span></div>
         </div>
       )}
       {state === "accumulating" && (
@@ -53,7 +53,7 @@ function StateBanners({ page }: { page: LoadedPage }) {
       {!consumeLog && (
         <div className="jy-banner jy-banner--info" role="status">
           <Sym kind="info" />
-          <div className="jy-banner__body"><span>{B.noConsumeLead}</span></div>
+          <div className="jy-banner__body"><span>{B.noConsumeLead}，<Link className="jy-link" href="/settings">{B.noConsumeLink}</Link></span></div>
         </div>
       )}
     </>
@@ -128,13 +128,13 @@ export default function ModelsPageRoute() {
     );
   }
 
-  // 高峰余量这一次没算出来（没有数据库、读库出错）：整页写「读不到」，不画下面这些
+  // 高峰余量这一次没算出来（数据量太大、没有数据库或读库出错）：在放高峰余量的地方写一句，不画下面这些
   if (!page.headroom) {
     return (
       <div className="jy-page">
         {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
         <Panel label={NAV_LABELS.models}>
-          <ErrorState center what={COPY.headroomNull} error={new Error("headroom unavailable")} onRetry={() => load()} />
+          <p className="jy-models-empty jy-muted" role="status">{COPY.headroomNull}</p>
         </Panel>
       </div>
     );

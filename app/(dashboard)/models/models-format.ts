@@ -37,24 +37,20 @@ export const approx = (n: number) => {
   return count(Math.round(n / step) * step);
 };
 
-// 「21–23 点」：高峰的第一个钟点到最后一个钟点加 1（跨午夜时 [23, 0] 写「23–1 点」）
-export const peakText = (peak: Peak | null | undefined) => {
-  const hours = peak?.hours;
-  if (!hours?.length) return null;
-  return `${hours[0]}–${(hours[hours.length - 1] + 1) % 24} 点`;
-};
-// 抽屉结论里的钟点：[21, 22, 23] → 「21–24 点」，不连着的「9 点、21–23 点」
+// 钟点写成「21–24 点」：一段连着的钟点，第一个到最后一个加 1（24 点就写 24，跨午夜 [23, 0] 写「23–1 点」）；不连着的几段用「、」隔开。
+// 主表的高峰时段、顶上的「最缺的」、抽屉的结论都用这一个函数，几处写法一样
 export const hoursText = (hours: number[]) => {
-  const list = [...new Set(hours)].sort((a, b) => a - b);
-  const parts: string[] = [];
-  for (let i = 0; i < list.length;) {
-    let j = i;
-    while (j + 1 < list.length && list[j + 1] === list[j] + 1) j += 1;
-    parts.push(i === j ? `${list[i]} 点` : `${list[i]}–${list[j] + 1} 点`);
-    i = j + 1;
-  }
-  return parts.join("、");
+  const set = new Set(hours.map((h) => ((h % 24) + 24) % 24));
+  // 每一段从「前一个钟点不在里面」的那个钟点开始（23 和 0 算连着）；全天都在时从 0 点起
+  const starts = [...set].filter((h) => !set.has((h + 23) % 24)).sort((a, b) => a - b);
+  if (!starts.length) return set.size ? "0–24 点" : "";
+  return starts.map((start) => {
+    let last = start;
+    while (set.has((last + 1) % 24) && (last + 1) % 24 !== start) last = (last + 1) % 24;
+    return `${start}–${last + 1} 点`;
+  }).join("、");
 };
+export const peakText = (peak: Peak | null | undefined) => (peak?.hours?.length ? hoursText(peak.hours) : null);
 
 // 一个量写成字：测到的「约 X」、没碰到过上限的「至少 X」、数据积累中、拿不到「—」
 export function quantityText(q: Quantity | null | undefined): string {
@@ -86,13 +82,16 @@ export type MarginView = { tone: "short" | "thin" | "ok" | "muted"; text: string
 export function marginView(row: Pick<HeadroomRow, "margin" | "supply">, ctx: LogCtx): MarginView {
   const { margin, supply } = row;
   if (ctx.mode === "switchOff") return { tone: "muted", text: COPY.margin.needLog };
+  if (ctx.mode === "noRecords") return { tone: "muted", text: COPY.dash };
   if (supply.kind === "accumulating") return { tone: "muted", text: COPY.accumulating };
-  if (margin.status === "unknown") return { tone: "muted", text: COPY.margin.unknown };
+  // 能给只是「至少」：不说缺、也不写余多少，只写上限还没测到
+  if (supply.kind === "atLeast" || margin.status === "unknown") return { tone: "muted", text: COPY.margin.unknown };
   if (margin.status === "none" || margin.value == null) return { tone: "muted", text: COPY.dash };
   if (margin.status === "short") return { tone: "short", text: COPY.margin.short(approx(Math.abs(margin.value))) };
-  const text = supply.kind === "atLeast" ? COPY.margin.roomAtLeast(approx(margin.value)) : COPY.margin.room(approx(margin.value));
-  return { tone: margin.status === "thin" ? "thin" : "ok", text };
+  return { tone: margin.status === "thin" ? "thin" : "ok", text: COPY.margin.room(approx(margin.value)) };
 }
+// 抽屉「缺口 / 余量」那个数：测到的写「约 N」，别的写「—」
+export const marginNumberText = (margin: Margin) => (margin.value == null || margin.kind !== "measured" || margin.status === "unknown" || margin.status === "none" ? EMPTY : COPY.approx(approx(Math.abs(margin.value))));
 
 // 上游撑不到的小时数写成字，和上游列表同一种说法（formatDays）
 export const hoursLeftText = (hours: number | null | undefined) => (hours == null ? EMPTY : formatDays(hours / 24));
@@ -114,7 +113,10 @@ export function recoView(row: Pick<HeadroomRow, "reco" | "supply" | "margin">, c
   if (ctx.mode !== "ok") return unmeasured();
   switch (reco.kind) {
     case "switch": return { kind: "switch", title: R.switch(name(reco.name)), why: R.switchWhy(reco.keys) };
-    case "addKeys": return { kind: "addKeys", title: R.addKeys(reco.n, name(reco.name)), why: R.addKeysWhy(approx(reco.perKey)) };
+    case "addKeys":
+      // 加几把 Key 至少 1 把才给
+      if (!(reco.n >= 1)) return { kind: "none", title: COPY.dash, why: "" };
+      return { kind: "addKeys", title: R.addKeys(reco.n, name(reco.name)), why: R.addKeysWhy(approx(reco.perKey)) };
     case "thin": return { kind: "thin", title: R.thin, why: row.margin.value != null ? R.thinWhy(approx(row.margin.value)) : "" };
     case "unmeasured": return unmeasured();
     default: return { kind: "none", title: COPY.dash, why: "" };
@@ -125,7 +127,8 @@ export function recoView(row: Pick<HeadroomRow, "reco" | "supply" | "margin">, c
 export type Kpi = { key: "willShort" | "notBought" | "topup"; title: string; value: string; sub: string; lead?: { kind: "model" | "upstream"; id: string; name: string } | null; subAfter?: string; extra?: string; more?: string | null };
 export function kpisOf(page: ModelsPage, headroom: HeadroomPage): Kpi[] {
   const { kpis } = headroom, rate = page.rate;
-  const ctx = logCtxOf(headroom), noLogSub = ctx.mode === "noRecords" ? COPY.kpi.noRecords : COPY.kpi.needLog;
+  const ctx = logCtxOf(headroom);
+  const noLogSub = ctx.mode === "noRecords" ? COPY.kpi.noRecords : ctx.mode === "accumulating" ? COPY.kpi.accumulating(headroom.errorLog.daysLeft ?? headroom.errorLog.needDays) : COPY.kpi.needLog;
   const willShort: Kpi = !kpis.willShort
     ? { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.dash, sub: noLogSub }
     : kpis.willShort.worst && kpis.willShort.count > 0
@@ -154,7 +157,8 @@ export function barShape(need: number | null, supply: Quantity | null | undefine
   if (need == null || !supply || supply.value == null || (supply.kind !== "measured" && supply.kind !== "atLeast")) return null;
   const top = Math.max(need, supply.value, 1) * 1.12;
   const line = supply.value / top, fill = Math.min(need, supply.value) / top;
-  return { track: 1, line, fill, over: need > supply.value ? (need - supply.value) / top : 0, dashed: supply.kind === "atLeast" };
+  // 能给只是「至少」时不能说缺，不画红色那一截
+  return { track: 1, line, fill, over: supply.kind === "measured" && need > supply.value ? (need - supply.value) / top : 0, dashed: supply.kind === "atLeast" };
 }
 
 // 上游卡片
@@ -172,8 +176,8 @@ export function actionHref(action: "topup" | "addKey" | "weights", upstreamId: s
   if (!links) return null;
   if (action === "weights") return links.own ? `${links.own}/console/channel` : null;
   const site = upstreamId ? links.upstreams[upstreamId] : null;
-  if (!site?.baseUrl) return null;
-  if (site.type !== "newapi") return site.baseUrl;
+  // 只有 New API 的上游路径是确定的；Sub2API 等别的上游不给链接（写灰字）。地址里不带查询串
+  if (!site?.baseUrl || site.type !== "newapi") return null;
   return `${site.baseUrl}${action === "topup" ? "/console/topup" : "/console/token"}`;
 }
 

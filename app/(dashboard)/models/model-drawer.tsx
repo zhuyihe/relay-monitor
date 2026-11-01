@@ -14,7 +14,7 @@ import { Seg } from "../../components/seg";
 import { ChartLegend, HourlyChart } from "./charts";
 import { COPY } from "./copy";
 import { RunwayCell } from "./models-table";
-import { approx, bindLink, channelStatusText, compareText, conclusionText, finderRoomText, growthText, logCtxOf, money, noErrorLogIn, peakText, priceText, quantityText, recoView, userLink } from "./models-format";
+import { approx, bindLink, channelStatusText, compareText, conclusionText, finderRoomText, growthText, logCtxOf, marginNumberText, money, noErrorLogIn, peakText, priceText, quantityText, recoView, userLink } from "./models-format";
 import type { DetailChannel, LoadedPage, LogCtx, ModelDetail } from "./models-format";
 import type { HourBar } from "./charts";
 
@@ -120,7 +120,7 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Mode
         </div>
         <div>
           <dt>{isShort ? D.kpiGap : D.kpiRoom}</dt>
-          <dd className={`jy-kpi-figure${isShort ? " jy-hshort-figure" : ""}`}>{margin.value == null || margin.status === "unknown" || margin.status === "none" ? EMPTY : approx(Math.abs(margin.value))}</dd>
+          <dd className={`jy-kpi-figure${isShort ? " jy-hshort-figure" : ""}`}>{marginNumberText(margin)}</dd>
           <dd className="jy-caption">{recoLine(h, ctx)}</dd>
         </div>
         <div>
@@ -269,8 +269,9 @@ function Finder({ detail, rate, critDays, phone }: { detail: ModelDetail & { hea
     <>
       {detail.finder.length === 0 ? <p className="jy-muted">{D.finderNone}</p> : phone ? cards : (
         <div className="jy-table-wrap">
-          <table className="jy-data jy-num jy-data--compact">
+          <table className="jy-data jy-num jy-data--compact jy-models-finder">
             <caption className="sr-only">{D.finderTitle}</caption>
+            <colgroup><col style={{ width: "17%" }} /><col style={{ width: "14%" }} /><col style={{ width: "17%" }} /><col style={{ width: "13%" }} /><col style={{ width: "17%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /></colgroup>
             <thead><tr><th scope="col">{cols.upstream}</th><th scope="col" className="r">{cols.price}</th><th scope="col">{cols.vs}</th><th scope="col" className="r">{cols.room}</th><th scope="col">{cols.runway}</th><th scope="col">{cols.supply}</th><th scope="col"><span className="sr-only">{D.goBind}</span></th></tr></thead>
             <tbody>
               {detail.finder.map((item) => (

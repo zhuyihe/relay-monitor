@@ -112,6 +112,11 @@ table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
 .jy-models-drawer table.jy-models-channels th, .jy-models-drawer table.jy-models-channels td { padding-left: 8px; padding-right: 8px; overflow: hidden; }
 .jy-models-drawer table.jy-models-channels .jy-cell-two { max-width: 100%; }
 .jy-models-drawer table.jy-models-channels .jy-models-reason { max-width: 100%; }
+/* 找货帮手那张表：同样固定列宽，名字和各格一行放不下就截短，不被挤成一个字一行 */
+.jy-models-drawer table.jy-models-finder { table-layout: fixed; }
+.jy-models-drawer table.jy-models-finder th { white-space: normal; }
+.jy-models-drawer table.jy-models-finder th, .jy-models-drawer table.jy-models-finder td { padding-left: 8px; padding-right: 8px; }
+.jy-models-drawer table.jy-models-finder td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jy-models-off td, .jy-models-subcards .jy-models-off { color: var(--jy-ink-3); }
 /* 手机：抽屉里渠道、找货帮手的卡片，三行 */
 .jy-models-subcards { list-style: none; margin: 0; padding: 0; border: 1px solid var(--jy-rule-soft); border-radius: var(--jy-r2); }

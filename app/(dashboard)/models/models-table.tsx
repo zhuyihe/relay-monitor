@@ -69,6 +69,7 @@ export function HowBody({ page }: { page: LoadedPage }) {
       <li><b>{how.limitTitle}</b>{how.limit(n)}</li>
       <li><b>{how.supplyTitle}</b>{how.supply}</li>
       <li><b>{how.biasTitle}</b>{how.bias}</li>
+      <li><b>{how.roughTitle}</b>{how.rough}</li>
       <li><b>{how.reasonTitle}</b>{how.reason}</li>
       <li><b>{how.moneyTitle}</b>{how.money}</li>
       <li><b>{how.recoTitle}</b>{how.reco(n)}</li>
@@ -86,8 +87,10 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
   // 默认只列缺的、余量薄的和判不了的；搜索时、点开「其余」时列全部
   const gap = useMemo(() => headroom.rows.filter((row) => row.group === "short" || row.group === "thin" || row.group === "unknown"), [headroom.rows]);
   const restCount = headroom.rows.length - gap.length;
-  const shown = needle ? headroom.rows.filter((row) => row.name.toLowerCase().includes(needle)) : showRest ? headroom.rows : gap;
-  const emptyText = needle ? COPY.noMatch : headroom.rows.length ? COPY.noShort : COPY.empty;
+  // 没开错误日志、数据积累中时判不了：缺不缺看不出，按今晚要多少排（要得多的在前）
+  const byNeed = (rows: HeadroomRow[]) => (ctx.mode === "ok" ? rows : [...rows].sort((a, b) => (b.need?.value ?? -1) - (a.need?.value ?? -1)));
+  const shown = byNeed(needle ? headroom.rows.filter((row) => row.name.toLowerCase().includes(needle)) : showRest ? headroom.rows : gap);
+  const emptyText = needle ? COPY.noMatch : headroom.rows.length ? (ctx.mode === "ok" ? COPY.noShort : COPY.noJudge) : COPY.empty;
 
   const name = (row: HeadroomRow) => (
     <span className="jy-cell-two">
@@ -146,7 +149,7 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
         <div className="jy-headroom-scroll">
           <table className="jy-data jy-num jy-models-headroom">
             <caption className="sr-only">{COPY.tableTitle}</caption>
-            <colgroup><col style={{ width: "19%" }} /><col style={{ width: "10%" }} /><col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "23%" }} /></colgroup>
+            <colgroup><col style={{ width: "17%" }} /><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "16%" }} /><col style={{ width: "13%" }} /><col style={{ width: "25%" }} /></colgroup>
             <thead><tr>{th(cols.model)}{th(cols.peak)}{th(cols.need, true, true)}{th(cols.supply, true, true)}{th(cols.margin)}{th(cols.keyUsers)}{th(cols.reco)}</tr></thead>
             <tbody>
               {shown.length === 0 && <tr><td colSpan={7} className="jy-muted jy-models-empty">{emptyText}</td></tr>}

@@ -442,20 +442,20 @@ function modelsFixture({ mode = "ok", consumeLog = true, headroomNull = false } 
   const noLog = mode === "nolog", accum = mode === "accum", noRecords = mode === "norecords";
   const row = (name, week, extra) => ({
     name, weekUsd: week / 7, group: "ok", peak: { hours: [21, 22] }, need: { value: 1000, growth: 1, basis: "second" }, supply: q("measured", 2000),
-    margin: { value: 1000, status: "ok" }, keyUsers: { count: 0, top: [] }, reco: { kind: "none" }, notBought: { f24: 0, lostUsd: 0, blockedRetried: 0 }, gapUsdPerHour: null, ...extra,
+    margin: { value: 1000, status: "ok", kind: "measured" }, keyUsers: { count: 0, top: [] }, reco: { kind: "none" }, notBought: { f24: 0, lostUsd: 0, blockedRetried: 0 }, gapUsdPerHour: null, ...extra,
   });
   const ku = (...names) => ({ count: names.length, top: names.map((name, i) => ({ userId: 41 + i, name, blocked: 100 - i })) });
   let rows = [
-    row("claude-sonnet-4.6", 711.79, { group: "short", need: { value: 9812, growth: 1.09, basis: "second" }, supply: q("measured", 8812), margin: { value: -1000, status: "short" }, keyUsers: ku("orange-lab", "wu-team"), reco: { kind: "addKeys", n: 1, upstreamId: "backup", name: "备用上游", perKey: 3000 }, notBought: { f24: 186, lostUsd: 17 / 7, blockedRetried: 1054 }, gapUsdPerHour: 900 }),
-    row("gemini-2.5-pro", 203.19, { group: "short", peak: { hours: [20, 21] }, need: { value: 2600, growth: 1.04, basis: "second" }, supply: q("measured", 2000), margin: { value: -600, status: "short" }, keyUsers: ku("wang-lab"), reco: { kind: "topup", upstreamId: "main", name: "主力上游", hoursLeft: 5 }, notBought: { f24: 120, lostUsd: 3, blockedRetried: 200 }, gapUsdPerHour: 300 }),
-    row("claude-haiku-4.5", 52.54, { group: "short", need: { value: 1500, growth: 1.25, basis: "second" }, supply: q("measured", 1300), margin: { value: -200, status: "short" }, reco: { kind: "switch", upstreamId: "main", name: "主力上游", keys: 3 }, notBought: { f24: 40, lostUsd: 1, blockedRetried: 80 }, gapUsdPerHour: 50 }),
-    row("gpt-5", 340.14, { group: "thin", peak: { hours: [14, 15] }, need: { value: 3400, growth: 0.95, basis: "lastWeek" }, supply: q("measured", 3700), margin: { value: 300, status: "thin" }, keyUsers: ku("kevin-ai"), reco: { kind: "thin" }, notBought: { f24: 74, lostUsd: 2, blockedRetried: 66 } }),
-    row("deepseek-v3", 110.13, { group: "unknown", peak: { hours: [10, 11] }, need: { value: 1100, growth: 0.88, basis: "second" }, supply: q("atLeast", 2400), margin: { value: 1300, status: "ok" }, reco: { kind: "unmeasured" } }),
-    row("qwen3-coder", 39.35, { group: "unknown", need: { value: 420, growth: 1, basis: "second" }, supply: q("accumulating"), margin: { value: null, status: "none" }, reco: { kind: "unmeasured" } }),
-    row("gpt-5-mini", 0.4, { group: "small", need: null, supply: q("unavailable"), margin: { value: null, status: "none" }, peak: null }),
+    row("claude-sonnet-4.6", 711.79, { group: "short", need: { value: 9812, growth: 1.09, basis: "second" }, supply: q("measured", 8812), margin: { value: -1000, status: "short", kind: "measured" }, keyUsers: ku("orange-lab", "wu-team"), reco: { kind: "addKeys", n: 1, upstreamId: "backup", name: "备用上游", perKey: 3000 }, notBought: { f24: 186, lostUsd: 17 / 7, blockedRetried: 1054 }, gapUsdPerHour: 900 }),
+    row("gemini-2.5-pro", 203.19, { group: "short", peak: { hours: [20, 21] }, need: { value: 2600, growth: 1.04, basis: "second" }, supply: q("measured", 2000), margin: { value: -600, status: "short", kind: "measured" }, keyUsers: ku("wang-lab"), reco: { kind: "topup", upstreamId: "main", name: "主力上游", hoursLeft: 5 }, notBought: { f24: 120, lostUsd: 3, blockedRetried: 200 }, gapUsdPerHour: 300 }),
+    row("claude-haiku-4.5", 52.54, { group: "short", need: { value: 1500, growth: 1.25, basis: "second" }, supply: q("measured", 1300), margin: { value: -200, status: "short", kind: "measured" }, reco: { kind: "switch", upstreamId: "main", name: "主力上游", keys: 3 }, notBought: { f24: 40, lostUsd: 1, blockedRetried: 80 }, gapUsdPerHour: 50 }),
+    row("gpt-5", 340.14, { group: "thin", peak: { hours: [14, 15] }, need: { value: 3400, growth: 0.95, basis: "lastWeek" }, supply: q("measured", 3700), margin: { value: 300, status: "thin", kind: "measured" }, keyUsers: ku("kevin-ai"), reco: { kind: "thin" }, notBought: { f24: 74, lostUsd: 2, blockedRetried: 66 } }),
+    row("deepseek-v3", 110.13, { group: "unknown", peak: { hours: [10, 11] }, need: { value: 1100, growth: 0.88, basis: "second" }, supply: q("atLeast", 2400), margin: { value: 1300, status: "ok", kind: "atLeast" }, reco: { kind: "unmeasured" } }),
+    row("qwen3-coder", 39.35, { group: "unknown", peak: { hours: [23, 0] }, need: { value: 420, growth: 1, basis: "second" }, supply: q("accumulating"), margin: { value: null, status: "none", kind: "accumulating" }, reco: { kind: "unmeasured" } }),
+    row("gpt-5-mini", 0.4, { group: "small", need: null, supply: q("unavailable"), margin: { value: null, status: "none", kind: "unavailable" }, peak: null }),
   ];
   // 没开错误日志、数据积累中时所有模型都判不了（group unknown，量很小的除外）
-  const unknown = (r, extra) => ({ ...r, group: r.group === "small" ? "small" : "unknown", margin: { value: null, status: "none" }, reco: r.reco.kind === "topup" ? r.reco : { kind: "unmeasured" }, ...extra });
+  const unknown = (r, extra) => ({ ...r, group: r.group === "small" ? "small" : "unknown", margin: { value: null, status: "none", kind: "unavailable" }, reco: r.reco.kind === "topup" ? r.reco : { kind: "unmeasured" }, ...extra });
   if (noLog) rows = rows.map((r) => unknown(r, { supply: q("unavailable"), keyUsers: { count: 0, top: [] }, notBought: null }));
   if (accum) rows = rows.map((r) => unknown(r, { supply: q("accumulating") }));
   // 开着但一条错误也没有：能给还是「至少 X」（最高成交是真的），余量、没买到、被挡写「—」
@@ -469,13 +469,13 @@ function modelsFixture({ mode = "ok", consumeLog = true, headroomNull = false } 
   const upstreams = [
     up("main", "主力上游", 5, q("measured", 9000), 9000, 0, true, { rate_limit: 1452, upstream: 0, auth_quota: 0, other: 0 }, { count: 12, names: ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5"] }, ["topup", "addKey"]),
     up("backup", "备用上游", 432, q("measured", 5200), 4100, 1100, false, { rate_limit: 0, upstream: 486, auth_quota: 0, other: 0 }, { count: 5, names: ["gpt-5", "claude-sonnet-4.6"] }, ["weights"]),
-    up("c", "上游丙", 960, q("atLeast", 4400), 2600, 1800, false, { ...none }, { count: 8, names: ["deepseek-v3", "gpt-5-mini"] }, []),
+    up("c", "上游丙", 960, q("atLeast", 4400), 2600, 1800, false, { ...none }, { count: 8, names: ["deepseek-v3", "gpt-5-mini"] }, ["topup"]),
   ];
   const headroom = {
     state: noLog || noRecords ? "noErrorLog" : accum ? "accumulating" : "ok", noErrorLogReason: noLog ? "switchOff" : noRecords ? "noRecords" : null,
     errorLog: { coveredDays: noLog ? null : accum ? 1 : 9, needDays: 7, daysLeft: accum ? 6 : 0 }, consumeLog, peak: { hours: [21, 22] },
     kpis: {
-      willShort: noLog || noRecords ? null : { count: 3, worst: { name: "claude-sonnet-4.6", gap: 1000, peak: { hours: [21, 22] } } },
+      willShort: noLog || noRecords || accum ? null : { count: 3, worst: { name: "claude-sonnet-4.6", gap: 1000, peak: { hours: [21, 22] } } },
       notBought: noLog || noRecords ? null : { f24: 420, lostUsd: 38 / 7, blockedRetried: 1400, keyUsers: 4 },
       topup: { count: 1, first: { upstreamId: "main", name: "主力上游", hoursLeft: 5 } },
     },
@@ -536,7 +536,7 @@ test("模型供需（电脑）：一屏、顶上三个数、主表默认只列�
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByText(MODELS_COPY.readNote("16:50"), { exact: true }).waitFor();
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
-  assert.match(await kpi(MODELS_COPY.kpi.willShort).innerText(), /3 个模型[\s\S]*最缺的 claude-sonnet-4\.6 至少差约 1,000 次\/小时（21–23 点）/);
+  assert.match(await kpi(MODELS_COPY.kpi.willShort).innerText(), /3 个模型[\s\S]*最缺的 claude-sonnet-4\.6 缺约 1,000 次\/小时（21–23 点）/);
   assert.match(await kpi(MODELS_COPY.kpi.notBought).innerText(), /至少 420 个[\s\S]*至少少收约 ¥38\.\d\d；另有 1,400 个被挡过后靠重试买到。碰到 4 个重点用户/);
   assert.match(await kpi(MODELS_COPY.kpi.topup).innerText(), /1 家[\s\S]*主力上游[\s\S]*约 5 小时后没钱，撑不到今晚高峰/);
   // 默认只列缺的（3 个）、余量薄的（1 个）和判不了的（2 个）：6 行；量很小的 1 个收在按钮后面
@@ -560,7 +560,8 @@ test("模型供需（电脑）：一屏、顶上三个数、主表默认只列�
   assert.equal(cells[1], "21–23 点");
   assert.match(cells[2], /约 9,800\s*涨幅 \+9%/);
   assert.equal(cells[3], "约 8,800");
-  assert.match(cells[4], /至少缺 1,000/);
+  assert.match(cells[4], /缺约 1,000/);
+  assert.equal(cells[4].trim().length < 12, true, "缺口那一格没被截断");
   assert.match(cells[5], /orange-lab\s*wu-team/);
   assert.match(cells[6], /加约 1 把备用上游的 Key\s*测到一把约 3,000 次\/小时/);
   assert.equal(await sonnet.locator(".jy-hmargin-text.is-short .jy-sym").count(), 1, "缺的带红菱形");
@@ -570,7 +571,7 @@ test("模型供需（电脑）：一屏、顶上三个数、主表默认只列�
   assert.equal(await sonnet.locator(".jy-hbar .over").count(), 1);
   assert.deepEqual(await modelRow(page, "gemini-2.5-pro").locator("td").nth(6).innerText().then((text) => text.split("\n")), ["先给主力上游充值", "约 5 小时后没钱，撑不到今晚"]);
   assert.deepEqual(await modelRow(page, "claude-haiku-4.5").locator("td").nth(6).innerText().then((text) => text.split("\n")), ["换一家，或找主力上游提额度", "它的 3 把 Key 一起被限流，是按账号限的"]);
-  assert.match(await modelRow(page, "gpt-5").locator("td").nth(4).innerText(), /余 300/);
+  assert.match(await modelRow(page, "gpt-5").locator("td").nth(4).innerText(), /余约 300/);
   assert.match(await modelRow(page, "gpt-5").locator("td").nth(6).innerText(), /余量很薄，留意\s*余约 300 次\/小时/);
   // 按上游看：满了（红字）/ 空约、上限约 / 至少、被挡按原因、供几个模型、带 ↗ 的动作链接都跳到你的站或上游网站
   const main = page.locator("#jy-up-main"), backup = page.locator("#jy-up-backup"), third = page.locator("#jy-up-c");
@@ -584,12 +585,16 @@ test("模型供需（电脑）：一屏、顶上三个数、主表默认只列�
   assert.equal(await main.getByRole("link", { name: MODELS_COPY.upstream.actions.addKey }).getAttribute("href"), "https://main.example/console/token");
   assert.equal(await backup.getByRole("link", { name: MODELS_COPY.upstream.actions.weights }).getAttribute("href"), "https://own.example/console/channel");
   assert.equal(await main.getByRole("link", { name: MODELS_COPY.upstream.actions.topup }).getAttribute("target"), "_blank");
+  assert.equal(await third.getByRole("link").count() >= 0 && await third.getByRole("link", { name: MODELS_COPY.upstream.actions.topup }).count(), 0, "Sub2API 上游不给链接");
+  await third.getByText(MODELS_COPY.upstream.actions.topup, { exact: true }).waitFor();
   await page.getByText(MODELS_COPY.upstream.foot, { exact: true }).waitFor();
   // 判不了的：没测到的能给写「至少」，余量写「余 至少」，竖线虚线；数据积累中的写「数据积累中」；点开「其余」多出量很小的 1 个，整页仍不滚
   await page.getByRole("button", { name: MODELS_COPY.restShow(1), exact: true }).click();
   assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "deepseek-v3", "qwen3-coder", "gpt-5-mini"]);
   assert.match(await modelRow(page, "deepseek-v3").locator("td").nth(3).innerText(), /至少 2,400/);
-  assert.match(await modelRow(page, "deepseek-v3").locator("td").nth(4).innerText(), /余 至少 1,300/);
+  assert.equal((await modelRow(page, "deepseek-v3").locator("td").nth(4).innerText()).trim(), "上限还没测到", "能给只是「至少」：不写余多少、不说缺");
+  assert.equal(await modelRow(page, "deepseek-v3").locator(".jy-hbar .over").count(), 0, "不画红色缺口");
+  assert.equal(await modelRow(page, "qwen3-coder").locator("td").nth(1).innerText(), "23–1 点", "跨午夜写 23–1 点");
   assert.equal(await modelRow(page, "deepseek-v3").locator(".jy-hbar .line.is-dashed").count(), 1, "没测到的上限竖线是虚线");
   assert.equal(await modelRow(page, "qwen3-coder").locator("td").nth(3).innerText(), MODELS_COPY.accumulating);
   assert.equal(await fits(), true);
@@ -620,7 +625,7 @@ test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四
   const k = drawer.locator(".jy-models-drawer-kpis > div");
   assert.match(await k.nth(0).innerText(), /今晚高峰要[\s\S]*约 9,800[\s\S]*21–23 点，次\/小时；涨幅 \+9%/);
   assert.match(await k.nth(1).innerText(), /能给[\s\S]*约 8,800[\s\S]*2 个渠道的上限加起来/);
-  assert.match(await k.nth(2).innerText(), /缺口[\s\S]*1,000[\s\S]*加约 1 把备用上游的 Key/);
+  assert.match(await k.nth(2).innerText(), /缺口[\s\S]*约 1,000[\s\S]*加约 1 把备用上游的 Key/);
   assert.match(await k.nth(3).innerText(), /没买到[\s\S]*至少 186 个[\s\S]*近 24 小时，至少少收约 ¥17\.00；另有 1,054 个被挡过后靠重试买到/);
   // 图：24 根柱子叠成交和被挡；成交是钴蓝不是黑的；上限是实线（测到的）；高峰框；图例两种上限都列
   const bars = drawer.locator(".jy-hbar-col");
@@ -633,7 +638,7 @@ test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四
   assert.equal(await drawer.locator(".jy-hpeak").count(), 1, "高峰框");
   await drawer.getByText(MODELS_COPY.drawer.legendMeasured, { exact: true }).waitFor();
   await drawer.getByText(MODELS_COPY.drawer.legendAtLeast, { exact: true }).waitFor();
-  await drawer.getByText("每晚 21–24 点超过上限，被挡的多是上游限流，其中至少 186 个最后没买到；平时有约 3,000 次/小时的余量。", { exact: true }).waitFor();
+  await drawer.getByText("每天 21–24 点超过上限，被挡的多是上游限流，其中至少 186 个最后没买到；平时有约 3,000 次/小时的余量。", { exact: true }).waitFor();
   // 切到近 7 天按钟点平均：还是 24 根（钟点 0–23 顺序）
   await drawer.getByRole("button", { name: MODELS_COPY.drawer.clock7d, exact: true }).click();
   assert.equal(await drawer.locator(".jy-hbar-col").count(), 24);
@@ -664,6 +669,17 @@ test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四
   // 找货帮手：多一列「高峰空约」；还没在供的有「去绑定渠道」
   const finder = drawer.locator("table").nth(1);
   assert.deepEqual(await finder.locator("tbody tr").evaluateAll((rows) => rows.map((tr) => [tr.cells[0].innerText, tr.cells[3].innerText])), [["上游丙", "空约 1,800"], ["备用上游", "空约 1,100"], ["主力上游", "空约 0"]]);
+  assert.equal(await finder.locator("thead th").nth(3).innerText(), MODELS_COPY.drawer.finderCols.room, "表头写「高峰空多少」，格子里写「空约 N」，不重复");
+  // 字不被挤成一个字一行：每个上游名只占一行，每行的最后一格还在表里
+  const finderFit = await finder.evaluate((table) => {
+    const frame = table.getBoundingClientRect(), wrap = table.parentElement;
+    return [...table.querySelectorAll("tbody tr")].map((tr) => {
+      const range = document.createRange(); range.selectNodeContents(tr.cells[0]);
+      const last = tr.cells[5].getBoundingClientRect();
+      return { nameLines: range.getClientRects().length, nameWidth: Math.round(tr.cells[0].getBoundingClientRect().width), lastInside: last.right <= frame.right + 1, scrolls: wrap.scrollWidth > wrap.clientWidth };
+    });
+  });
+  for (const item of finderFit) assert.deepEqual([item.nameLines, item.nameWidth >= 70, item.lastInside, item.scrolls], [1, true, true, false], JSON.stringify(item));
   assert.equal(await finder.getByRole("link", { name: /去绑定渠道：上游丙/ }).getAttribute("href"), "/stations?action=channels&stationId=c&bind=1");
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-drawer-1440x900.png` }); }
 });
@@ -675,7 +691,7 @@ test("模型供需（手机 375）：顶上三个数两两一排、一个模型�
   assert.equal(await cards.count(), 6, "手机也是默认只列缺的、余量薄的和判不了的");
   await page.getByText(MODELS_COPY.restNote(1), { exact: true }).waitFor();
   const first = await cards.first().innerText();
-  assert.match(first, /claude-sonnet-4\.6[\s\S]*至少缺 1,000/);
+  assert.match(first, /claude-sonnet-4\.6[\s\S]*缺约 1,000/);
   assert.match(first, /21–23 点 要约 9,800 · 能给约 8,800/);
   assert.match(first, /orange-lab/);
   assert.match(first, /建议：加约 1 把备用上游的 Key（测到一把约 3,000 次\/小时）/);
@@ -733,6 +749,9 @@ test("模型供需：刚开错误日志、数据不够——灰色提示条带�
   assert.equal(await page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noConsumeLead }).count(), 0, "整站消费日志开着，没有那一条");
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
   assert.match(await kpi(MODELS_COPY.kpi.notBought).innerText(), /至少 420 个/, "没买到照常");
+  assert.match(await kpi(MODELS_COPY.kpi.willShort).innerText(), /—[\s\S]*数据积累中，还差 6 天/, "不是「要开错误日志」：错误日志开着");
+  // 判不了的模型都列出来，按今晚要多少排（要得多的在前）
+  assert.deepEqual(await page.locator("tbody .jy-models-name").allInnerTexts(), ["claude-sonnet-4.6", "gpt-5", "gemini-2.5-pro", "claude-haiku-4.5", "deepseek-v3", "qwen3-coder"]);
   const sonnet = modelRow(page, "claude-sonnet-4.6");
   const cells = await sonnet.locator("td").allInnerTexts();
   assert.equal(cells[3], MODELS_COPY.accumulating);
@@ -749,6 +768,7 @@ test("模型供需：开着但这 24 小时一条错误日志都没有——灰�
   const banner = page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noRecordsLead });
   await banner.waitFor();
   assert.equal(await banner.locator(".jy-sym").count(), 1);
+  assert.match(await banner.innerText(), /ERROR_LOG_ENABLED=true 再重启；也可能站上还没有请求被挡/);
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
   for (const title of [MODELS_COPY.kpi.willShort, MODELS_COPY.kpi.notBought]) assert.match(await kpi(title).innerText(), /—[\s\S]*这 24 小时一条错误日志都没有/);
   const cells = await modelRow(page, "claude-sonnet-4.6").locator("td").allInnerTexts();
@@ -765,7 +785,9 @@ test("模型供需：开着但这 24 小时一条错误日志都没有——灰�
 test("模型供需：没开「算应付成本」——提示条「要打开「算应付成本」才看得出能给多少」，能给和上限写「—」，建议写测不出的原因", async (t) => {
   const { page } = await openModelsPage(t, { consumeLog: false });
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noConsumeLead }).waitFor();
+  const consume = page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noConsumeLead });
+  await consume.waitFor();
+  assert.equal(await consume.getByRole("link", { name: MODELS_COPY.banner.noConsumeLink }).getAttribute("href"), "/settings");
   const cells = await modelRow(page, "claude-sonnet-4.6").locator("td").allInnerTexts();
   assert.equal(cells[3].trim(), "—");
   assert.equal(cells[4].trim(), "—");
@@ -773,7 +795,7 @@ test("模型供需：没开「算应付成本」——提示条「要打开「�
   assert.match(await page.locator("#jy-up-main").innerText(), /上限：—/);
 });
 
-test("模型供需：高峰余量这一次没算出来（headroom 是 null）——整页写「读不到高峰余量」，不画表和卡片", async (t) => {
+test("模型供需：高峰余量这一次没算出来（headroom 是 null）——在放高峰余量的地方写「这次数据量太大，没算高峰余量。」，不画表和卡片", async (t) => {
   const { page } = await openModelsPage(t, { headroomNull: true });
   assert.equal(await page.locator(".jy-models-panel").count(), 0);
   assert.equal(await page.locator(".jy-models-upstreams").count(), 0);
