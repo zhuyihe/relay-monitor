@@ -36,7 +36,9 @@ export const rateText = (rate: number) => rate < 0 ? COPY.gap.underRate(pctText(
 
 // 一行各项在显示币种下的数：收入按自营站点的汇率，成本按这个上游的汇率；毛利 = 收入 − 实付（两边各自换算后再减）
 export function rowMoney(row: ProfitRow, currency: ReconciliationCurrency) {
-  const income = toDisplay(row.incomeUsd, row.rates?.income, currency), actual = toDisplay(row.actualCostUsd, row.rates?.cost, currency);
+  // 人民币：接口按天换好的数（每天按那天结账时记下的汇率）优先；没给的退回按这一行现在的汇率
+  const exact = currency === "CNY" && finite(row.incomeCny) && finite(row.actualCostCny);
+  const income = exact ? row.incomeCny! : toDisplay(row.incomeUsd, row.rates?.income, currency), actual = exact ? row.actualCostCny! : toDisplay(row.actualCostUsd, row.rates?.cost, currency);
   return {
     income, actual,
     uncountedIncome: toDisplay(row.uncountedIncomeUsd, row.rates?.income, currency),
@@ -105,7 +107,8 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
     if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)} 0:00–${formatZonedTime(Number.isFinite(asOf) ? asOf : ctx.now ?? Date.now(), ctx.tz)} · ${COPY.todayCaption}`;
     const text = rangeText(page, ctx);
     if (page.range?.preset === "since") return `${text} · ${COPY.presets.since}`; // 「10月20日–今天 · 开始算以来」
-    if (isSingleDay(page)) return `${text} ${weekdayOfDayKey(rangeDays(page).first)} · ${page.dayCounts.fixed ? COPY.fixed : COPY.gap.reading}`;
+    // 看一天：固定了写「已固定」；没固定、又有渠道在读取时，页顶后面那句「其中 N 个渠道还在读取」已经说了，这里不再单独写「还在读取」（不连着出现两次）
+    if (isSingleDay(page)) return `${text} ${weekdayOfDayKey(rangeDays(page).first)}${page.dayCounts.fixed ? ` · ${COPY.fixed}` : page.rows.some((row) => row.reading) ? "" : ` · ${COPY.gap.reading}`}`;
     if (isAllFixed(page)) return `${text} · ${COPY.fixed}`;
     const parts = [page.dayCounts.fixed ? COPY.daysFixed(page.dayCounts.fixed) : "", page.dayCounts.reading ? COPY.daysReading(page.dayCounts.reading) : "", page.dayCounts.today ? COPY.todayLive : ""].filter(Boolean);
     return `${text} · ${parts.join("，")}`;
@@ -177,8 +180,9 @@ export const swappedUpstream = (row: ProfitRow) => new Set((row.keys || []).map(
 export const keyLabel = (key: { name: string; ratio: number | null; upstream: { name: string | null } }, withUpstream: boolean) =>
   `${withUpstream ? `${key.upstream?.name ?? UPSTREAM_GONE} · ` : ""}${key.name}${ratioPart(key.ratio)}`;
 // Key 行的数：和渠道行同一套换算（收入按自营站点汇率、成本按这个上游的汇率）；读不到的写「—」
-export function keyCells(key: Pick<ProfitKeyRow, "incomeUsd" | "costUsd">, row: ProfitRow, ctx: Ctx) {
-  const income = toDisplay(key.incomeUsd, row.rates?.income, ctx.currency), actual = toDisplay(key.costUsd, row.rates?.cost, ctx.currency);
+export function keyCells(key: Pick<ProfitKeyRow, "incomeUsd" | "costUsd"> & { incomeCny?: number | null; costCny?: number | null }, row: ProfitRow, ctx: Ctx) {
+  const exact = ctx.currency === "CNY" && finite(key.costCny) && (key.incomeUsd == null || finite(key.incomeCny));
+  const income = exact && key.incomeUsd != null ? key.incomeCny! : toDisplay(key.incomeUsd, row.rates?.income, ctx.currency), actual = exact ? key.costCny! : toDisplay(key.costUsd, row.rates?.cost, ctx.currency);
   const gross = income != null && actual != null ? income - actual : null;
   return { income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null };
 }
@@ -268,7 +272,8 @@ export function chartDays(page: ProfitPageResponse, ctx: Ctx): ChartDay[] {
       const cell = row.daily.find((item) => item.day === day);
       if (!cell || cell.state === "notStarted" || cell.state === "future") continue;
       if (cell.state !== "fixed") fixed = false;
-      const i = toDisplay(cell.incomeUsd, row.rates?.income, ctx.currency), c = toDisplay(cell.actualCostUsd, row.rates?.cost, ctx.currency);
+      const exact = ctx.currency === "CNY" && finite(cell.incomeCny) && finite(cell.actualCostCny);
+      const i = exact ? cell.incomeCny! : toDisplay(cell.incomeUsd, row.rates?.income, ctx.currency), c = exact ? cell.actualCostCny! : toDisplay(cell.actualCostUsd, row.rates?.cost, ctx.currency);
       if (i == null || c == null) continue;
       income += i; actual += c; any = true;
     }

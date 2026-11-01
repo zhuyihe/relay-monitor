@@ -40,7 +40,9 @@ function Verify({ summary, children }: { summary: { text: string; open: boolean;
 function KeysTable({ detail, keys, income, cost, incomeRate, costRate, ctx }: { detail: ProfitDetailResponse; keys: ProfitDetailKey[]; income: (usd: number | null | undefined) => string; cost: (usd: number | null | undefined) => string; incomeRate: number | null; costRate: number | null; ctx: Ctx }) {
   const text = COPY.detail.keys, withUpstream = !!detail.swappedUpstream;
   const cells = keys.map((key) => {
-    const i = toDisplay(key.incomeUsd, incomeRate, ctx.currency), c = toDisplay(key.costUsd, costRate, ctx.currency), g = i != null && c != null ? i - c : null;
+    // 这一把 Key 这天的汇率：已固定的天是结账时记的（换上游那天两把 Key 各按各上游的）
+    const kc = key.costRate ?? costRate, ki = key.incomeRate ?? incomeRate;
+    const i = toDisplay(key.incomeUsd, ki, ctx.currency), c = toDisplay(key.costUsd, kc, ctx.currency), g = i != null && c != null ? i - c : null;
     return { key, i, c, g };
   });
   const sum = (pick: (item: (typeof cells)[number]) => number | null) => cells.every((item) => pick(item) != null) ? cells.reduce((total, item) => total + pick(item)!, 0) : null;
@@ -55,7 +57,7 @@ function KeysTable({ detail, keys, income, cost, incomeRate, costRate, ctx }: { 
       <tbody>{cells.map(({ key, i, c, g }) => <tr key={String(key.tokenId)}>
         <td>{withUpstream ? `${key.upstream?.name ?? EMPTY} · ` : ""}{key.name}</td>
         <td className="jy-profit-num">{key.ratio != null ? `×${ratioText(key.ratio)}` : EMPTY}{key.ratioKind === "actual_over_standard" ? <small>{text.ratioKind}</small> : null}</td>
-        <td className="jy-profit-num">{money(c)}</td><td className="jy-profit-num">{key.rawUsd != null ? fmtMoney(toDisplay(key.rawUsd, costRate, ctx.currency), ctx.currency) : EMPTY}</td>
+        <td className="jy-profit-num">{money(c)}</td><td className="jy-profit-num">{key.rawUsd != null ? fmtMoney(toDisplay(key.rawUsd, key.costRate ?? costRate, ctx.currency), ctx.currency) : EMPTY}</td>
         <td className="jy-profit-num">{money(i)}</td><td className="jy-profit-num">{money(g)}</td><td className="jy-profit-num">{g == null ? EMPTY : marginText(g, i)}</td>
       </tr>)}</tbody>
       <tfoot><tr><td>{COPY.detail.total}</td><td /><td className="jy-profit-num">{money(total.c)}</td><td className="jy-profit-num">{total.raw != null ? fmtMoney(toDisplay(total.raw, costRate, ctx.currency), ctx.currency) : EMPTY}</td><td className="jy-profit-num">{money(total.i)}</td><td className="jy-profit-num">{money(total.g)}</td><td className="jy-profit-num">{total.g == null ? EMPTY : marginText(total.g, total.i)}</td></tr></tfoot>
@@ -66,9 +68,15 @@ function KeysTable({ detail, keys, income, cost, incomeRate, costRate, ctx }: { 
 }
 
 function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: ProfitRow; page: ProfitPageResponse; ctx: Ctx }) {
-  const incomeRate = row.rates?.income ?? null, costRate = row.rates?.cost ?? null;
+  // 汇率用这一天的（已固定的天是结账时记下的、换上游之前是旧上游的），接口没给才退回这一行现在的
+  const incomeRate = detail.rates?.income ?? row.rates?.income ?? null, costRate = detail.rates?.cost ?? row.rates?.cost ?? null;
   const income = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, incomeRate, ctx.currency), ctx.currency);
   const cost = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, costRate, ctx.currency), ctx.currency);
+  // 这天几块各按各的汇率换好的总数（接口算的）；没有就退回按上面那个汇率换
+  const incomeTotal = ctx.currency === "CNY" && detail.income.cny != null ? fmtMoney(detail.income.cny, ctx.currency) : income(detail.income.usd);
+  const actualTotal = ctx.currency === "CNY" && detail.actual.cny != null ? fmtMoney(detail.actual.cny, ctx.currency) : cost(detail.actual.usd);
+  const grossTotal = detail.grossProfitUsd == null ? EMPTY : ctx.currency === "CNY" && detail.income.cny != null && detail.actual.cny != null ? fmtMoney(detail.income.cny - detail.actual.cny, ctx.currency)
+    : fmtMoney(toDisplay(detail.income.usd, incomeRate, ctx.currency)! - toDisplay(detail.actual.usd, costRate, ctx.currency)!, ctx.currency);
   const channelName = (channelId: number) => row.channels.find((channel) => channel.channelId === channelId)?.name || `渠道 ${channelId}`;
   const many = row.channels.length > 1;
   const group = groupText(detail.expected.groupName, detail.expected.groupRatio) || (detail.expected.groupRatio != null ? `×${ratioText(detail.expected.groupRatio)}` : EMPTY);
@@ -86,16 +94,16 @@ function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: P
   const verify = detail.keyChangeRatioDiffers ? { text: COPY.detail.verify.keyRatioDiffers, open: false, tone: null } : verifyView(detail, page, ctx, costRate, keyChangeWhen(detail.expected.keyChange));
   const keys = detail.keys && detail.keys.length >= 2 ? detail.keys : null;
   return <div className="jy-profit-detail">
-    <Section title={COPY.detail.income} value={income(detail.income.usd)}>
+    <Section title={COPY.detail.income} value={incomeTotal}>
       <p>{many ? COPY.detail.incomeFromMany(row.channels.length) : COPY.detail.incomeFrom(channelName(row.channels[0]?.channelId))}{admin ? `，${admin}` : ""}。</p>
       {many && detail.income.byChannel?.length ? <ul className="jy-profit-detail__list">{detail.income.byChannel.map((item) => <li key={item.channelId}><span>{channelName(item.channelId)}</span><b>{income(item.usd)}</b></li>)}</ul> : null}
     </Section>
-    <Section title={COPY.detail.actual} value={cost(detail.actual.usd)}>
+    <Section title={COPY.detail.actual} value={actualTotal}>
       {detail.unavailable ? <p>{[detail.unavailable.title, detail.unavailable.detail].filter(Boolean).join("。") || COPY.detail.unavailableUnknown}</p>
         : keys ? <KeysTable detail={detail} keys={keys} income={income} cost={cost} incomeRate={incomeRate} costRate={costRate} ctx={ctx} />
           : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
     </Section>
-    <Section title={COPY.detail.gross} value={detail.grossProfitUsd == null ? EMPTY : fmtMoney(toDisplay(detail.income.usd, incomeRate, ctx.currency)! - toDisplay(detail.actual.usd, costRate, ctx.currency)!, ctx.currency)}>
+    <Section title={COPY.detail.gross} value={grossTotal}>
       <p>{COPY.detail.grossFormula}</p>
     </Section>
     <Verify key={`${detail.day}:${verify.open}`} summary={verify}>

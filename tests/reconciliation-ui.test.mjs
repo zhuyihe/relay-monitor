@@ -400,7 +400,7 @@ test("按 Key 算利润（近 7 天）：换过 Key 的渠道标签带日子；�
       fixtureKey("sk-old", { state: "swapped", firstDay: "2026-10-03", lastDay: "2026-10-07", days: 5, incomeUsd: 3, costUsd: 1, rawUsd: 2, grossProfitUsd: 2, incomeBasis: "raw" })] },
     { ...profitRow("rule-4", "Rule D", { income: 1, cost: 0.4 }), bound: false, unboundOn: "2026-10-05", keys: [fixtureKey("oai-D", { state: "unbound", firstDay: "2026-10-03", lastDay: "2026-10-05", days: 3, incomeUsd: 1, costUsd: 0.4, rawUsd: 0.8, grossProfitUsd: 0.6 })] },
   ];
-  const { page } = await openDailyPage(t, { rows, viewport: { width: 1440, height: 900 }, pageOf: (body) => profitPage(rows, { preset: body.preset === "7d" ? "7d" : "today", customPreset: body.preset }) });
+  const { page } = await openDailyPage(t, { rows, viewport: { width: 1440, height: 900 }, clock: Date.parse(PROFIT_AS_OF), pageOf: (body) => profitPage(rows, { preset: body.preset === "7d" ? "7d" : "today", customPreset: body.preset }) });
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
   await page.locator(".jy-profit-caption").getByText(`10月3日–10月9日 · ${PROFIT_COPY.daysFixed(6)}，${PROFIT_COPY.todayLive}`, { exact: true }).waitFor();
   assert.deepEqual(await page.locator(".jy-profit-group__title").allInnerTexts(), [PROFIT_COPY.table.groupUnbound(1)], "多天只有「已解绑」一行");
@@ -451,7 +451,8 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
   const page = await context.newPage(), onboardingCalls = [];
   settleButtonLookups(page);
   onboardingRequests.set(page, onboardingCalls);
-  if (clock) await page.clock.install();
+  // clock 是毫秒数时把浏览器的「现在」钉在那一刻（页面里「同月不带月份」这类判断看浏览器的现在，不钉就跟着真实日期走，过了月底夹具的 10 月就变成上个月）
+  if (clock) await page.clock.install(typeof clock === "number" ? { time: clock } : undefined);
   page.setDefaultTimeout(UI_STEP_TIMEOUT_MS);
   await page.route("**/api/**", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
