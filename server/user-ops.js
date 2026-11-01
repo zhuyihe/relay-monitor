@@ -16,9 +16,7 @@ import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../li
 import { formatZonedDateTime } from "../lib/format.js";
 import { OWN_RATE_LIMIT, ownRequestState } from "../lib/own-request-budget.js";
 import { USER_BALANCE, bigUsersOf, dailyAverages, decideUserAlert, userBalanceMessage, userRunway } from "../lib/user-balance.js";
-import { USER_MAIL, buildUserMail, decideUserMail, mailKindOf, userMailPayUrl } from "../lib/user-mail.js";
 import { getOwnUsers } from "./own-helpers.js";
-import { mailMoneyOf, sendUserMail, userMailChannel } from "./user-ops-mail.js";
 import { UserOpsStore } from "./user-ops-store.js";
 
 const HOUR_MS = 3600000, DAY_MS = 86400000;
@@ -77,7 +75,7 @@ function guardedStore(ops, alive) {
   });
 }
 
-export function createUserOps(rt, { store = null, now = () => Date.now(), send = broadcast, mail = sendUserMail } = {}) {
+export function createUserOps(rt, { store = null, now = () => Date.now(), send = broadcast } = {}) {
   const opsStore = () => store || (rt.pool ? (rt._userOpsStore ||= new UserOpsStore(rt.pool)) : null);
   const lastPoints = new Map(); // 站点 id → Map(用户 id → { t, balanceUsd })，第一次从库里读，之后在内存里跟着写
   const state = { lastRunAt: 0, lastLiveAt: 0, liveAt: 0, viewedAt: null, lastPruneAt: 0, inflight: null, lastUsers: null, gen: 0 };
@@ -223,44 +221,6 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     return failed ? { pushed, failed } : { pushed };
   }
 
-  // 给重点用户发邮件（规则「给用户发邮件」，默认关，要先选一个邮件类通知方式）：只发给重点用户、要在用户站里填了邮箱；
-  // 每个用户一轮最多两封（快用完、1 天以内或用完），充值以后重新算；一轮最多发 MAX_PER_ROUND 封，多的下一轮接着发；
-  // 先把级别和重试时刻写进库再发，发成功清掉重试时刻；没发出去的 30 分钟后再试一次。邮箱只在内存里，不进日志、不进库。
-  // 开关关着：不发，只把级别记到当前，开了以后不补发
-  async function mails(ops, own, at, view) {
-    const rules = rt.store?.rules || {};
-    if (!view.pushAllowed) return { sent: 0 };
-    const channel = userMailChannel(rt);
-    const on = rules.onUserMail === true && !!channel;
-    const emails = new Map();
-    for (const user of state.lastUsers || []) if (user.email) emails.set(Number(user.id), user.email);
-    const states = await ops.getMailStates(own.id);
-    const plan = [];
-    for (const id of view.bigIds) {
-      const user = view.users.get(id);
-      if (!user || user.state === "warming") continue;
-      const prev = states.get(id) || null;
-      const decision = decideUserMail({ prev, runway: user, level1Days: view.level1Days, now: at });
-      if (decision.action === "none") continue;
-      if (decision.action === "clear") { await ops.saveMailState(own.id, id, decision.state, at); continue; }
-      if (!on) { await ops.saveMailState(own.id, id, { level: decision.level, retryAt: null, tries: decision.state.tries }, at); continue; }
-      if (!emails.has(id)) continue; // 没填邮箱：不写状态，填了以后下一轮再看
-      plan.push({ user, decision });
-    }
-    const out = { sent: 0, failed: 0, waiting: Math.max(0, plan.length - USER_MAIL.MAX_PER_ROUND) };
-    if (!plan.length) return out;
-    const money = mailMoneyOf(own), payUrl = userMailPayUrl(own, rules);
-    for (const { user, decision } of plan.slice(0, USER_MAIL.MAX_PER_ROUND)) {
-      await ops.saveMailState(own.id, user.id, decision.state, at); // 先写再发
-      alive();
-      const content = buildUserMail({ kind: mailKindOf(decision.level, user), siteName: own.name, username: user.username, balanceUsd: user.balanceUsd, days: user.days, money, payUrl });
-      let result;
-      try { result = await mail(channel, emails.get(user.id), content); } catch { result = { ok: false }; }
-      if (result?.ok) { out.sent += 1; await ops.saveMailState(own.id, user.id, { ...decision.state, retryAt: null }, at); } else out.failed += 1;
-    }
-    return out;
-  }
-
   async function pruneIfDue(ops, own, at) {
     if (at - state.lastPruneAt < USER_OPS.PRUNE_EVERY_MS) return;
     state.lastPruneAt = at;
@@ -311,7 +271,6 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
         const view = await evaluate(ops, own, at, { backfillState, fresh });
         alive();
         out.alerts = await alerts(ops, own, at, view);
-        try { out.mails = await mails(ops, own, at, view); } catch (error) { note(out, "mails", error); }
         await pruneIfDue(ops, own, at);
       } catch (error) { note(out, "evaluate", error); }
       out.backfill = backfillState;

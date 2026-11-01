@@ -414,16 +414,6 @@ export async function ensureSchema(pool) {
     updated_at_ms BIGINT NOT NULL,
     PRIMARY KEY (station_id, user_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-  // 给重点用户发邮件的状态（用户运营第三步）：每个用户一行，只有级别和重试时刻，不存邮箱（邮箱只在内存里）
-  await pool.query(`CREATE TABLE IF NOT EXISTS user_ops_mail (
-    station_id VARCHAR(32) NOT NULL,
-    user_id BIGINT NOT NULL,
-    level TINYINT NOT NULL DEFAULT 0,
-    retry_at_ms BIGINT NULL,
-    tries TINYINT NOT NULL DEFAULT 0,
-    updated_at_ms BIGINT NOT NULL,
-    PRIMARY KEY (station_id, user_id)
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 搬旧账失败不挡启动：记日志、不写完成标记，下次启动重试。
   try { await backfillReconciliationLedger(pool); } catch (err) { console.error("  结账账本迁移旧账失败，下次启动重试:", err?.message); }
 }

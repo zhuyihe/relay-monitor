@@ -104,19 +104,6 @@ export class UserOpsStore {
       [stationId, Number(userId), state.level, num(state.notifiedAt), num(state.lastBalanceUsd), now]);
   }
 
-  // 邮件状态（给重点用户发邮件）：{ level 已发到哪一封（0 没发、1 第一封、2 第二封）, retryAt 没发出去时的重试时刻, tries 试了几次 }；不存邮箱
-  async getMailStates(stationId) {
-    const [rows] = await this.pool.query("SELECT user_id, level, retry_at_ms, tries FROM user_ops_mail WHERE station_id = ?", [stationId]);
-    return new Map(rows.map((row) => [Number(row.user_id), { level: Number(row.level), retryAt: num(row.retry_at_ms), tries: Number(row.tries) }]));
-  }
-
-  async saveMailState(stationId, userId, state, now = Date.now()) {
-    await this.pool.query(
-      `INSERT INTO user_ops_mail (station_id, user_id, level, retry_at_ms, tries, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE level = VALUES(level), retry_at_ms = VALUES(retry_at_ms), tries = VALUES(tries), updated_at_ms = VALUES(updated_at_ms)`,
-      [stationId, Number(userId), state.level, num(state.retryAt), Number(state.tries) || 0, now]);
-  }
-
   // 清早的数据，一批一批删；返回删了多少行
   async prune(stationId, { usageBeforeMs, balanceBeforeMs }, limit = 5000) {
     const [usage] = await this.pool.query("DELETE FROM user_usage_hours WHERE station_id = ? AND hour_ms < ? LIMIT ?", [stationId, usageBeforeMs, limit]);
@@ -126,7 +113,7 @@ export class UserOpsStore {
 
   // 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）：全清
   async deleteStation(stationId) {
-    for (const table of ["user_balance_points", "user_usage_hours", "user_ops_progress", "user_ops_alert", "user_ops_mail"]) {
+    for (const table of ["user_balance_points", "user_usage_hours", "user_ops_progress", "user_ops_alert"]) {
       await this.pool.query(`DELETE FROM ${table} WHERE station_id = ?`, [stationId]);
     }
   }

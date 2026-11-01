@@ -11,13 +11,11 @@ const hook = registerHooks({ load(url, context, nextLoad) {
     source: "export const withAuth = handler => handler; export const json = (value, status = 200) => Response.json(value, {status});" };
   return nextLoad(url, context);
 } });
-let list, one, big, preview, mailTest;
+let list, one, big;
 try {
   list = (await import("./route.js")).GET;
   one = (await import("./[id]/route.js")).GET;
   big = (await import("./big/route.js")).GET;
-  preview = (await import("./mail-preview/route.js")).GET;
-  mailTest = (await import("./mail-test/route.js")).POST;
 } finally { hook.deregister(); }
 
 const own = { id: "own1", name: "我的站点", isOwn: true, type: "newapi", baseUrl: "https://own.test", accessToken: "tok" };
@@ -61,44 +59,4 @@ test("没有数据库（rt.pool 空）：不报错，整页是 starting，抽屉
   const unset = { store: { list: () => [], settings: {}, rules: {}, channels: [] } };
   assert.equal((await list(request("/api/users"), unset)).status, 400);
   assert.equal((await one(request("/api/users/1"), unset, { id: "1" })).status, 400);
-});
-
-const withMail = (rules = {}, channel = { id: "m1", type: "resend", enabled: true, name: "邮件", config: { apiKey: "re_secret", from: "我的站点 <noreply@own.test>", to: "owner@own.test" } }) => ({
-  store: { list: () => [{ ...own, cnyPerUsd: 7.5 }], settings: {}, rules: { userMailChannelId: "m1", userMailPayUrl: "", ...rules }, channels: [channel] },
-});
-
-test("看邮件样子：三封，写真的站点名、用 ¥ 和售价换算的钱、充值页地址（站长填的优先，没填是站点地址加 /wallet）", async () => {
-  const body = await (await preview(request("/api/users/mail-preview"), withMail())).json();
-  assert.deepEqual(body.mails.map((mail) => mail.key), ["soon", "urgent", "empty"]);
-  assert.equal(body.mails[0].subject, "我的站点 账户余额快用完了，还能用约 2 天");
-  assert.match(body.mails[0].text, /账户余额还剩 ¥12\.40。/, "样例的钱按售价换算后还是 ¥12.40");
-  assert.match(body.mails[0].text, /去充值：https:\/\/own\.test\/wallet/);
-  assert.equal(body.mails[2].subject, "我的站点 账户余额已经用完");
-  const custom = await (await preview(request("/api/users/mail-preview"), withMail({ userMailPayUrl: "https://pay.own.test/topup" }))).json();
-  assert.match(custom.mails[0].text, /去充值：https:\/\/pay\.own\.test\/topup/);
-  assert.equal((await preview(request("/api/users/mail-preview"), none())).status, 400);
-});
-
-test("给自己发一封试信：发到通知方式里填的收件人（站长自己），标题带「试信」，带 HTML；没选通知方式 400；发不出去回 200 带码", async (t) => {
-  const sentBodies = [];
-  t.mock.method(globalThis, "fetch", async (input, init) => { sentBodies.push(JSON.parse(init.body)); return Response.json({ id: "mail-1" }); });
-  const ok = await mailTest(new Request("https://local.test/api/users/mail-test", { method: "POST" }), withMail());
-  assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).ok, true);
-  assert.deepEqual(sentBodies[0].to, ["owner@own.test"]);
-  assert.match(sentBodies[0].subject, /^试信：我的站点 账户余额快用完了/);
-  assert.ok(sentBodies[0].html.includes("去充值"));
-  const missing = await mailTest(new Request("https://local.test/api/users/mail-test", { method: "POST" }), withMail({ userMailChannelId: null }));
-  assert.equal(missing.status, 400);
-  assert.equal((await missing.json()).code, "NOTIFY_CONFIG_MISSING");
-  const wrongType = await mailTest(new Request("https://local.test/api/users/mail-test", { method: "POST" }), withMail({}, { id: "m1", type: "webhook", enabled: true, config: { url: "https://x.test" } }));
-  assert.equal(wrongType.status, 400, "选的不是邮件类的通知方式，当没选");
-  assert.equal((await mailTest(new Request("https://local.test/api/users/mail-test", { method: "POST" }), none())).status, 400);
-  t.mock.method(globalThis, "fetch", async () => Response.json({ message: "domain not verified" }, { status: 403 }));
-  const failed = await mailTest(new Request("https://local.test/api/users/mail-test", { method: "POST" }), withMail());
-  assert.equal(failed.status, 200);
-  const body = await failed.json();
-  assert.equal(body.ok, false);
-  assert.ok(body.code);
-  assert.ok(!JSON.stringify(body).includes("re_secret"), "密钥打码");
 });

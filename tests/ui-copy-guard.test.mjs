@@ -12,7 +12,6 @@ import { fileURLToPath } from "node:url";
 import { Store } from "../db/store.js";
 import { evaluateStation } from "../lib/alerts.js";
 import { buildReport } from "../server/report.js";
-import { buildUserMail } from "../lib/user-mail.js";
 
 const ts = createRequire(import.meta.url)("typescript");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,7 +46,6 @@ const FILES = [
   "lib/smtp.js",
   "lib/alert-rules.js",
   "lib/alerts.js",
-  "lib/user-mail.js",
   "lib/notify.js",
   "server/own-helpers.js",
   "server/report.js",
@@ -226,14 +224,4 @@ test("日报拼出来的整句也不出现 §3.6 的词和多余的英文（运�
   assert.ok(texts.some((text) => text.includes("亏损")) && texts.some((text) => text.includes("没读到")), "两份都跑到了");
   assert.deepEqual(texts.flatMap((text) => FORBIDDEN.filter((word) => text.includes(word)).map((word) => `「${word}」${text}`)), []);
   assert.deepEqual(texts.filter((text) => leftoverEnglish("", text)), []);
-});
-
-test("给用户的邮件拼出来的整句也不出现 §3.6 的词和多余的英文（运行时扫描）；也不出现控制台的名字", () => {
-  const money = (usd) => `¥${usd.toFixed(2)}`;
-  const mails = ["soon", "urgent", "empty"].map((kind) => buildUserMail({ kind, siteName: "我的站点", username: "小李", balanceUsd: 3.1, days: kind === "soon" ? 2 : 0.5, money, payUrl: "https://own.example/wallet" }));
-  // 地址本身是英文，不扫
-  const texts = mails.flatMap(({ subject, text }) => [subject, ...text.split("\n").filter((line) => !line.includes("https://"))]);
-  assert.deepEqual(texts.flatMap((text) => FORBIDDEN.filter((word) => text.includes(word)).map((word) => `「${word}」${text}`)), []);
-  assert.deepEqual(texts.filter((text) => leftoverEnglish("", text)), []);
-  assert.ok(mails.every(({ subject, text, html }) => !(subject + text + html).includes("炬元")));
 });
