@@ -255,6 +255,9 @@ test("高峰余量：整页多 headroom（读库里的小时计数，不多读�
   const page = await modelsPage(rt, { now: NOW });
   assert.deepEqual(pathsOf(requests).sort(), ["/api/channel/", "/api/data/", "/api/data/flow", "/api/perf-metrics/summary"], "和没有高峰余量时读一样多的请求");
   assert.equal(page.headroom.state, "ok", "错误日志读了 10 天");
+  // v5：缺货失败（这个夹具的错误桶只有被拒、没有 F 的拆分，渠道 1 的限流算在 429 里；有没有行看 byModelHour 的 finalFailures）
+  assert.ok(["ok", "noFailures"].includes(page.headroom.lost.status));
+  assert.ok(Array.isArray(page.headroom.lost.rows) && typeof page.headroom.lost.quietCount === "number");
   assert.equal(page.headroom.consumeLog, true);
   const row = page.headroom.rows.find((item) => item.name === "gpt-5");
   assert.ok(row && row.peak && row.peak.hours.length >= 2, "有高峰时段");
