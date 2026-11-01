@@ -377,6 +377,43 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (station_id, slot_ms, channel_id, model, upstream_model, grp, semantic),
     INDEX idx_own_log_buckets_slot (slot_ms)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 用户运营（第一步：数据和后台，server/user-ops-store.js）：用户余额快照、按小时的用量、回补进度、提醒状态；都按站点分开，不加外键。
+  // 余额快照留 14 天、用量留 35 天（server/user-ops.js 每天清一批）
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_balance_points (
+    station_id VARCHAR(32) NOT NULL,
+    user_id BIGINT NOT NULL,
+    t BIGINT NOT NULL,
+    balance_usd DOUBLE NOT NULL,
+    PRIMARY KEY (station_id, user_id, t),
+    INDEX idx_user_balance_points_t (station_id, t)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_usage_hours (
+    station_id VARCHAR(32) NOT NULL,
+    username VARCHAR(128) NOT NULL,
+    hour_ms BIGINT NOT NULL,
+    quota BIGINT NOT NULL DEFAULT 0,
+    requests INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (station_id, username, hour_ms),
+    INDEX idx_user_usage_hours_hour (station_id, hour_ms)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ops_progress (
+    station_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    backfill_cursor_ms BIGINT NULL,
+    backfill_target_ms BIGINT NULL,
+    backfill_started_ms BIGINT NULL,
+    usage_synced_ms BIGINT NULL,
+    balance_synced_ms BIGINT NULL,
+    updated_at_ms BIGINT NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ops_alert (
+    station_id VARCHAR(32) NOT NULL,
+    user_id BIGINT NOT NULL,
+    level TINYINT NOT NULL DEFAULT 0,
+    notified_at_ms BIGINT NULL,
+    last_balance_usd DOUBLE NULL,
+    updated_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (station_id, user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 搬旧账失败不挡启动：记日志、不写完成标记，下次启动重试。
   try { await backfillReconciliationLedger(pool); } catch (err) { console.error("  结账账本迁移旧账失败，下次启动重试:", err?.message); }
 }

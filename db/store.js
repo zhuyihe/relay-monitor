@@ -55,6 +55,8 @@ const DEFAULT_SETTINGS = {
   // 内部标记，不进设置页：轮询时记「上一次看到这个开关是关着的」，只在关→开这一下才跳过整站日志的缺口（总指挥 10-26 定第三轮，
   // server/reconciliation.js、server/own-log-ingest.js）
   expectedCostWasOff: false,
+  // 「用户运营数据采集」总开关（server/user-ops.js）：关了就一个请求都不发给自营站点。默认开
+  userOpsEnabled: true,
 };
 
 function uid(prefix = "st") {
@@ -431,6 +433,7 @@ export class Store {
           },
         };
       }
+      if ("userOpsEnabled" in patch) patch = { ...patch, userOpsEnabled: patch.userOpsEnabled !== false }; // 只有明确关（false）才关，别的值当开
       if ("expectedCost" in patch) patch = { ...patch, expectedCost: patch.expectedCost === true }; // 只认真正的 true / false，别的值一律当关（审核 #123 第三轮 低-1）
       if ("historyRetentionDays" in patch) {
         patch = {
@@ -541,6 +544,7 @@ export class Store {
           if (Array.isArray(cf[k])) cf[k] = cf[k].filter((x) => x !== id);
         }
       }
+      if (Array.isArray(notifications.rules.userBalanceChannelIds)) notifications.rules.userBalanceChannelIds = notifications.rules.userBalanceChannelIds.filter((x) => x !== id);
       const dr = settings.dailyReport;
       if (Array.isArray(dr?.channelIds)) dr.channelIds = dr.channelIds.filter((x) => x !== id);
       return notifications.channels.length < n;
@@ -552,6 +556,12 @@ export class Store {
       const r = notifications.rules;
       for (const k of ALERT_RULE_KEYS) {
         if (k in patch) r[k] = !!patch[k];
+      }
+      // 用户余额提醒（server/user-ops.js）：开关默认关；发到哪些通知方式，空 = 所有启用的
+      if ("onUserBalance" in patch) r.onUserBalance = patch.onUserBalance === true;
+      if (Array.isArray(patch.userBalanceChannelIds)) {
+        const valid = new Set(notifications.channels.map((c) => c.id));
+        r.userBalanceChannelIds = [...new Set(patch.userBalanceChannelIds.map(String).filter((id) => valid.has(id)))];
       }
       if ("etaDays" in patch) {
         const v = Number(patch.etaDays);

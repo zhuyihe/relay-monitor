@@ -516,19 +516,25 @@ export class History {
       basis = "回归";
     }
 
-    const burnPerDay = est.burnPerDay;
-    const shownBurn = Math.round(burnPerDay * 100) / 100;
-    if (!(shownBurn > 0)) {
-      return { burnPerDay: 0, etaDays: null, etaAt: null, basis, samples: est.samples, spanHours: Math.round(est.spanHours * 10) / 10 };
-    }
-    const etaDays = latest[1] / burnPerDay;
-    return {
-      burnPerDay: shownBurn,
-      etaDays: Math.round(etaDays * 10) / 10,
-      etaAt: new Date(latest[0] + etaDays * 86400000).toISOString(),
-      basis,
-      samples: est.samples,
-      spanHours: Math.round(est.spanHours * 10) / 10,
-    };
+    return forecastFrom(est, latest, basis);
   }
+}
+
+// 日均花费 → 还能用几天：predict 的最后一步，抽出来给用户余额那一套共用（lib/user-balance.js）。
+// est：{ burnPerDay, samples, spanHours }；latest：[t, 余额]。日均舍到分以后是 0 就当近期没有花费：etaDays、etaAt 是 null
+export function forecastFrom(est, latest, basis = "") {
+  const burnPerDay = est.burnPerDay;
+  const shownBurn = Math.round(burnPerDay * 100) / 100;
+  if (!(shownBurn > 0)) {
+    return { burnPerDay: 0, etaDays: null, etaAt: null, basis, samples: est.samples, spanHours: Math.round(est.spanHours * 10) / 10 };
+  }
+  const etaDays = latest[1] / burnPerDay;
+  return {
+    burnPerDay: shownBurn,
+    etaDays: Math.round(etaDays * 10) / 10,
+    etaAt: new Date(latest[0] + etaDays * 86400000).toISOString(),
+    basis,
+    samples: est.samples,
+    spanHours: Math.round(est.spanHours * 10) / 10,
+  };
 }

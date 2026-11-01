@@ -42,6 +42,7 @@ export const PUT = withAuth(async (request, rt) => {
   if (body?.lowBalanceUsd != null)
     patch.lowBalanceUsd = Math.max(0, Number(body.lowBalanceUsd) || 0);
   if (body && "expectedCost" in body) patch.expectedCost = body.expectedCost === true; // 「算应付成本」开关（应付成本 V1，用语规范 §8.3）：只认真正的 true / false
+  if (body && "userOpsEnabled" in body) patch.userOpsEnabled = body.userOpsEnabled !== false; // 「用户运营数据采集」总开关：只有明确关（false）才关
   if (body?.dailyReport && typeof body.dailyReport === "object")
     patch.dailyReport = body.dailyReport; // store 内部做字段校验合并
 

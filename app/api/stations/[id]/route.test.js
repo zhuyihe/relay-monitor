@@ -61,14 +61,16 @@ test("自营站点换了地址：整站日志的进度和桶清掉（forgetOwnLo
   const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) };
   const store = new Store(pool);
   const station = await store.add({ type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "token-a", monitorEnabled: true }); // 自营站点要开着监控才算 isOwn
-  const forgotten = [];
-  const rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 }, _ownLogStore: { deleteStation: async (id) => forgotten.push(id) } };
+  const forgotten = [], userOpsForgotten = [];
+  const rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 }, _ownLogStore: { deleteStation: async (id) => forgotten.push(id) },
+    _userOpsStore: { deleteStation: async (id) => userOpsForgotten.push(id) } };
   const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
   assert.equal((await send({ name: "改名" })).status, 200);
   assert.equal((await send({ baseUrl: "https://OWN.test/" })).status, 200);
   assert.deepEqual(forgotten, [], "改名、地址只是写法不同：不清");
   assert.equal((await send({ baseUrl: "https://other.test", accessToken: "token-b" })).status, 200);
   assert.deepEqual(forgotten, [station.id], "真换了地址：清掉旧站的进度和桶");
+  assert.deepEqual(userOpsForgotten, [station.id], "用户运营的快照、用量、进度、提醒状态也跟着清（改名、写法不同不清，上面已经断言过没清）");
 });
 
 test("PUT 找不到上游和上游类型不对时带码，界面按码说（lib/error-copy.js）", async () => {

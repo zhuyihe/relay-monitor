@@ -61,6 +61,7 @@ import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBound
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
+import { createUserOps } from "./user-ops.js";
 import { createChannelProfitModule } from "./channel-profit.js";
 import { identifyChannelsCached, keyAgentReachability } from "./key-agent-identify.js";
 import { keyAgentExceptionIssueOf } from "./key-agent-resegment.js";
@@ -4451,6 +4452,8 @@ export function startReconciliationPolling(rt, options = {}) {
     running = true;
     lastStartAt = Date.now();
     try { await module.refreshDue(undefined, { background: true }); } catch { /* 下一轮重试 */ }
+    // 用户运营的数据采集（余额快照、按小时用量、回补、提醒）：自己限频 10 分钟一次，不等它读完，也不拖这一轮
+    try { (rt.userOps ||= createUserOps(rt)).runOnce().catch(() => {}); } catch { /* 下一轮重试 */ }
     // 系统自己试读上游（身份、完整账单、时区）：到点的才读，失败按退避
     try { await (rt.autoVerify ||= createAutoVerifier(rt)).verifyDue(); } catch { /* 下一轮重试 */ }
     running = false;
