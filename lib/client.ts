@@ -85,12 +85,6 @@ export type BatchResult = {
   retryInput: BatchRecoveryIntent;
 };
 export type RuleEditPreview = { previewId: string; groupId: string; expiresAtMs: number; existingRule?: any; basis: GroupBasis; preview: GroupPreview };
-export type ConfirmedHistoryWindow = { preset: string; startMs: number; endMs: number; timezone: string | null };
-export type ConfirmedHistoryBilling = {
-  state: "complete" | "partial" | "unavailable" | "pending" | null; quotaUnits: number | null; quotaPerUnit: number | null;
-  amountUsd: number | null; knownAmountUsd: number | null; countedAmountUsd: number | null;
-  successfulCount: number | null; expectedCount: number | null; observedAt: number | null; window: ConfirmedHistoryWindow;
-};
 // 金额默认按系统原值（USD）显示；自营站点和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
 // ---- 每日利润页（POST /api/reconciliation/profit、GET …/profit/detail；字段名照设计稿 daily-profit-a.md §9）----
