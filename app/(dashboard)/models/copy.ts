@@ -62,7 +62,7 @@ export const COPY = Object.freeze({
   how: Object.freeze({
     title: "怎么判断的",
     successTitle: "成功率从哪来：",
-    success: (minRequests: number) => `自营站点 New API 自己记的每个模型每小时的请求数和成功数（性能统计），近 ${MODELS_VIEW.SUCCESS_HOURS} 小时算一次。重试里失败的那几次也算在内。近 ${MODELS_VIEW.SUCCESS_HOURS} 小时请求不到 ${minRequests} 次的不判，写「请求太少」；接口里没有这个模型的，写「没有成功率数据」，也不判。`,
+    success: (minRequests: number) => `成功率来自你的站自己记的性能统计：一个请求重试完还是失败才算失败，重试后成功的不算；请求本身有错（比如参数错）的也算失败。近 ${MODELS_VIEW.SUCCESS_HOURS} 小时算一次，近 ${MODELS_VIEW.SUCCESS_HOURS} 小时请求不到 ${minRequests} 次的不判，写「请求太少」；接口里没有这个模型的，写「没有成功率数据」，也不判。`,
     blindTitle: "测不到的一种失败：",
     blind: "分组里压根没有可用渠道时，请求在最开始就被拒了，New API 不记这一次。所以这种情况看成功率看不出来；能看到的是「这个模型一个开着的渠道都没有」，标「断货」。",
     lostTitle: "少收多少是估计的：",
