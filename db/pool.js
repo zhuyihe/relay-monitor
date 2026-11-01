@@ -387,6 +387,39 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (station_id, slot_ms, channel_id, model, upstream_model, grp, semantic),
     INDEX idx_own_log_buckets_slot (slot_ms)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 自营站点错误日志（/api/log/?type=5）的读取进度和小时计数（模型供需第 1 步，server/own-log-ingest.js 的第二条流水线）：
+  // cursor、pending 和消费日志那两张同一个形状（同一个存取类），buckets 只存次数：（站点、小时、渠道、模型、分组、原因、状态码、第几次尝试）一行一个计数；
+  // 不存错误原文、用户名、令牌名；不加外键，每小时清一批 35 天前的（按 slot_ms 索引）
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_error_cursor (
+    station_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    covered_from_ms BIGINT NOT NULL,
+    covered_to_ms BIGINT NOT NULL,
+    updated_at_ms BIGINT NOT NULL,
+    disabled_from_ms BIGINT NULL,
+    disabled_to_ms BIGINT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_error_pending (
+    station_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    from_ms BIGINT NOT NULL,
+    to_ms BIGINT NOT NULL,
+    next_page INT NOT NULL,
+    revision VARCHAR(36) NOT NULL,
+    state_json JSON NOT NULL,
+    updated_at_ms BIGINT NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_error_buckets (
+    station_id VARCHAR(32) NOT NULL,
+    slot_ms BIGINT NOT NULL,
+    channel_id INT NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    grp VARCHAR(64) NOT NULL,
+    reason VARCHAR(12) NOT NULL,
+    status_code INT NOT NULL,
+    attempt TINYINT NOT NULL,
+    count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (station_id, slot_ms, channel_id, model, grp, reason, status_code, attempt),
+    INDEX idx_own_error_buckets_slot (slot_ms)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 用户运营（第一步：数据和后台，server/user-ops-store.js）：用户余额快照、按小时的用量、回补进度、提醒状态；都按站点分开，不加外键。
   // 余额快照留 14 天、用量留 35 天（server/user-ops.js 每天清一批）
   await pool.query(`CREATE TABLE IF NOT EXISTS user_balance_points (

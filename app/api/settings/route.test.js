@@ -49,3 +49,13 @@ test("PUT /api/settings 只带 expectedCost：只认真正的 true / false，别
   await put({ expectedCost: false });
   assert.equal((await (await put({ refreshIntervalSec: 90 })).json()).settings.expectedCost, false, "不带 expectedCost 就不动");
 });
+
+test("PUT /api/settings 带 ownErrorLog（「读取错误日志」，模型供需）：只有明确 false 才关，别的值当开；不带就不动", async () => {
+  const { PUT } = await settingsRoute();
+  const rt = runtime();
+  const put = (body) => PUT(new Request("http://x/api/settings", { method: "PUT", body: JSON.stringify(body) }), rt);
+  assert.equal((await (await put({ ownErrorLog: false })).json()).settings.ownErrorLog, false);
+  assert.equal((await (await put({ refreshIntervalSec: 90 })).json()).settings.ownErrorLog, false, "不带就不动");
+  assert.equal((await (await put({ ownErrorLog: "no" })).json()).settings.ownErrorLog, true, "只认真正的 false 才关");
+  assert.equal((await (await put({ ownErrorLog: true })).json()).settings.ownErrorLog, true);
+});

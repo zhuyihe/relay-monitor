@@ -13,6 +13,7 @@ import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.j
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
+import { ERROR_SPEC } from "./own-log-store.js";
 import { createFakeSub2Api, secondsInDay } from "./test-support/fake-sub2api.js";
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
@@ -1989,7 +1990,8 @@ function ownTestLogApi(url, logs = []) {
     .sort((a, b) => b.created_at - a.created_at || b.id - a.id);
   if (url.pathname === "/api/log/stat") return { success: true, data: { quota: matched.reduce((sum, log) => sum + log.quota, 0) } };
   const size = Math.min(100, Number(url.searchParams.get("page_size") || 10)), page = Math.max(1, Number(url.searchParams.get("p") || 1));
-  const items = matched.slice((page - 1) * size, page * size).map((log) => ({ type: 2, token_id: 0, ...log }));
+  // type：2 消费日志（默认）；5 错误日志（模型供需，传进来的 logs 就是错误日志；自营站点没打开记录错误日志时就是空的）
+  const items = matched.slice((page - 1) * size, page * size).map((log) => ({ type: Number(url.searchParams.get("type") || 2), token_id: 0, ...log }));
   return { success: true, data: { total: matched.length, items } };
 }
 
@@ -2111,7 +2113,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       // 最新一条消费日志（轮询判断站点安不安静用，没有筛选条件）：只在 state.latestLogProbe 打开时给，别的测试照旧读不到
       if (state.latestLogProbe && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
       // 整站消费日志（V1-a 的整站读，不带筛选）：只在 state.fullLogList 打开时给，别的测试照旧读不到（404）
-      if (state.fullLogList && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
+      if (state.fullLogList && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, url.searchParams.get("type") === "5" ? state.errorLogs || [] : state.testLogs));
       if (url.pathname === "/api/user/") return reply(200, ownUsersApi(url, state.ownUsers));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
       // 渠道 Key 读取服务（K2a/K2b）：只在传了 keyAgent 的测试里有这条路，别的测试这个站点没配，keyAgentConfigOf 直接判没配，不会问
@@ -2144,7 +2146,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     } } };
   // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
   if (policy === "immediate") rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
-  return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
+  return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownErrorStore: new MemoryOwnLogStore(ERROR_SPEC), ownLogIngest: false, ...moduleOptions }) };
 }
 
 test("上游分组目录缺少当前组时仍独立获取本站渠道收费", async (t) => {
@@ -8447,7 +8449,8 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
   f.state.fullLogList = true;
   for (let id = 1; id <= 300; id += 1) f.state.testLogs.push({ id, channel: 1, quota: 1, created_at: yesterdayStart + id * 60, token_name: "k", username: "alice", model_name: "m" });
   // 不带筛选、也不是「最新一条」探测（page_size=1，P1a 判站点安不安静用的）的 /api/log/ 才是整站读
-  const isIngest = (request) => request.host === "own.test" && request.path === "/api/log/" && !request.sourceRead && !/page_size=1(&|$)/.test(request.query || "");
+  // 整站消费日志的读（错误日志 type=5 是另一条流水线，下面的用例单独数）
+  const isIngest = (request) => request.host === "own.test" && request.path === "/api/log/" && !request.sourceRead && !/page_size=1(&|$)/.test(request.query || "") && !/type=5/.test(request.query || "");
   const fullReads = () => f.state.requests.filter(isIngest).length;
   // 没设置过（settings 里没有 expectedCost）：V1-a 默认关，一个整站读请求都不发
   await f.module.refreshDue(now);
@@ -8480,6 +8483,53 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
   g.state.fullLogList = true;
   await g.module.refreshDue(now);
   assert.equal(g.state.requests.filter(isIngest).length, 0);
+});
+
+// ---- 模型供需第 1 步：错误日志（type=5）跟着整站日志读 ----
+test("错误日志计数跟着轮询读：设置里「读取错误日志」默认开、关着一个请求都不发；用户站没打开错误日志（0 条）一切正常；只存次数；和「算应付成本」两个开关各管各的", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const yesterdayStart = Date.parse("2026-10-07T16:00:00Z") / 1000;
+  resetOwnRequestBudget();
+  const ownLogStore = new MemoryOwnLogStore(), ownErrorStore = new MemoryOwnLogStore(ERROR_SPEC);
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000, ownLogStore, ownErrorStore, ownLogIngest: true } });
+  f.state.fullLogList = true;
+  f.rt.store.updateSettings = async (patch) => Object.assign(f.rt.store.settings, patch); // 夹具的 store 没有 updateSettings：标记要写进 settings
+  const isError = (request) => request.host === "own.test" && request.path === "/api/log/" && !request.sourceRead && /type=5/.test(request.query || "");
+  const errorReads = () => f.state.requests.filter(isError).length;
+  // 用户站没打开错误日志：一条都没有。默认开（settings 里没有 ownErrorLog），整站消费日志的开关关着也照读（两个开关各管各的）
+  f.rt.store.settings = { expectedCost: false };
+  await f.module.refreshDue(now);
+  assert.ok(errorReads() > 0 && errorReads() <= 6, `落后 35 小时：错误日志每轮最多 6 页，读了 ${errorReads()}`);
+  const cursor = await ownErrorStore.getCursor("own");
+  assert.equal(cursor.coveredFromMs, yesterdayStart * 1000, "从昨天 0 点起");
+  assert.ok(cursor.coveredToMs > cursor.coveredFromMs, "0 条也往前走");
+  assert.deepEqual(await f.module.ownErrorBuckets("own", 0, Number.MAX_SAFE_INTEGER), [], "用户站没记错误日志：没有桶");
+  assert.equal(await ownLogStore.getCursor("own"), null, "整站消费日志关着没读");
+  // 关着：一个请求都不发
+  f.rt.store.settings = { expectedCost: false, ownErrorLog: false };
+  const beforeOff = errorReads();
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.equal(errorReads(), beforeOff, "关掉以后不读");
+  assert.equal(f.rt.store.settings.ownErrorLogWasOff, true, "记下关着");
+  // 打开：关着那段不补，进度挪到昨天 0 点（已经比它新，就不动）；接着读，读到的只存次数
+  f.rt.store.settings = { expectedCost: false, ownErrorLog: true, ownErrorLogWasOff: true };
+  f.state.errorLogs = [
+    { id: 1, created_at: now / 1000 - 3 * 3600, channel: 1, model_name: "m", group: "g", username: "alice", token_name: "secret-key", content: "用户的内容 sk-xxxx", other: JSON.stringify({ status_code: 429, error_code: "bad_response_status_code", admin_info: { use_channel: ["1"] } }) },
+    { id: 2, created_at: now / 1000 - 3 * 3600, channel: 2, model_name: "m", group: "g", username: "bob", token_name: "k2", content: "x", other: JSON.stringify({ status_code: 503, admin_info: { use_channel: ["1", "2"] } }) },
+  ];
+  for (let i = 0; i < 40; i += 1) { now += 5 * 60000; resetOwnRequestBudget(); await f.module.refreshDue(now); }
+  assert.equal(f.rt.store.settings.ownErrorLogWasOff, false, "判断过了，标记清掉");
+  const buckets = await f.module.ownErrorBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(buckets.map((bucket) => [bucket.channelId, bucket.reason, bucket.status, bucket.attempt, bucket.count]).sort(), [[1, "rate_limit", 429, 1, 1], [2, "upstream", 503, 2, 1]]);
+  const stored = JSON.stringify([...ownErrorStore.buckets.values(), [...ownErrorStore.pending.values()]]);
+  for (const secret of ["alice", "bob", "secret-key", "sk-xxxx", "用户的内容"]) assert.ok(!stored.includes(secret), `库里不存 ${secret}`);
+  assert.ok((await ownErrorStore.getCursor("own")).coveredToMs >= now - 10 * 60000 - 120000, "追平了");
+  // 追平以后每 5 分钟才读一次：之间的轮询不发请求
+  const caughtUp = errorReads();
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.equal(errorReads(), caughtUp, "追平以后不到 5 分钟不读");
 });
 
 // ---- 应付成本 V1-b：结账时按桶和价目表算、写进账本新列 ----

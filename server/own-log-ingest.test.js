@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
+import { ERROR_KIND, INGEST, createOwnLogIngest } from "./own-log-ingest.js";
+import { ERROR_SPEC } from "./own-log-store.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { ownUsersKey } from "./own-helpers.js";
 import { noteOwnRequest, resetOwnRequestBudget, INGEST_FLOOR_PER_MIN, INGEST_RESERVE, OWN_RATE_LIMIT } from "../lib/own-request-budget.js";
@@ -26,7 +27,9 @@ async function fakeSite(t, logs, controls = {}) {
     controls.onRequest?.(requests.length);
     if (controls.delayMs) await new Promise((resolve) => setTimeout(resolve, controls.delayMs));
     const start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
-    const matched = logs.filter((log) => log.created_at >= start && log.created_at <= end).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+    const type = url.searchParams.get("type");
+    requests[requests.length - 1].type = type;
+    const matched = logs.filter((log) => log.created_at >= start && log.created_at <= end && (type == null || Number(log.type) === Number(type))).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
     const size = Number(url.searchParams.get("page_size")), page = Number(url.searchParams.get("p"));
     send(200, { success: true, data: { total: controls.noTotal ? undefined : matched.length, items: matched.slice((page - 1) * size, page * size) } });
   });
@@ -348,4 +351,183 @@ test("保底：别的读取一直占满额度（线上站点忙），整站读�
   assert.ok(rounds > 0 && rounds < 60, `保底慢慢追平：${rounds} 轮`);
   const cursor = await store.getCursor("own");
   assert.equal(cursor.coveredToMs, now - INGEST.LAG_MS, "最后追平");
+});
+
+// ===== 错误日志（type=5，模型供需第 1 步）：和消费日志同一条流水线，另一份进度和桶，只存次数 =====
+const errRow = (id, atMs, extra = {}, other = {}) => ({ id, type: 5, created_at: Math.floor(atMs / 1000), channel: 1, model_name: "m", group: "g", username: "alice", token_name: "secret-key", token_id: 7, quota: 0,
+  content: "用户的内容 sk-xxxx", other: JSON.stringify({ status_code: 429, error_code: "bad_response_status_code", admin_info: { use_channel: ["1"] }, ...other }), ...extra });
+const errorIngest = (rt, store, now) => createOwnLogIngest(rt, { store, kind: ERROR_KIND, now });
+const errorReads = (requests) => requests.filter((r) => r.path === "/api/log/");
+const total = (buckets) => buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+const wholeSecondMs = (ms) => Math.floor(ms / 1000) * 1000;
+
+test("错误日志：读 type=5，按原因、状态码、第几次尝试分桶；不读管理员名单；第一次从昨天 0 点起；消费日志的进度和桶不受影响", async (t) => {
+  resetOwnRequestBudget();
+  const logs = [];
+  logs.push(errRow(1, YESTERDAY_START + 3600000), errRow(2, YESTERDAY_START + 3600000 + 1000, {}, { status_code: 503, admin_info: { use_channel: ["1", "2"] } }), errRow(3, YESTERDAY_START + 7200000, { channel: 2 }, { status_code: 502, admin_info: { use_channel: ["2"] } }));
+  logs.push(row(10, YESTERDAY_START + 3600000)); // 一条消费日志：错误日志那条流水线不该读到
+  const { own, rt, requests } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC), consumeStore = new MemoryOwnLogStore();
+  const ingest = errorIngest(rt, store, () => NOW);
+  for (let i = 0; i < 60; i += 1) { resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); if (r.skipped === "caught-up") break; }
+  assert.ok(errorReads(requests).length > 0 && errorReads(requests).every((r) => r.type === "5"), "每个请求都带 type=5");
+  assert.equal(requests.filter((r) => r.path === "/api/user/").length, 0, "错误日志不分管理员，不读用户列表");
+  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START, "从昨天 0 点起");
+  assert.equal((await store.getCursor("own")).coveredToMs, NOW - INGEST.LAG_MS);
+  const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(buckets.map((b) => [b.channelId, b.reason, b.status, b.attempt, b.count]).sort(), [[1, "rate_limit", 429, 1, 1], [1, "upstream", 503, 2, 1], [2, "upstream", 502, 1, 1]]);
+  assert.ok(buckets.every((b) => b.slotMs % 3600000 === 0 && b.model === "m" && b.group === "g"));
+  assert.equal(await consumeStore.getCursor("own"), null, "另一份进度，消费日志的不动");
+  assert.deepEqual(Object.keys(buckets[0]).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "slotMs", "status"], "只有次数，没有用户名、令牌名、原文");
+});
+
+test("错误日志：暂存和桶里不留错误原文、用户名、令牌名（读到一半停下时看暂存）", async (t) => {
+  resetOwnRequestBudget();
+  // 落后不到 1 小时（每轮 3 页）：最近 40 分钟的 20 分钟里每秒 3 条（3600 条），一个窗口一轮读不完时暂存里留着没读完的窗口
+  const start = NOW - 40 * 60000, logs = []; let id = 1;
+  for (let at = start; at < start + 1200000; at += 1000) for (let k = 0; k < 3; k += 1) logs.push(errRow(id++, at));
+  const { own, rt } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await store.startCursor("own", wholeSecondMs(start), NOW);
+  const ingest = errorIngest(rt, store, () => NOW);
+  let partial = null;
+  for (let i = 0; i < 60 && !partial; i += 1) { resetOwnRequestBudget(); await ingest.ingestOnce(own); const pending = await store.getPending("own"); if (pending && pending.nextPage > 1) partial = pending; }
+  assert.ok(partial, "有一轮停在窗口中间，暂存里有东西");
+  const text = JSON.stringify([partial, [...store.buckets.values()]]);
+  for (const secret of ["alice", "secret-key", "sk-xxxx", "用户的内容"]) assert.ok(!text.includes(secret), `暂存和桶里不能有 ${secret}`);
+});
+
+test("错误日志每轮页数更少：落后 1 小时内最多 3 页、落后更多最多 6 页；窗口最大 15 分钟；落后不到 5 分钟又没有读到一半的窗口就不发请求；追平以后每 5 分钟才读一次", async (t) => {
+  resetOwnRequestBudget();
+  const logs = []; let id = 1;
+  for (let at = YESTERDAY_START; at < NOW; at += 600000) logs.push(errRow(id++, at));
+  let now = NOW;
+  const { own, rt, requests } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  const ingest = errorIngest(rt, store, () => now);
+  const first = await ingest.ingestOnce(own);
+  assert.ok(first.pages > ERROR_KIND.limits.pagesPerRound && first.pages <= ERROR_KIND.limits.pagesBehind, `落后 35 小时：最多 6 页：${first.pages}`);
+  let rounds = 1;
+  for (; rounds < 200; rounds += 1) {
+    const behind = now - INGEST.LAG_MS - (await store.getCursor("own")).coveredToMs;
+    resetOwnRequestBudget();
+    const r = await ingest.ingestOnce(own);
+    if (r.skipped === "caught-up") break;
+    assert.ok((r.pages || 0) <= (behind > INGEST.BEHIND_MS ? ERROR_KIND.limits.pagesBehind : ERROR_KIND.limits.pagesPerRound), `这轮 ${r.pages} 页，落后 ${Math.round(behind / 60000)} 分钟`);
+  }
+  assert.ok(errorReads(requests).every((r) => (r.end - r.start + 1) * 1000 <= ERROR_KIND.limits.windowMaxMs), "窗口不超过 15 分钟（窗口里 COUNT 要扫这段时间的全部日志）");
+  assert.equal(ingest.windowSizes.get("own"), ERROR_KIND.limits.windowMaxMs);
+  assert.equal(total(await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)), logs.filter((log) => log.created_at <= Math.floor((now - INGEST.LAG_MS) / 1000) - 1).length, "每条进且只进一次");
+  // 追平了：之后每分钟轮询一次，落后不到 5 分钟都不发请求；满 5 分钟读一次
+  const before = errorReads(requests).length;
+  for (let minute = 1; minute <= 4; minute += 1) { now += 60000; resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); assert.equal(r.skipped, "caught-up", `第 ${minute} 分钟`); }
+  assert.equal(errorReads(requests).length, before, "不到 5 分钟一个请求都不发");
+  now += 60000; resetOwnRequestBudget();
+  const r5 = await ingest.ingestOnce(own);
+  assert.ok(!r5.skipped && r5.pages === 1, "满 5 分钟读一次，只用 1 页");
+  assert.equal(errorReads(requests).length, before + 1);
+});
+
+test("用户站没开错误日志（读到 0 条）：照常往前走、没有桶、请求很少（窗口长到 15 分钟）；追平以后每 5 分钟 1 个请求", async (t) => {
+  resetOwnRequestBudget();
+  let now = NOW;
+  const { own, rt, requests } = await fakeSite(t, [row(1, YESTERDAY_START + 3600000)]); // 只有消费日志，没有错误日志
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  const ingest = errorIngest(rt, store, () => now);
+  for (let i = 0; i < 100; i += 1) { resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); assert.ok(!r.error, r.error); if (r.skipped === "caught-up") break; }
+  assert.equal((await store.getCursor("own")).coveredToMs, now - INGEST.LAG_MS);
+  assert.deepEqual(await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER), []);
+  // 35 小时 ÷ 15 分钟 = 140 个窗口，加上起步时 5、10 分钟的窗口，不会超过 150 个请求（一次性）
+  assert.ok(errorReads(requests).length <= 150, `读了 ${errorReads(requests).length} 个请求`);
+  const before = errorReads(requests).length;
+  for (let minute = 1; minute <= 30; minute += 1) { now += 60000; resetOwnRequestBudget(); await ingest.ingestOnce(own); }
+  assert.ok(errorReads(requests).length - before <= 6 && errorReads(requests).length - before >= 5, `追平以后 30 分钟只读 5～6 次：${errorReads(requests).length - before}`);
+});
+
+test("错误日志续采、去重、限页：一个密集的窗口（5 秒内 700 条，同一秒几十条）一轮读不完，下一轮从暂存接着读；窗口超过 3 页就对半切；每条只进一次桶", async (t) => {
+  resetOwnRequestBudget();
+  // 落后不到 1 小时（每轮 3 页）：最近 40 分钟里，第 5 分钟起 10 秒每秒 70 条（700 条，同一秒的 70 条各有各的 id），前后各有零星几条
+  const start = NOW - 40 * 60000, logs = []; let id = 1;
+  logs.push(errRow(id++, start + 1000));
+  for (let at = start + 300000; at < start + 310000; at += 1000) for (let k = 0; k < 70; k += 1) logs.push(errRow(id++, at, {}, k % 2 ? { status_code: 503 } : {}));
+  logs.push(errRow(id++, start + 900000));
+  const { own, rt, requests } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await store.startCursor("own", wholeSecondMs(start), NOW);
+  const ingest = errorIngest(rt, store, () => NOW);
+  let maxPages = 0, resumed = 0;
+  for (let i = 0; i < 200; i += 1) {
+    resetOwnRequestBudget();
+    const r = await ingest.ingestOnce(own);
+    maxPages = Math.max(maxPages, r.pages || 0);
+    if ((await store.getPending("own"))?.nextPage > 1) resumed += 1;
+    if (r.skipped === "caught-up") break;
+  }
+  assert.ok(maxPages <= ERROR_KIND.limits.pagesPerRound, `落后不到 1 小时每轮最多 3 页：${maxPages}`);
+  assert.ok(resumed > 0, "有过读到一半、下一轮接着读的窗口（5 秒的窗口也有 4 页，一轮只读 3 页）");
+  const perWindow = new Map();
+  for (const r of errorReads(requests)) perWindow.set(`${r.start}-${r.end}`, { pages: Math.max(perWindow.get(`${r.start}-${r.end}`)?.pages || 0, r.p), seconds: r.end - r.start + 1 });
+  assert.ok([...perWindow.values()].every((w) => w.pages <= INGEST.PAGES_PER_WINDOW || w.seconds <= INGEST.WINDOW_MIN_MS / 1000), "窗口超过 3 页就切小，只有切到 5 秒不能再小的才会超过");
+  const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  assert.equal(total(buckets), logs.length, "同一秒的几十条各算各的，每条只进一次（续读不重不漏）");
+  assert.deepEqual([buckets.filter((b) => b.status === 429).reduce((sum, b) => sum + b.count, 0), buckets.filter((b) => b.status === 503).reduce((sum, b) => sum + b.count, 0)], [352, 350]);
+});
+
+test("错误日志共用请求额度和断路：额度被别的读取用掉时只走保底、断路期间一个请求都不发；断路好了接着读；出事的窗口下一轮从同一处接着读", async (t) => {
+  resetOwnRequestBudget();
+  const logs = [errRow(1, YESTERDAY_START + 600000)];
+  let fail = null;
+  const { own, rt, requests } = await fakeSite(t, logs, { failAt: () => fail });
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  const ingest = errorIngest(rt, store, () => NOW);
+  for (let i = 0; i < OWN_RATE_LIMIT - INGEST_RESERVE; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 200, elapsedMs: 10, now: NOW });
+  const starved = await ingest.ingestOnce(own);
+  assert.ok(starved.pages <= INGEST_FLOOR_PER_MIN, `额度不够：只走保底 ${INGEST_FLOOR_PER_MIN} 页：${starved.pages}`);
+  const covered = (await store.getCursor("own")).coveredToMs;
+  resetOwnRequestBudget();
+  fail = 429;
+  const broken = await ingest.ingestOnce(own);
+  assert.equal(broken.error, "UPSTREAM_REQUEST_FAILED");
+  const sent = errorReads(requests).length;
+  assert.equal((await ingest.ingestOnce(own)).skipped, "break", "断路期间不读");
+  assert.equal(errorReads(requests).length, sent);
+  assert.equal((await store.getCursor("own")).coveredToMs, covered, "出事的窗口没写");
+  fail = null; resetOwnRequestBudget();
+  assert.ok((await ingest.ingestOnce(own)).windows >= 1, "恢复后接着读");
+});
+
+test("上游大面积出错（每秒 50 条）：每轮最多 3 页、落后超过 1 小时最多 6 页，宁可落后也不多读", async (t) => {
+  resetOwnRequestBudget();
+  // 昨天 0 点起 5 分钟里每秒 50 条 = 15000 条（150 页）
+  const logs = []; let id = 1;
+  for (let at = YESTERDAY_START; at < YESTERDAY_START + 300000; at += 1000) for (let k = 0; k < 50; k += 1) logs.push(errRow(id++, at, {}, { status_code: 529 }));
+  const { own, rt, requests } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  const ingest = errorIngest(rt, store, () => NOW);
+  const perRound = [];
+  for (let i = 0; i < 12; i += 1) { resetOwnRequestBudget(); perRound.push((await ingest.ingestOnce(own)).pages || 0); }
+  assert.ok(perRound.every((pages) => pages <= ERROR_KIND.limits.pagesBehind), `每轮页数：${perRound.join(",")}`);
+  assert.ok(errorReads(requests).length <= 12 * ERROR_KIND.limits.pagesBehind);
+  const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  assert.ok(buckets.every((b) => b.reason === "upstream" && b.status === 529), "529 是上游故障");
+  assert.ok(total(buckets) < logs.length, "12 轮读不完 150 页：落后了，没有多读");
+});
+
+test("错误日志清理 35 天前的桶；关→开传 justTurnedOn：进度比昨天 0 点还旧就挪到昨天 0 点，桶不删", async (t) => {
+  resetOwnRequestBudget();
+  const { own, rt } = await fakeSite(t, []);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  const ingest = errorIngest(rt, store, () => NOW);
+  await store.startCursor("own", NOW - 12 * 86400000, NOW);
+  const slot = (ms) => Math.floor(ms / 3600000) * 3600000;
+  const bucket = (ms, count) => ({ slotMs: slot(ms), channelId: 1, model: "m", group: "g", reason: "upstream", status: 503, attempt: 1, count });
+  await store.applyWindow("own", { fromMs: NOW - 12 * 86400000, toMs: NOW - 12 * 86400000 + 1000, buckets: [bucket(NOW - 40 * 86400000, 3), bucket(NOW - 2 * 86400000, 2)] });
+  const skipped = await ingest.ingestOnce(own, { justTurnedOn: true });
+  assert.ok(skipped.skipChecked);
+  const cursor = await store.getCursor("own");
+  assert.equal(cursor.disabledFromMs, NOW - 12 * 86400000 + 1000, "跳过的缺口记下来");
+  assert.ok(cursor.coveredToMs >= YESTERDAY_START);
+  assert.equal((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).length, 2, "桶不删");
+  assert.equal(await ingest.pruneIfDue(), 1, "清掉 35 天前的那一个");
+  assert.deepEqual((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).map((b) => b.count), [2]);
 });

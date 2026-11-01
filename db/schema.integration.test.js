@@ -8,7 +8,8 @@ import { ReconciliationRepository, reconciliationOwnerScope } from "../server/re
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineOwnLogStoreContract } from "../server/test-support/own-log-store-contract.js";
-import { OwnLogStore } from "../server/own-log-store.js";
+import { defineOwnErrorStoreContract } from "../server/test-support/own-error-store-contract.js";
+import { ERROR_SPEC, OwnLogStore } from "../server/own-log-store.js";
 import { defineUserOpsStoreContract } from "../server/test-support/user-ops-store-contract.js";
 import { UserOpsStore } from "../server/user-ops-store.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
@@ -866,6 +867,17 @@ defineUserOpsStoreContract({
     await contractSchemaReady;
     return new UserOpsStore(contractPool);
   },
+});
+
+// 错误日志计数（模型供需）：同一个存取类换一份 spec，另外三张表
+defineOwnErrorStoreContract({
+  name: "MySQL 8",
+  create: async () => {
+    contractSchemaReady ||= ensureSchema(contractPool);
+    await contractSchemaReady;
+    return new OwnLogStore(contractPool, ERROR_SPEC);
+  },
+  createConsume: async () => new OwnLogStore(contractPool),
 });
 
 defineOwnLogStoreContract({

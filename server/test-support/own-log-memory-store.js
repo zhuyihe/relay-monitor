@@ -1,10 +1,9 @@
 // OwnLogStore 的内存实现（测试用）：和 MySQL 版同一组契约用例（server/test-support/own-log-store-contract.js）
-import { bucketFromRow, bucketRowOf, OWN_LOG_BUCKET_COLUMNS } from "../own-log-store.js";
-import { bucketKeyOf } from "../../lib/own-log-bucket.js";
+import { CONSUME_SPEC } from "../own-log-store.js";
 import { randomUUID } from "node:crypto";
 
 export class MemoryOwnLogStore {
-  constructor() { this.cursors = new Map(); this.buckets = new Map(); this.pending = new Map(); this.writes = 0; this.failNextApply = false; }
+  constructor(spec = CONSUME_SPEC) { this.spec = spec; this.cursors = new Map(); this.buckets = new Map(); this.pending = new Map(); this.writes = 0; this.failNextApply = false; }
   async getCursor(stationId) { const c = this.cursors.get(stationId); return c ? { stationId, ...c } : null; }
   async startCursor(stationId, fromMs, now = Date.now()) {
     if (!this.cursors.has(stationId)) this.cursors.set(stationId, { coveredFromMs: fromMs, coveredToMs: fromMs, updatedAtMs: now, disabledFromMs: null, disabledToMs: null });
@@ -41,9 +40,9 @@ export class MemoryOwnLogStore {
     }
     if (this.failNextApply) { this.failNextApply = false; throw new Error("simulated write failure"); }
     for (const bucket of buckets) {
-      const row = bucketRowOf(stationId, bucket), key = `${stationId}|${bucketKeyOf(bucketFromRow(row))}`;
+      const row = this.spec.rowOf(stationId, bucket), key = `${stationId}|${this.spec.keyOf(this.spec.fromRow(row))}`;
       const existing = this.buckets.get(key);
-      if (existing) for (const column of OWN_LOG_BUCKET_COLUMNS) existing[column] += row[column];
+      if (existing) for (const column of this.spec.counterColumns) existing[column] += row[column];
       else this.buckets.set(key, { ...row });
     }
     cursor.coveredToMs = toMs; cursor.updatedAtMs = now; this.writes += 1;
@@ -51,7 +50,7 @@ export class MemoryOwnLogStore {
     return true;
   }
   async listBuckets(stationId, fromSlotMs, toSlotMs) {
-    return [...this.buckets.values()].filter((row) => row.station_id === stationId && row.slot_ms >= fromSlotMs && row.slot_ms < toSlotMs).map(bucketFromRow);
+    return [...this.buckets.values()].filter((row) => row.station_id === stationId && row.slot_ms >= fromSlotMs && row.slot_ms < toSlotMs).map(this.spec.fromRow);
   }
   async pruneBuckets(beforeSlotMs, limit = 2000) {
     let n = 0;
