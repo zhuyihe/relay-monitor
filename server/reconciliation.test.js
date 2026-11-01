@@ -10095,3 +10095,28 @@ test("PR C2 桶不全时不读桶：关着「算应付成本」那几天跳过�
   assert.ok(late.calls.some((call) => call.startsWith("/api/log/stat@")), "没覆盖到今天 0 点：逐渠道 stat");
   assert.ok(cursor.coveredToMs > 0);
 });
+
+test("PR C2 零点后头几分钟：00:03 看昨天，桶只读到 23:58 时退回逐渠道 stat（昨天最后几分钟的钱不缺）；桶读到了零点就用桶；渠道测试的名字只有一份", async (t) => {
+  const { OWN_CHANNEL_TEST_TOKEN_NAMES: fromBucket } = await import("../lib/own-log-bucket.js");
+  const { OWN_CHANNEL_TEST_TOKEN_NAMES: fromProviders } = await import("../lib/providers.js");
+  assert.equal(fromBucket, fromProviders, "入桶和逐渠道收入用同一份渠道测试名字（站点以后再换名字只改一处）");
+  assert.deepEqual([...fromBucket], ["模型测试", "Model test"]);
+  const nowMs = Date.parse("2026-10-09T16:03:00Z"); // 上海 10-10 00:03，昨天是 10-09
+  const world = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(world);
+  const cursor = world.ownLogStore.cursors.get("own");
+  assert.ok(cursor.coveredToMs >= Date.parse("2026-10-09T16:00:00Z"), "追平：桶读到了零点以后");
+  const yesterdayStartSec = Math.floor(Date.parse("2026-10-08T16:00:00Z") / 1000);
+  const yesterdayStats = () => world.calls.filter((call) => call.startsWith("/api/log/stat@") && Number(call.split("@")[1]) === yesterdayStartSec).length;
+  // 桶读到了零点：昨天用桶，不发 stat
+  world.calls.length = 0;
+  const viaBuckets = await world.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.equal(yesterdayStats(), 0, "桶已经读到零点：昨天（刚结束不到 5 分钟）读桶");
+  // 桶只读到 23:58：昨天最后两分钟的钱桶里还没有，退回逐渠道 stat
+  cursor.coveredToMs = Date.parse("2026-10-09T15:58:00Z");
+  (world.rt._reconciliationResultCache || new Map()).clear();
+  world.calls.length = 0;
+  const viaStat = await world.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page", force: false });
+  assert.ok(yesterdayStats() > 0, "桶只读到 23:58 < 昨天终点 24:00：退回逐渠道 stat");
+  assert.deepEqual(viaStat.results.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), viaBuckets.results.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), "最后几分钟没有日志时两种读法数一样");
+});

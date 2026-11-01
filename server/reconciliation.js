@@ -59,7 +59,7 @@ import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } 
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   reconciliationDisplayCurrency, fixedOffProfitStations, countsInSummary } from "../lib/reconciliation-view.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
-import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, sharedOwnChannelList } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
@@ -1918,6 +1918,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!cursor || cursor.coveredFromMs > segmentWindow.startMs || cursor.coveredToMs < now - OWN_LOAD.BUCKET_TODAY_MAX_LAG_MS) return null;
     const toMs = Math.min(cursor.coveredToMs, segmentWindow.endMs);
     if (toMs <= segmentWindow.startMs) return null;
+    // 零点后头几分钟：刚结束的整天（终点是天界线，比如 00:03 看昨天）桶要读到终点才算全；桶只读到 23:58 时昨天最后几分钟的钱缺着，页面却显示完整，退回 stat。
+    // 实时的今天终点是「现在」，桶本来就晚几分钟，不在这条里
+    if (isDayStartInTz(segmentWindow.endMs, segmentWindow.timezone) && toMs < segmentWindow.endMs) return null;
     // 关着「算应付成本」那几天跳过的缺口压在这段窗口里：桶不全，退回
     if (cursor.disabledFromMs != null && cursor.disabledToMs != null && cursor.disabledFromMs < toMs && cursor.disabledToMs > segmentWindow.startMs) return null;
     const key = `${own.id}:${segmentWindow.startMs}`;
