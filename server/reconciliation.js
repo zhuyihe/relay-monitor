@@ -1,4 +1,5 @@
 // 对账深模块：把窗口、上游取数、本站收费、快照和告警收敛在一个 Interface 后。
+import { OWN_LOG_SLOT_MS } from "../lib/own-log-bucket.js";
 import { OWN_LOAD } from "../lib/own-load.js";
 import { createAutoVerifier } from "./upstream-auto-verify.js";
 import { createHash } from "node:crypto";
@@ -58,7 +59,7 @@ import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } 
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   reconciliationDisplayCurrency, fixedOffProfitStations, countsInSummary } from "../lib/reconciliation-view.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
-import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, sharedOwnChannelList } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
@@ -1662,6 +1663,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     await Promise.all(ownIds.map(async (id) => {
       const own = upstreamStation(id);
       if (!own?.isOwn || own.type !== "newapi") return;
+      // 今天的渠道收入读小时桶（todayBuckets）时，这个探测的唯一用处（挡住逐渠道 stat）没有了：桶读得到、新鲜就不探测。桶用不上的窗口（起点不是整点等）
+      // 退回逐渠道读，没有「安静」可沿用，多读几个 stat，结果照样对
+      if (ownLogIngest && rt.store?.settings?.expectedCost === true) {
+        const store = ownLogStore || rt._ownLogStore;
+        const cursor = store ? await bucketCursorFor(store, own, registry).catch(() => null) : null;
+        if (cursor && cursor.coveredToMs >= now - OWN_LOAD.BUCKET_TODAY_MAX_LAG_MS) return;
+      }
       const credential = credentialFingerprint(own), previous = ownActivity.get(id);
       // 换了凭据就不算安静，和 ownRevenue 键里的凭据指纹互为备份
       const known = previous?.credential === credential && previous.read ? previous : null;
@@ -1891,12 +1899,66 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return task;
   }
 
+  // ---- 「今天」的逐渠道收入改读整站消费日志的小时桶（给用户站减负，PR C2）----
+  // 以前轮询观测今天、页面看今天，每个渠道一个 /api/log/stat、管理员自用和渠道测试再翻管理端日志（没人看每天约 9,200 个请求，有人看约 3.2 万个）。
+  // 整站消费日志（「算应付成本」，默认开）每 5 分钟已经把每条日志按「小时 × 渠道 × 模型 × …」分桶存下来，桶里有每个渠道的收费额度、管理员自用额度、
+  // 渠道测试额度（和这里原来逐渠道 stat 减管理员自用、减渠道测试是同一批日志行、同样的分类），今天的渠道净额度就是桶的加总：
+  //   净额度 = Σ quota − Σ（adminQuota + testQuota），窗口是 [今天 0 点, 桶读到的位置)——和 stat 读同一个窗口的数一样，只是终点是桶读到的位置，
+  //   不是「现在」：今天最多晚 OWN_LOAD.CONSUME_LOG_MS（5 分钟一轮）+ 120 秒安全延迟 + 读完的时间。
+  // 退回逐渠道 stat（原来的算法，一字不改）的情况：「算应付成本」关着（没有桶）、整站日志没开读、桶读到的位置离现在超过 BUCKET_TODAY_MAX_LAG_MS（落后了）、
+  // 桶没覆盖到今天 0 点（刚开、被跳过一段缺口）、窗口起点不是整点（天界线不是整点的时区，桶按 UTC 整点切）、页面「刷新」强制重读、结账和算昨天（桶不管）。
+  const bucketTodayCache = new Map();
+  async function todayBuckets(own, segmentWindow, registry) {
+    if (!ownLogIngest || rt.store?.settings?.expectedCost !== true) return null;
+    const store = ownLogStore || rt._ownLogStore;
+    if (!store || segmentWindow.startMs % OWN_LOG_SLOT_MS !== 0) return null;
+    const now = Date.now();
+    if (segmentWindow.endMs < now - 5 * 60000) return null; // 只服务实时的「今天」，别的窗口照旧
+    const cursor = await bucketCursorFor(store, own, registry);
+    if (!cursor || cursor.coveredFromMs > segmentWindow.startMs || cursor.coveredToMs < now - OWN_LOAD.BUCKET_TODAY_MAX_LAG_MS) return null;
+    const toMs = Math.min(cursor.coveredToMs, segmentWindow.endMs);
+    if (toMs <= segmentWindow.startMs) return null;
+    // 零点后头几分钟：刚结束的整天（终点是天界线，比如 00:03 看昨天）桶要读到终点才算全；桶只读到 23:58 时昨天最后几分钟的钱缺着，页面却显示完整，退回 stat。
+    // 实时的今天终点是「现在」，桶本来就晚几分钟，不在这条里
+    if (isDayStartInTz(segmentWindow.endMs, segmentWindow.timezone) && toMs < segmentWindow.endMs) return null;
+    // 关着「算应付成本」那几天跳过的缺口压在这段窗口里：桶不全，退回
+    if (cursor.disabledFromMs != null && cursor.disabledToMs != null && cursor.disabledFromMs < toMs && cursor.disabledToMs > segmentWindow.startMs) return null;
+    const key = `${own.id}:${segmentWindow.startMs}`;
+    const cached = bucketTodayCache.get(key);
+    if (cached && cached.toMs === toMs && cached.updatedAtMs === cursor.updatedAtMs) return cached;
+    const byChannel = new Map();
+    for (const bucket of await store.listBuckets(own.id, segmentWindow.startMs, Math.ceil(toMs / OWN_LOG_SLOT_MS) * OWN_LOG_SLOT_MS)) {
+      const entry = byChannel.get(bucket.channelId) || { quotaUnits: 0, excludedUnits: 0 };
+      entry.quotaUnits += bucket.quota; entry.excludedUnits += bucket.adminQuota + bucket.testQuota;
+      byChannel.set(bucket.channelId, entry);
+    }
+    const read = { toMs, updatedAtMs: cursor.updatedAtMs, byChannel };
+    bucketTodayCache.set(key, read);
+    for (const [oldKey, old] of bucketTodayCache) if (old.toMs < toMs - 2 * DAY_MS) bucketTodayCache.delete(oldKey);
+    return read;
+  }
+  // 游标（桶读到哪儿）一轮里各绑定共用一次读库；没有注册表（页面查询）直接读
+  function bucketCursorFor(store, own, registry) {
+    if (!registry) return store.getCursor(own.id);
+    const key = `${own.id}:bucketCursor`;
+    if (!registry.ownChannels.has(key)) registry.ownChannels.set(key, store.getCursor(own.id));
+    return registry.ownChannels.get(key);
+  }
+
   // 一段窗口的渠道收费。reuse 时（只有轮询观测今天）读全了就记下（读到哪一刻为止）；记下的那份读到的时刻
   // 不早于这个自营站点没有新消费的起点，就沿用它，窗口终点换成这次的——这段时间里没有新的消费日志，每个渠道的合计都不会变。
   // 沿用前照样读一次 /api/status（同一轮共用）：额度换算变了、或者读不到，就照旧逐个读，不拿旧的换算算钱。
   // 这一轮里「查过全站以后、轮到这条绑定之前」那几秒的新消费，下一轮查全站时会发现，再照旧逐个读。
-  async function ownRevenueWindow(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false }) {
+  async function ownRevenueWindow(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false, viaBuckets = false }) {
     const channelIds = rule.channels.map((channel) => channel.channelId);
+    // 「今天」实时观测：读整站消费日志的小时桶（todayBuckets 上面写了口径和什么时候退回），一个 stat、管理员日志请求都不发
+    if (viaBuckets && !settle) {
+      const buckets = await todayBuckets(own, segmentWindow, registry).catch(() => null);
+      if (buckets) {
+        const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus, fromBuckets: buckets.byChannel }).catch(() => null);
+        if (result?.state === "complete" && !result.emptySecondWindow) return result;
+      }
+    }
     // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
     const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone,
       resoldAdminKeysOf(own).map((item) => `${item.username}\u0000${item.tokenName}`).sort()]); // 转售 Key 改了马上换键（审核 R1 低-6）
@@ -2695,7 +2757,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const [catalogue, results] = await Promise.all([
             ownChannelsFor(own, { force: force && !settle, registry: ownerRegistry }).catch(() => null),
             // 多天的范围也按天拼、带「其中管理员自用」，和别处同一条路（审核 R1 低-3）
-            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own, { cache: !settle }), registry: ownerRegistry, reuse: false, settle })
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own, { cache: !settle }), registry: ownerRegistry, reuse: false, settle, viaBuckets: !force })
               .catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -3028,7 +3090,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
               : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, statTimeoutMs })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
-            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
+            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle, viaBuckets: !force })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
