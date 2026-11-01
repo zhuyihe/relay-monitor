@@ -453,6 +453,8 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
     catch (error) {
       // 外壳侧栏在每个页面读这两个接口算待处理条数；用例没有声明时给空数据，其余未声明的接口照常失败
       if (shellFallback[pathname] && route.request().method() === "GET" && /^unexpected /.test(error?.message || "")) return fulfill(route, shellFallback[pathname]);
+      // 告警中心「用户」一组要读重点用户名单；用例没有声明时当作没设置自营站点（400），这一组就不出现，别的断言照旧
+      if (pathname === "/api/users/big" && route.request().method() === "GET" && /^unexpected /.test(error?.message || "")) return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "还没设置自营站点", code: "OWN_STATION_UNSET" }) });
       throw error;
     }
   });
@@ -816,6 +818,8 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   await income.waitFor(); await users.waitFor(); await forecast.waitFor(); await models.waitFor();
   // 指标行在等式上面，这次只放等式里没有的三格（收入、毛利等 G 再补，同一个数一页只出现一次）
   const metrics = region("这段时间的用量");
+  // 加载骨架也叫这个名字（块名一样、数据回来时不跳）：等指标格真的出来再断言
+  await metrics.locator("dt").first().waitFor();
   assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
   await metrics.getByText("5 个", { exact: true }).waitFor();
   assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
@@ -826,7 +830,8 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   // 管理员自用是 0 时「消费」和收入相等，不写那句（免得让人糊涂）；有管理员自用的情况在下面没设置售价那一页查
   assert.equal(await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).count(), 0);
   // 人数只在指标行里写一次：用户排行右上角不带数字
-  await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
+  // 「用户」标签搬到了用户运营页：这里是去那一页的链接
+  assert.equal(await users.getByRole("link", { name: "看全部用户", exact: true }).getAttribute("href"), "/users?tab=users");
   assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
   for (const [main, side] of [[income, users], [forecast, models]]) {
     const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
