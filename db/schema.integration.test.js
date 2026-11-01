@@ -9,6 +9,8 @@ import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.j
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineOwnLogStoreContract } from "../server/test-support/own-log-store-contract.js";
 import { OwnLogStore } from "../server/own-log-store.js";
+import { defineUserOpsStoreContract } from "../server/test-support/user-ops-store-contract.js";
+import { UserOpsStore } from "../server/user-ops-store.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
@@ -855,6 +857,16 @@ defineReconciliationRepositoryContract({
 });
 
 // 自营站点整站日志的小时桶和进度：和内存实现同一组用例
+// 用户运营的快照、按小时用量、进度、提醒状态：和内存实现同一组用例
+defineUserOpsStoreContract({
+  name: "MySQL 8",
+  create: async () => {
+    contractSchemaReady ||= ensureSchema(contractPool);
+    await contractSchemaReady;
+    return new UserOpsStore(contractPool);
+  },
+});
+
 defineOwnLogStoreContract({
   name: "MySQL 8",
   create: async () => {

@@ -704,3 +704,20 @@ test("accountUse（K2c）：上游账号是不是只给自营站点的渠道用�
   await store.update(fresh.id, { accountUse: "whatever" });
   assert.equal(store.get(fresh.id).accountUse, null, "不认识的值当没回答，不抛错");
 });
+
+test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认开；只有明确关（false）才关；规则「用户余额」默认关，通知方式只接受存在的 id，删通知方式时一起清掉", async () => {
+  const store = await new Store(fakePool([])).load();
+  assert.equal(store.settings.userOpsEnabled, true);
+  await store.updateSettings({ userOpsEnabled: false });
+  assert.equal(store.settings.userOpsEnabled, false);
+  await store.updateSettings({ userOpsEnabled: "no" });
+  assert.equal(store.settings.userOpsEnabled, true, "只认真正的 false 才关，别的值当开");
+  assert.deepEqual([store.rules.onUserBalance, store.rules.userBalanceChannelIds], [false, []]);
+  store.data.notifications.channels = [{ id: "ch-1", name: "A", type: "webhook", enabled: true }, { id: "ch-2", name: "B", type: "webhook", enabled: true }];
+  const rules = await store.updateRules({ onUserBalance: true, userBalanceChannelIds: ["ch-1", "ch-2", "bogus", "ch-1"] });
+  assert.deepEqual([rules.onUserBalance, rules.userBalanceChannelIds], [true, ["ch-1", "ch-2"]]);
+  await store.updateRules({ onUserBalance: "yes" });
+  assert.equal(store.rules.onUserBalance, false, "只认真正的 true 才开");
+  await store.removeChannel("ch-2");
+  assert.deepEqual(store.rules.userBalanceChannelIds, ["ch-1"]);
+});
