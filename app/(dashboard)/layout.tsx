@@ -221,7 +221,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           {/* 窄屏顶栏放不下账户菜单，账户与退出登录放在导航抽屉底部 */}
           <div className="jy-sider-account">
             <span className="jy-avatar" aria-hidden="true">{initial}</span>
-            <span className="grow">{username || "当前账户"}</span>
+            <span className="grow">{username || "当前账号"}</span>
             <button type="button" className="jy-sider-logout" onClick={onLogout}>
               <Icon name="logout" />
               退出登录
@@ -294,7 +294,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               placement="bottomRight"
               menu={{
                 items: [
-                  { key: "user", label: username ? `当前账户：${username}` : "当前账户", disabled: true },
+                  { key: "user", label: username ? `当前账号：${username}` : "当前账号", disabled: true },
                   { type: "divider" },
                   ...(passwordChangeRequired
                     ? []
@@ -307,7 +307,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 },
               }}
             >
-              <button type="button" className="jy-avatar" aria-label={username ? `账户菜单，当前账号 ${username}` : "账户菜单"}>
+              <button type="button" className="jy-avatar" aria-label={username ? `账号菜单，当前账号 ${username}` : "账号菜单"}>
                 {initial}
               </button>
             </Dropdown>
