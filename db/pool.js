@@ -357,6 +357,16 @@ export async function ensureSchema(pool) {
   // 结账时这段范围里的日子给 EXPECTED_COST_DISABLED（不是 NOT_STARTED/EXPECTED_COST_NOT_RECORDED，那两个留给「还没开始统计」）
   await addColumnIfMissing(pool, "own_log_cursor", "disabled_from_ms", "BIGINT NULL");
   await addColumnIfMissing(pool, "own_log_cursor", "disabled_to_ms", "BIGINT NULL");
+  // 读不完的密集窗口跨轮续采。独立新表，不修改已有账本、桶或已完成的覆盖进度。
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_log_pending (
+    station_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    from_ms BIGINT NOT NULL,
+    to_ms BIGINT NOT NULL,
+    next_page INT NOT NULL,
+    revision VARCHAR(36) NOT NULL,
+    state_json JSON NOT NULL,
+    updated_at_ms BIGINT NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(`CREATE TABLE IF NOT EXISTS own_log_buckets (
     station_id VARCHAR(32) NOT NULL,
     slot_ms BIGINT NOT NULL,
