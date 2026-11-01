@@ -2206,27 +2206,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return metadata.platform === "sub2api" || metadata.tokens.filter((item) => item.name === token.name).length === 1;
   }
 
-  async function canonicalRules(canonicalKey, tokenId, { excludeRuleId = null } = {}) {
-    const rules = (await repository.listRules()).filter((rule) => rule.enabled && rule.id !== excludeRuleId && rule.tokenId === tokenId);
-    const identities = new Map();
-    return (await mapWithConcurrency(rules, 4, async (rule) => {
-      const configured = upstreamStation(rule.upstreamStationId);
-      const station = configured && { ...configured };
-      if (!billingStation(station)) return null;
-      if (!identities.has(station.id)) identities.set(station.id, metadataFor(station).catch(() => null));
-      const metadata = await identities.get(station.id);
-      if (credentialFingerprint(upstreamStation(station.id) || {}) !== credentialFingerprint(station)) {
-        throw codedError("AUTHORIZATION_CHANGED", "上游的登录信息在这期间改过，请刷新后再试");
-      }
-      if (!metadata || canonicalBillingKey(station, metadata, tokenId) !== canonicalKey) return null;
-      if (rule.canonicalKey && rule.canonicalKey !== canonicalKey) {
-        throw codedError("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
-      }
-      verifiedRuleCredentials.set(rule, credentialFingerprint(station));
-      return rule;
-    })).filter(Boolean);
-  }
-
   async function validateInput(input, { excludeRuleId = null, authorization = null, existingRule = null, readContext = null } = {}) {
     const configuredUpstream = authorization?.station || upstreamStation(String(input?.upstreamStationId || ""));
     const upstream = configuredUpstream && { ...configuredUpstream };
@@ -4303,16 +4282,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (error.code === "RULE_NOT_FOUND" || error.code === "INVALID_REQUEST") throw error;
         throw codedError("HISTORY_UNAVAILABLE", "系统还没准备好，请稍后刷新");
       }
-    },
-    async findRuleForKey(stationId, tokenId) {
-      const station = upstreamStation(stationId);
-      if (!billingStation(station)) throw codedError("UPSTREAM_NOT_FOUND", "找不到这个上游");
-      const metadata = await metadataFor(station);
-      const key = canonicalBillingKey(station, metadata, tokenId);
-      if (!key) throw codedError("COST_OWNER_UNVERIFIED", issueText("COST_OWNER_UNVERIFIED"));
-      const matches = await canonicalRules(key, Number(tokenId));
-      if (matches.length > 1) throw codedError("CANONICAL_KEY_CONFLICT", issueText("CANONICAL_KEY_CONFLICT"));
-      return matches[0] || null;
     },
     // 「用户停了」的渠道（k-plan 第七节）：停止算利润 = 归档这条绑定 + 同一个事务把它的渠道记成用户停的（optout: true）
     listChannelOptouts: (ownStationId = null) => repository.listChannelOptouts(ownStationId),

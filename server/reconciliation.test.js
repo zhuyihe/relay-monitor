@@ -9,7 +9,6 @@ import { SETTLE_LOOKBACK_MAX_PER_ROUND } from "../lib/reconciliation-settlement.
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
 import { reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
-import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
