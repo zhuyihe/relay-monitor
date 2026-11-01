@@ -2784,3 +2784,81 @@ const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeC
 
 test("占位：夹具段结束", () => {});
 
+
+test("告警中心「用户」一组：给用户发邮件——先选邮件通知方式才能打开；充值页地址填错不存；看邮件样子；给自己发一封试信；重点用户快用完有自己的提醒天数", async (t) => {
+  let rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", userEtaDays: 3, userEtaUnit: "days", onUserExhaust: true, onUserEta: true, onUserMail: false, userMailChannelId: null, userMailPayUrl: "", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  const channels = [
+    { id: "tg", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} },
+    { id: "mail", name: "站长邮箱", type: "smtp", enabled: true, config: {}, hasSecret: {} },
+    { id: "off", name: "停用的邮箱", type: "resend", enabled: false, config: {}, hasSecret: {} },
+  ];
+  const puts = [], tests = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }, { value: "smtp", label: "SMTP 邮件", fields: [] }] });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: false, time: "09:00", channelIds: [] } }));
+    if (url.pathname === "/api/users/big") return fulfill(route, { ready: true, big: [{ id: 1, username: "orange-lab" }, { id: 2, username: "wu-team" }] });
+    if (url.pathname === "/api/notifications/rules" && method === "PUT") {
+      const body = route.request().postDataJSON(); puts.push(body);
+      const next = { ...rules, ...body };
+      if ("userMailChannelId" in body) next.userMailChannelId = ["mail"].includes(body.userMailChannelId) ? body.userMailChannelId : null;
+      if (!next.userMailChannelId) next.onUserMail = false;
+      rules = next;
+      return fulfill(route, { rules });
+    }
+    if (url.pathname === "/api/users/mail-preview") return fulfill(route, { mails: [
+      { key: "soon", label: "第一封：快用完", subject: "我的站点 账户余额快用完了，还能用约 2 天", text: "您好，alice：" },
+      { key: "urgent", label: "第二封：只够用不到 1 天", subject: "我的站点 账户余额快用完了，大约只够用 12 小时", text: "您好，alice：" },
+      { key: "empty", label: "第二封：余额用完", subject: "我的站点 账户余额已经用完", text: "您好，alice：" },
+    ] });
+    if (url.pathname === "/api/users/mail-test") { tests.push(1); return fulfill(route, { ok: true }); }
+    throw new Error("unexpected notifications fixture API: " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const table = page.locator(".jy-notifications-rules");
+  await table.getByText(NOTIFICATIONS_COPY.users.mail.title, { exact: true }).waitFor();
+  // 灰字：三条只管重点用户、不推送不发信
+  await table.getByText(NOTIFICATIONS_COPY.users.onlyBig, { exact: true }).waitFor();
+  const row = table.locator("tr", { hasText: NOTIFICATIONS_COPY.users.mail.title });
+  const sw = row.getByRole("switch");
+  assert.equal(await sw.isDisabled(), true, "没选通知方式：开关打不开");
+  await row.getByText(NOTIFICATIONS_COPY.users.mail.pickFirst, { exact: true }).waitFor();
+  assert.equal(await row.getByRole("button", { name: NOTIFICATIONS_COPY.users.mail.test }).isDisabled(), true);
+  // 下拉里只有邮件类、没停用的
+  await row.getByRole("combobox", { name: NOTIFICATIONS_COPY.users.mail.pickLabel }).click();
+  const options = page.locator(".ant-select-item-option");
+  assert.deepEqual((await options.allInnerTexts()).map((x) => x.trim()), ["站长邮箱"]);
+  await options.first().click();
+  await page.waitForFunction(() => document.querySelector(".jy-notifications-rules .jy-notifications-mail-hint") === null);
+  assert.deepEqual(puts.at(-1), { userMailChannelId: "mail" });
+  await sw.waitFor();
+  assert.equal(await sw.isDisabled(), false, "选好以后能打开");
+  await sw.click();
+  await page.waitForFunction(() => document.querySelector(".jy-notifications-rules tr button[role=switch][aria-checked=true]:not([disabled])") !== null);
+  assert.equal(puts.at(-1).onUserMail, true);
+  // 充值页地址：不是 http(s) 报错、不存；填对了存
+  const pay = row.getByLabel(NOTIFICATIONS_COPY.users.mail.payLabel);
+  await pay.fill("pay.own.test/topup"); await pay.press("Enter");
+  await row.getByText(NOTIFICATIONS_COPY.users.mail.payBad, { exact: true }).waitFor();
+  assert.ok(!puts.some((body) => "userMailPayUrl" in body && body.userMailPayUrl === "pay.own.test/topup"));
+  await pay.fill("https://pay.own.test/topup"); await pay.press("Enter");
+  await page.waitForFunction(() => document.body.innerText.includes("已保存"));
+  assert.equal(puts.at(-1).userMailPayUrl, "https://pay.own.test/topup");
+  // 看邮件样子：三封的标题
+  await row.getByRole("button", { name: NOTIFICATIONS_COPY.users.mail.preview }).click();
+  const dialog = page.getByRole("dialog");
+  for (const subject of ["我的站点 账户余额快用完了，还能用约 2 天", "我的站点 账户余额快用完了，大约只够用 12 小时", "我的站点 账户余额已经用完"]) await dialog.getByText(subject, { exact: true }).waitFor();
+  await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.close }).click();
+  // 给自己发一封试信
+  await row.getByRole("button", { name: NOTIFICATIONS_COPY.users.mail.test }).click();
+  await row.getByText(NOTIFICATIONS_COPY.users.mail.testOk, { exact: true }).waitFor();
+  assert.equal(tests.length, 1);
+  // 重点用户快用完有自己的提醒天数输入框：改它只存 userEtaDays，不动上游的 etaDays
+  const userEta = table.getByLabel(NOTIFICATIONS_COPY.users.etaLabel, { exact: true });
+  await userEta.fill("5"); await userEta.press("Enter");
+  await page.waitForFunction(() => document.body.innerText.includes("已保存"));
+  assert.equal(puts.at(-1).userEtaDays, 5);
+  assert.equal(rules.etaDays, 3);
+  assert.ok(!("etaDays" in puts.at(-1)), "上游的提醒天数没动就不提交");
+});

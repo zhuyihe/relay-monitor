@@ -68,6 +68,21 @@ export function defineUserOpsStoreContract({ name, create, cleanup = async () =>
       assert.equal(states.size, 2);
     });
 
+    await t.test("邮件状态：存、改、按站点读；不存邮箱", async () => {
+      const a = id("m"), b = id("n");
+      await store.saveMailState(a, 7, { level: 1, retryAt: 5000, tries: 1 });
+      await store.saveMailState(a, 7, { level: 1, retryAt: null, tries: 1 });
+      await store.saveMailState(a, 8, { level: 2, retryAt: 9000, tries: 2 });
+      await store.saveMailState(b, 7, { level: 1, retryAt: 1, tries: 1 });
+      const states = await store.getMailStates(a);
+      assert.deepEqual(states.get(7), { level: 1, retryAt: null, tries: 1 });
+      assert.deepEqual(states.get(8), { level: 2, retryAt: 9000, tries: 2 });
+      assert.equal(states.size, 2);
+      await store.deleteStation(a);
+      assert.equal((await store.getMailStates(a)).size, 0);
+      assert.equal((await store.getMailStates(b)).size, 1);
+    });
+
     await t.test("清理：只删早的、按批；删站点全清", async () => {
       const a = id("g");
       await store.upsertUsageHours(a, [{ username: "u", hourMs: 1 * H, quota: 1, requests: 1 }, { username: "u", hourMs: 50 * H, quota: 1, requests: 1 }]);
