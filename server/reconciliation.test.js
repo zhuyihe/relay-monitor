@@ -6979,6 +6979,75 @@ test("C3 审核二轮中-1：当天换绑两次（A→B→C），每条都按自
   assert.equal((await f.repository.listSettlementStates(["rr_live", "rr_two"])).length, 0);
 });
 
+test("整天结账迁移：以前被「解绑那一刻」切开的日子（31 天内），新旧两条绑定都写重结请求，程序自己重算（少一半以上也不挡）；只做一次；解绑得更早的旧绑定只在有没办完的请求时带进来", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z"); // 上海 10-08 14:30
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z"); row("rr_live").bound_at_ms = 3000; // 先让 rr_live 记着 10-08 的收入
+  row("rr_two").billing_effective_from_ms = archivedAt + 1800000; row("rr_two").bound_at_ms = 2000;
+  await f.module.archiveRule("rr_live");
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  const revision = (id) => f.state.ledger.filter((item) => item.rule_id === id && item.bill_date === "2026-10-08").map((item) => [Number(item.revision), Number(item.revenue_usd)]);
+  assert.ok(revision("rr_live")[0][1] > 0, "第一版：rr_live 先绑的收入先记在它上面（模拟旧口径下的账）");
+  // 现在把 rr_two 标成当年被切开的新绑定（floor = 解绑那一刻），rr_live 变成先绑的：收入该记到 rr_two 上，rr_live 的数少了一半以上
+  row("rr_two").accounting_floor_ms = archivedAt; row("rr_live").bound_at_ms = 1000;
+  f.repository.migrationMarks.clear(); f.rt._reconciliationFloorResettleDone = false; // 模拟「上线后第一轮」：这之前的一轮没有被切开的日子，标记已经写了，这里清掉再来
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal((await f.repository.getMigrationMark("reconciliation_floor_resettle_v1")).days, 2, "新旧两条各一天");
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  const settled = (id) => Math.max(...revision(id).map(([rev]) => rev));
+  assert.equal(settled("rr_live"), 2, "旧的重算了一版（收入从有数变成 0，少一半以上也没挡）");
+  assert.equal(revision("rr_live").at(-1)[1], 0);
+  assert.equal(settled("rr_two"), 2);
+  assert.deepEqual((await f.repository.listSettlementStates(["rr_live", "rr_two"])).filter((state) => state.manualReason), [], "没有被 RESETTLE_SHRUNK 挡住");
+  // 标记写了：再来一轮不再写请求
+  now += 10 * 60000;
+  const writes = f.state.ledgerWrites.length;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledgerWrites.length, writes);
+});
+
+test("整天结账迁移：同一天一把 Key 从一个渠道挪到另一个渠道（渠道不同、规范 Key 相同）的旧日子，新旧两条也配成一对、都写重结请求", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z");
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [2], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  row("rr_two").billing_effective_from_ms = archivedAt + 1800000; row("rr_two").canonical_key = row("rr_live").canonical_key;
+  await f.module.archiveRule("rr_live");
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  row("rr_two").accounting_floor_ms = archivedAt; // 当年按解绑那一刻切开
+  f.repository.migrationMarks.clear(); f.rt._reconciliationFloorResettleDone = false;
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  // 新绑定（渠道 2）这个夹具里没固定过账，所以只有旧绑定有请求；没有按 Key 配对时旧绑定一条请求也没有
+  assert.equal((await f.repository.getMigrationMark("reconciliation_floor_resettle_v1")).days, 1, "渠道不同、Key 相同也配对：旧绑定那天写了重结请求");
+});
+
+test("C3 审核二轮中-1：当天换绑两次（A→B→C），每条都按自己的核算起点判，不互相挡，三段首尾相接", async (t) => {
+  const a = Date.parse("2026-10-08T02:00:00Z"), b = Date.parse("2026-10-08T06:00:00Z"); // 上海 10:00 和 14:00 换绑
+  let now = b;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [1] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 1 : 0;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  row("rr_two").billing_effective_from_ms = a + 60000; row("rr_two").accounting_floor_ms = a; row("rr_two").archived_at = new Date(b); row("rr_two").archived_at_ms = b; row("rr_two").enabled = 0; row("rr_two").canonical_key = row("rr_two").canonical_key;
+  row("rr_live").archived_at = new Date(a); row("rr_live").archived_at_ms = a; row("rr_live").enabled = 0;
+  row("rr_three").billing_effective_from_ms = b + 60000; row("rr_three").accounting_floor_ms = b;
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  const days = (id) => f.state.ledger.filter((item) => item.rule_id === id && item.bill_date === "2026-10-08").length;
+  assert.deepEqual(["rr_live", "rr_two", "rr_three"].map(days), [1, 1, 1], "三条都结了，没有被挡");
+  assert.equal((await f.repository.listSettlementStates(["rr_live", "rr_two"])).length, 0);
+});
+
 test("C3 审核中-1：别的绑定是解除以后才占上这个渠道的（隔天绑上），已解除的照常补结", async (t) => {
   const archivedAt = Date.parse("2026-10-08T06:30:00Z");
   let now = archivedAt;

@@ -91,20 +91,6 @@ export type ConfirmedHistoryBilling = {
   amountUsd: number | null; knownAmountUsd: number | null; countedAmountUsd: number | null;
   successfulCount: number | null; expectedCount: number | null; observedAt: number | null; window: ConfirmedHistoryWindow;
 };
-export type ConfirmedHistoryRecord = {
-  historyId: string; confirmedAt: string; window: ConfirmedHistoryWindow; ownSource: OwnSource | null;
-  upstreamSource: { provider: string | null; baseUrl: string | null; accountId: string | null; tokenId: number | null; tokenName: string | null };
-  scopeVersion: number | null; scopeFingerprint: string | null; billingEffectiveFromMs: number | null; accountingStartMs: number | null; accountedToMs: number | null; channels: { channelId: number; name: string | null }[];
-  amountBasis: { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };
-  upstream: ConfirmedHistoryBilling; downstream: ConfirmedHistoryBilling & { channels: { channelId: number; name: string | null; billingState: string | null; quotaUnits: number | null; amountUsd: number | null; knownAmountUsd: number | null }[] };
-  calculation: { differenceUsd: number | null; profitUsd: number | null; riskDifferenceUsd: number | null; marginRate: number | null };
-  sourceCompleteness: "complete" | "legacy_partial";
-  // 结账账本：自然日、版本（重新结账 +1）、来源、结账时配置的汇率（没配置为 null）和成本计法。
-  // 迁移的旧账成本计法为 null：历史里按原记录（Key 用量）显示，当前核算按现在的配置算，与第 3b 阶段一致。
-  billDate?: string; revision?: number; settlementSource?: "settle" | "resettle" | "migrated";
-  settledRates?: { income: number | null; cost: number | null }; costBasis?: "usage" | "fixed" | null;
-};
-export type ConfirmedHistoryResponse = { ruleId: string; readOnly: true; records: ConfirmedHistoryRecord[]; nextCursor: string | null };
 // 金额默认按系统原值（USD）显示；自营站点和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
 // ---- 每日利润页（POST /api/reconciliation/profit、GET …/profit/detail；字段名照设计稿 daily-profit-a.md §9）----

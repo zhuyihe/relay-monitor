@@ -778,7 +778,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const answers = new Map(); // key -> response
     const run = async (key, requestInput, only) => {
       const key2 = only ? `${key}|${[...only].sort().join(",")}` : key;
-      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", accountUsage: false, noLivePast: true, archivedRuleIds, cacheOnly }));
+      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds, cacheOnly }));
       return answers.get(key2);
     };
     for (const [key, request] of requests) await run(key, request.input, request.ruleIds);
@@ -898,7 +898,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // （页面上的确认框，C3、E 做；在那之前没有人传，手动「重新读取」读出来少了一半多也先挡着）。
       // 其他日子（普通请求日、RESETTLE_TOO_OLD 的日子）手动读取也照样判，读出来少了一半多先挡下、记 RESETTLE_SHRUNK
       const confirmShrink = origin === "manual" && confirmed === true && state?.manualReason === "RESETTLE_SHRUNK";
-      // 程序自己发起的重结（以前按解绑那一刻切开的日子改成整天算，原因 floor_cut；迁移已跑完，这里只管可能还没处理完的旧请求）：旧数是切开的半天，新数本来就该少一块（收入记到后绑的那条上），不判「少一半以上」
+      // 程序自己发起的重结（以前按解绑那一刻切开的日子改成整天算，floorResettleRound）：旧数是切开的半天，新数本来就该少一块（收入记到后绑的那条上），不判「少一半以上」
       const autoConfirm = state?.resettleReason === RESETTLE_REASON_FLOOR;
       result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, confirmedAfter, autoConfirm, trigger, priorState: state });
     } catch (err) {
@@ -3810,6 +3810,43 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 昨天不占预算；回看最多 K 天、最多 T 毫秒，同一个上游同时最多 1 天，某个上游这一轮回看没成就不再给它取别的日子。
   // upstreams 是这一轮会结账的上游，refreshDue 在读 Key 目录和身份之前把它们记进 staleMetadata 全部重读（计划 P1b）；
   // 回看只给这些上游结：昨天要结的上游，加上按顺序排在预算以内的那几天的上游，没重读过的上游留到下一轮
+  // 以前同一天换绑时，新绑定从旧绑定解除那一刻起算（accounting_floor_ms），解除那天的账本是两个半天；现在整天算、收入记在后绑的那条上。
+  // 上线后程序自己把 31 天内被切开的那几天重算（新旧两条绑定各写一条重结请求，少一半以上不挡），只做一次（meta 里记完成标记），结果写日志。
+  // 只写请求，真正重算由轮询结账；不读上游。写失败就不记标记，下一轮再来
+  const FLOOR_RESETTLE_MARK = "reconciliation_floor_resettle_v1";
+  async function floorResettleRound(now) {
+    if (rt._reconciliationFloorResettleDone) return;
+    try {
+      if (await repository.getMigrationMark(FLOOR_RESETTLE_MARK)) { rt._reconciliationFloorResettleDone = true; return; }
+      const all = await repository.listRules({ includeArchived: true });
+      const wanted = new Map(); // ruleId -> Set(day)
+      const want = (rule, day) => { if (!wanted.has(rule.id)) wanted.set(rule.id, new Set()); wanted.get(rule.id).add(day); };
+      let skipped = 0;
+      for (const rule of all.filter((item) => Number.isFinite(item.accountingFloorMs))) {
+        const day = dayKeyInTz(rule.accountingFloorMs, rule.timezone), endMs = dayStartInTz(shiftDayLabel(day, 1), rule.timezone);
+        if (endMs > now || now - endMs > RESETTLE_MAX_AGE_MS) continue;
+        const mine = new Set((rule.channels || []).map((channel) => Number(channel.channelId)));
+        const olds = all.filter((other) => other.id !== rule.id && other.ownStationId === rule.ownStationId && other.archivedAtMs != null && other.archivedAtMs <= rule.accountingFloorMs + 1000
+          && dayKeyInTz(other.archivedAtMs, other.timezone) === day
+          // 以前切时刻是按「同一个渠道」或「同一把 Key」配对的：同一天一把 Key 从一个渠道挪到另一个渠道的也要配上
+          && ((other.channels || []).some((channel) => mine.has(Number(channel.channelId))) || (rule.canonicalKey != null && other.canonicalKey === rule.canonicalKey)));
+        for (const item of [rule, ...olds]) { if (item.archivedAt && !archivedSettleable(item)) skipped += 1; else want(item, day); }
+      }
+      let requested = 0;
+      if (wanted.size) {
+        const days = [...wanted.values()].flatMap((set) => [...set]).sort();
+        const settled = new Set((await repository.listLedgerDayFacts([...wanted.keys()], days[0], days.at(-1))).map((fact) => `${fact.ruleId}|${fact.billDate}`));
+        for (const [ruleId, set] of wanted) {
+          const dates = [...set].filter((day) => settled.has(`${ruleId}|${day}`)).sort();
+          if (dates.length) { await repository.requestResettle(ruleId, dates, { reason: RESETTLE_REASON_FLOOR, now }); requested += dates.length; }
+        }
+      }
+      await repository.setMigrationMark(FLOOR_RESETTLE_MARK, { completedAt: new Date(now).toISOString(), rules: wanted.size, days: requested, skipped });
+      rt._reconciliationFloorResettleDone = true;
+      console.log(`  整天结账迁移：为 ${wanted.size} 条绑定的 ${requested} 天写了重结请求（${skipped} 条没锚定的旧绑定跳过）`);
+    } catch (err) { console.error("整天结账迁移失败，下一轮重试:", err?.message || String(err)); }
+  }
+
   async function planSettlement(rules, now) {
     const plan = { yesterday: [], older: [], recheck: [], upstreams: new Set() };
     if (!rules.length) return plan;
@@ -4284,6 +4321,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
       // 先定这一轮要结哪些天（只读状态表和账本），要结的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
       // 最近解除的绑定也要结解除前的日子（回看 7 天内；解除得更早的没有可结的了）。只结账，不观测今天
+      await floorResettleRound(now);
       // 解除得更早的（32 天内）只在还有没办完的重结请求时带进来（以前被切开的日子重算），别的不多读
       const archivedSince = (await repository.listRecentlyArchivedRules(now - (RESETTLE_MAX_AGE_MS + DAY_MS)).catch(() => [])).filter(archivedSettleable);
       const archivedCut = now - (SETTLE_LOOKBACK_DAYS + 2) * DAY_MS;
