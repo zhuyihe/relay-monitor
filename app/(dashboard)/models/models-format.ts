@@ -67,11 +67,14 @@ export const hoursLeftText = (hours: number | null | undefined) => (hours == nul
 export const causeText = (cause: LostCause | null | undefined) => (cause ? COPY.causes[cause] : EMPTY);
 export const upstreamName = (ref: { name: string | null } | null | undefined) => ref?.name ?? COPY.thatUpstream;
 
-// 出在哪家上游：「上游甲」，涉及两家以上「上游甲 等 2 家」；没有写「—」
+// 出在哪家上游：「上游甲」，涉及两家以上「上游甲 等 2 家」；没有写「—」。表里名字可以折行，但「等 2 家」整段不折（tail）
+export function upstreamParts(row: LostRowView): { name: string; tail: string | null } | null {
+  if (!row.mainUpstream) return null;
+  return { name: upstreamName(row.mainUpstream), tail: (row.upstreamCount ?? 1) > 1 ? COPY.upstreamTail(row.upstreamCount) : null };
+}
 export function upstreamCell(row: LostRowView): string {
-  if (!row.mainUpstream) return EMPTY;
-  const name = upstreamName(row.mainUpstream);
-  return (row.upstreamCount ?? 1) > 1 ? COPY.upstreamMany(name, row.upstreamCount!) : name;
+  const parts = upstreamParts(row);
+  return parts ? (parts.tail ? `${parts.name} ${parts.tail}` : parts.name) : EMPTY;
 }
 // 明天预计：「约 200 次」；不到 1 次写「不缺」；断货的写「仍断货」
 export const tomorrowText = (n: number, out = false) => (out ? COPY.outTomorrow : n < 0.5 ? COPY.tomorrowNone : COPY.tomorrowTimes(approx(n)));

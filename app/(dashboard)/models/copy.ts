@@ -50,7 +50,7 @@ export const COPY = Object.freeze({
   weekMoney: (money: string) => `近 7 天 ${money}`,
   timesCell: (v: number) => `${n(v)} 次`,
   moneyCell: (money: string) => `约 ${money}`,
-  upstreamMany: (name: string, count: number) => `${name} 等 ${count} 家`,
+  upstreamTail: (count: number) => `等 ${count} 家`,
   tomorrowTimes: (v: string) => `约 ${v} 次`,
   tomorrowNone: "不缺",
   outNow: "断货中",

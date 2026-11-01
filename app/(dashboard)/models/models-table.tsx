@@ -10,7 +10,7 @@ import { Icon } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { COPY } from "./copy";
-import { causeText, isOut, outSinceText, peakText, recoText, tomorrowText, upstreamCell, yuan, money } from "./models-format";
+import { causeText, isOut, outSinceText, peakText, recoText, tomorrowText, upstreamCell, upstreamParts, yuan, money } from "./models-format";
 import type { LoadedPage, LostRowView, Runway } from "./models-format";
 
 // 余下的跑道（上游列表同一个组件、同一种说法）；读不到余额画虚线空条
@@ -109,7 +109,7 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
           <div className="jy-headroom-scroll">
             <table className="jy-data jy-num jy-models-headroom">
               <caption className="sr-only">{COPY.tableTitle}</caption>
-              <colgroup><col style={{ width: "18%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "20%" }} /></colgroup>
+              <colgroup><col style={{ width: "17%" }} /><col style={{ width: "10%" }} /><col style={{ width: "13%" }} /><col style={{ width: "8%" }} /><col style={{ width: "14%" }} /><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "18%" }} /></colgroup>
               <thead><tr><th scope="col">{cols.model}</th><th scope="col" className="r">{cols.lost}</th><th scope="col" className="r">{cols.money}</th><th scope="col">{cols.cause}</th><th scope="col">{cols.upstream}</th><th scope="col">{cols.peak}</th><th scope="col" className="r">{cols.tomorrow}</th><th scope="col">{cols.reco}</th></tr></thead>
               <tbody>
                 {shown.length === 0 && <tr><td colSpan={8} className="jy-muted jy-models-empty">{COPY.noMatch}</td></tr>}
@@ -122,7 +122,7 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
                       <td className="r">{out ? (since ? <span className="jy-cell-two jy-cell-two--r"><span>{COPY.outNow}</span><span className="jy-caption">{since}</span></span> : COPY.outNow) : COPY.timesCell(row?.lost24 ?? 0)}</td>
                       <td className="r">{row && row.lostMoney24 > 0 ? (out ? COPY.outMoney(yuan(row.lostMoney24, rate)) : COPY.moneyCell(yuan(row.lostMoney24, rate))) : dash}</td>
                       <td>{row?.mainCause ? causeText(row.mainCause) : dash}</td>
-                      <td>{row && row.mainUpstream ? upstreamCell(row) : dash}</td>
+                      <td>{row && upstreamParts(row) ? <>{upstreamParts(row)!.name}{upstreamParts(row)!.tail && <> <span className="jy-nowrap">{upstreamParts(row)!.tail}</span></>}</> : dash}</td>
                       <td className="jy-hnowrap">{(row && peakText(row.peakFailHours)) || dash}</td>
                       <td className="r">{row ? tomorrowText(row.tomorrowLost, out) : COPY.tomorrowNone}</td>
                       <td>{row ? (recoText(row.reco) === EMPTY ? dash : recoText(row.reco)) : dash}</td>

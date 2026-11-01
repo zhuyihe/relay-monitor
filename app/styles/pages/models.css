@@ -15,8 +15,13 @@ table.jy-models-headroom { table-layout: fixed; }
 table.jy-models-headroom th { vertical-align: bottom; z-index: 1; }
 table.jy-models-headroom td { vertical-align: top; overflow: hidden; }
 table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
-/* 右对齐的格子（缺货失败、少收、明天预计）可以换行：全站的 .r 是不换行，断货那行「估计每天 ¥12」会被切掉 */
-table.jy-models-headroom td.r { white-space: normal; }
+table.jy-models-headroom td, table.jy-models-headroom th { padding-left: 10px; padding-right: 10px; }
+/* 缺货失败、少收、主要原因、出在哪家上游（名字可以折，「等 N 家」不折）、最多的时段、明天预计：数和单位不拆成两行；多出来的宽度让「建议」去折行。
+   这几格不折行以后，比 1440 窄的屏在固定列宽下会被切：给表一个最小宽度（1440 时刚好放得下），更窄的屏在框里横向滚动 */
+table.jy-models-headroom td:not(:first-child):not(:last-child) { white-space: nowrap; }
+table.jy-models-headroom td:not(:first-child):not(:last-child):nth-child(5) { white-space: normal; }
+.jy-nowrap { white-space: nowrap; }
+table.jy-models-headroom { min-width: 850px; }
 /* 单位写在表头第二行，格子里只写数；墨·次色，不用更淡的灰（对比度要过 4.5:1） */
 .jy-hnowrap { white-space: nowrap; font-size: 13px; }
 /* 余量条（子弹图）：轨道、灰色填充（要）、竖线（能给）、红色超出段（缺口） */

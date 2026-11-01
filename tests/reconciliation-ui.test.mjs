@@ -545,7 +545,21 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   assert.deepEqual(glm.slice(1).map((cell) => cell.split("\n")), [["断货中", "10月30日起"], ["估计每天 ¥12"], ["没渠道"], ["—"], ["—"], ["仍断货"], ["这个模型没有开着的渠道，去开一个"]]);
   // 每一格的字都在格子里，不被切（断货行的「断货中」「估计每天 ¥12」曾被切掉）
   const clipped = await page.locator("tbody tr").evaluateAll((trs) => trs.flatMap((tr) => [...tr.cells].filter((td) => td.scrollWidth > td.clientWidth + 1).map((td) => `${tr.cells[0].innerText.split("\n")[0]}：${td.innerText}`)));
+  assert.equal(await page.locator(".jy-headroom-scroll").evaluate((node) => node.scrollWidth <= node.clientWidth), true, "1440 上表正好放得下，不出横向滚动条");
   assert.deepEqual(clipped, [], "主表里没有被切的格子");
+  // 1440 上数和单位不拆成两行：缺货失败、少收、主要原因、最多的时段、明天预计的每一段字只占一行；「等 2 家」整段在一行（名字可以折）
+  const split = await page.locator("tbody tr").evaluateAll((trs) => trs.flatMap((tr) => [1, 2, 3, 5, 6].flatMap((i) => {
+    const out = [], walker = document.createTreeWalker(tr.cells[i], NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent.trim()) continue;
+      const range = document.createRange(); range.selectNodeContents(node);
+      if (range.getClientRects().length > 1) out.push(`${tr.cells[0].innerText.split("\n")[0]}：${node.textContent}`);
+    }
+    return out;
+  }).concat([...tr.querySelectorAll(".jy-nowrap")].filter((el) => { const range = document.createRange(); range.selectNodeContents(el); return range.getClientRects().length > 1; }).map((el) => `${tr.cells[0].innerText.split("\n")[0]}：${el.textContent}`))));
+  assert.deepEqual(split, [], "数和单位、「等 N 家」不拆成两行");
+  // 表有最小宽度：比 1440 窄的屏在框里横向滚动，不把字切掉
+  assert.ok(await page.locator("table.jy-models-headroom").evaluate((table) => parseFloat(getComputedStyle(table).minWidth) >= 800));
   // 收起的其余模型
   await page.getByText(MODELS_COPY.quietNote(2), { exact: true }).waitFor();
   await page.getByText(MODELS_COPY.smallNote(3), { exact: true }).waitFor();
