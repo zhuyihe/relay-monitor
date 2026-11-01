@@ -42,7 +42,7 @@ export async function readHeadroom(rt, ctx) {
       errorLog: { switchOn: settings.ownErrorLog !== false, cursor: errorCursor, hasRecords: latest != null },
       consume: { on: settings.expectedCost === true && !!consumeCursor, cursor: consumeCursor },
       modelHours: ctx.modelRows.map((row) => ({ model: row.key, t: row.t, requests: row.requests || 0, cost: row.cost || 0 })),
-      cells: supply.cells, byModelHour: supply.byModelHour, rejectedUsers, usersById, channels, upstreams: ctx.upstreams, weekUsd: ctx.weekUsd, small: ctx.small,
+      cells: supply.cells, byModelHour: supply.byModelHour, rejectedUsers, usersById, channels, upstreams: ctx.upstreams, weekUsd: ctx.weekUsd, small: ctx.small, outModels: ctx.outModels,
     });
     // 动作链接要去的地方：公开地址，不给令牌和账号
     const links = { own: publicBaseUrl(own.baseUrl), upstreams: {} };

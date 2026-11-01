@@ -79,9 +79,9 @@ test("渠道 × 模型 × 小时拼起来：成交、被拒（四类，请求问
   const result = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 10 * H + 600000, toMs: 12 * H - 1, channelUpstream: channelUpstreamMap(rules, "own"), tz: "UTC" });
   assert.deepEqual([result.fromSlotMs, result.toSlotMs], [10 * H, 12 * H], "from 向下、to 向上取整点");
   const cell = (slotMs, channelId, model) => result.cells.find((item) => item.slotMs === slotMs && item.channelId === channelId && item.model === model);
-  assert.deepEqual(cell(10 * H, 1, "gpt-4o"), { slotMs: 10 * H, channelId: 1, model: "gpt-4o", rejected: rejected({ rate_limit: 7, upstream: 2 }), rejectedRequests: 6, badRequest: 0, success: 45, sampled: 1, attempts: attempts({ 1: 6, 2: 3 }) });
-  assert.deepEqual(cell(10 * H, 2, "gpt-4o"), { slotMs: 10 * H, channelId: 2, model: "gpt-4o", rejected: rejected({ upstream: 1 }), rejectedRequests: 0, badRequest: 0, success: 3, sampled: 0, attempts: attempts({ 3: 1 }) });
-  assert.deepEqual(cell(11 * H, 2, "claude"), { slotMs: 11 * H, channelId: 2, model: "claude", rejected: rejected({ auth_quota: 5, upstream: 2 }), rejectedRequests: 7, badRequest: 2, success: 7, sampled: 0, attempts: attempts({ 1: 5 }, { 1: 2 }) }, "400 另记 badRequest，不进被拒、不进尝试数；504 不能重试另记");
+  assert.deepEqual(cell(10 * H, 1, "gpt-4o"), { slotMs: 10 * H, channelId: 1, model: "gpt-4o", rejected: rejected({ rate_limit: 7, upstream: 2 }), rejectedRequests: 6, badRequest: 0, success: 45, finalFailuresByReason: { rate_limit: 0, upstream: 0, auth_quota: 0 }, sampled: 1, attempts: attempts({ 1: 6, 2: 3 }) });
+  assert.deepEqual(cell(10 * H, 2, "gpt-4o"), { slotMs: 10 * H, channelId: 2, model: "gpt-4o", rejected: rejected({ upstream: 1 }), rejectedRequests: 0, badRequest: 0, success: 3, finalFailuresByReason: { rate_limit: 0, upstream: 1, auth_quota: 0 }, sampled: 0, attempts: attempts({ 3: 1 }) });
+  assert.deepEqual(cell(11 * H, 2, "claude"), { slotMs: 11 * H, channelId: 2, model: "claude", rejected: rejected({ auth_quota: 5, upstream: 2 }), rejectedRequests: 7, badRequest: 2, success: 7, finalFailuresByReason: { rate_limit: 0, upstream: 2, auth_quota: 0 }, sampled: 0, attempts: attempts({ 1: 5 }, { 1: 2 }) }, "400 另记 badRequest，不进被拒、不进尝试数；504 不能重试另记");
   assert.equal(cell(30 * H, 1, "gpt-4o"), undefined, "范围之外");
   assert.deepEqual(result.cells.map((item) => [item.slotMs, item.channelId, item.model]), [[10 * H, 1, "gpt-4o"], [10 * H, 2, "gpt-4o"], [11 * H, 2, "claude"], [11 * H, 9, "claude"]], "有数的格子才有，按小时、渠道、模型排");
 });
@@ -241,4 +241,53 @@ test("汇总分批读（每批 24 个小时）：结果和一次读一样；没�
   // 桶行数封顶
   await assert.rejects(queryErrorSupply({ errors: store, consume: sales, stationId: "own", fromMs: 0, toMs: 2 * H, tz: "UTC", maxRows: 2 }), (error) => error.code === "TOO_MANY_BUCKETS");
   assert.ok(await queryErrorSupply({ errors: store, consume: sales, stationId: "own", fromMs: 0, toMs: 2 * H, tz: "UTC", maxRows: 3 }), "正好 3 行：不封");
+});
+
+test("缺货失败按原因拆（finalFailuresByReason）：各原因加起来正好是 finalFailures；请求问题、其他不在里面；读不到 R 时用推的 R 一样拆", async () => {
+  const errors = new MemoryOwnLogStore(ERROR_SPEC), consume = new MemoryOwnLogStore();
+  await errors.startCursor("own", 0, 0);
+  await errors.applyWindow("own", { fromMs: 0, toMs: 10 * DAY, buckets: [
+    // R = 1：第 2 档能重试的失败是最终失败；不能重试的（504）第几档都是
+    errorBucket(10 * H, { count: 20 }), errorBucket(10 * H, { attempt: 2, count: 6 }),                                  // 限流：第 1 档 20、第 2 档 6 → 6
+    errorBucket(10 * H, { reason: "upstream", status: 503, attempt: 2, count: 4 }),                                    // 故障：第 2 档 4
+    errorBucket(10 * H, { reason: "upstream", status: 504, retryable: 0, count: 3 }),                                  // 故障：不能重试 3
+    errorBucket(10 * H, { reason: "auth_quota", status: 402, attempt: 2, count: 2 }),                                  // 没钱：第 2 档 2
+    errorBucket(10 * H, { reason: "bad_request", status: 400, retryable: 0, count: 9 }), errorBucket(10 * H, { reason: "other", status: 404, count: 5 }), // 不进 F
+    errorBucket(11 * H, { model: "claude", attempt: 2, count: 7 }),
+  ] });
+  const result = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 10 * H, toMs: 12 * H, tz: "UTC", retry: { retryTimes: 1 } });
+  const hour = result.byModelHour.find((item) => item.slotMs === 10 * H && item.model === "gpt-4o");
+  assert.deepEqual(hour.finalFailuresByReason, { rate_limit: 6, upstream: 7, auth_quota: 2 });
+  assert.equal(hour.finalFailures, 15, "6 + 7 + 2");
+  assert.deepEqual(result.byModelHour.find((item) => item.model === "claude").finalFailuresByReason, { rate_limit: 7, upstream: 0, auth_quota: 0 });
+  for (const item of result.byModelHour) assert.equal(Object.values(item.finalFailuresByReason).reduce((a, b) => a + b, 0), item.finalFailures);
+  // 读不到 R：用整个站点见到的最大档（第 2 档）推出 R = 1，拆法一样
+  const inferred = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 10 * H, toMs: 12 * H, tz: "UTC" });
+  assert.equal(inferred.retry.method, "inferred");
+  assert.deepEqual(inferred.byModelHour.find((item) => item.model === "gpt-4o").finalFailuresByReason, { rate_limit: 6, upstream: 7, auth_quota: 2 });
+});
+
+test("每个格子（渠道 × 模型 × 小时）的最终失败数按原因拆（finalFailuresByReason）：渠道 A 被限流被拒 1000 次（第 1 次尝试，重试到 B 基本成功），B 上有 50 个请求第 2 次又被拒、重试用完才失败 → A = 0、B = 50；各格子加起来正好是「模型 × 小时」的 F", async () => {
+  const errors = new MemoryOwnLogStore(ERROR_SPEC), consume = new MemoryOwnLogStore();
+  await errors.startCursor("own", 0, 0);
+  await errors.applyWindow("own", { fromMs: 0, toMs: 10 * DAY, buckets: [
+    errorBucket(10 * H, { channelId: 1, count: 1000 }),                 // A：第 1 次尝试被拒 1000 次（限流）
+    errorBucket(10 * H, { channelId: 2, attempt: 2, count: 50 }),       // B：第 2 次尝试又被拒 50 次（R = 1，第 2 次是最后一次）
+    errorBucket(10 * H, { channelId: 2, reason: "upstream", status: 503, attempt: 2, count: 4 }),
+    errorBucket(10 * H, { channelId: 3, reason: "auth_quota", status: 402, retryable: 0, count: 7 }), // 不能重试：第几次都是最终失败
+  ] });
+  const result = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 10 * H, toMs: 11 * H, tz: "UTC", retry: { retryTimes: 1 } });
+  const cell = (channelId) => result.cells.find((item) => item.channelId === channelId);
+  assert.deepEqual(cell(1).finalFailuresByReason, { rate_limit: 0, upstream: 0, auth_quota: 0 }, "A 被拒 1000 次，但没有一个死在 A 上");
+  assert.deepEqual(cell(2).finalFailuresByReason, { rate_limit: 50, upstream: 4, auth_quota: 0 });
+  assert.deepEqual(cell(3).finalFailuresByReason, { rate_limit: 0, upstream: 0, auth_quota: 7 });
+  const hour = result.byModelHour[0];
+  for (const reason of ["rate_limit", "upstream", "auth_quota"]) assert.equal(result.cells.reduce((sum, item) => sum + item.finalFailuresByReason[reason], 0), hour.finalFailuresByReason[reason], `各格子加起来 = 模型 × 小时（${reason}）`);
+  assert.equal(hour.finalFailures, 61);
+  // 没有错误的格子：全是 0
+  await consume.startCursor("own", 0, 0);
+  await consume.applyWindow("own", { fromMs: 0, toMs: 10 * DAY, buckets: [consumeBucket(10 * H, { channelId: 9 })] });
+  const withSales = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 10 * H, toMs: 11 * H, tz: "UTC", retry: { retryTimes: 1 } });
+  assert.deepEqual(withSales.cells.find((item) => item.channelId === 9).finalFailuresByReason, { rate_limit: 0, upstream: 0, auth_quota: 0 });
+  assert.ok(withSales.cells.every((item) => !("reasonAttempts" in item)), "内部用的 reasonAttempts 不对外");
 });
