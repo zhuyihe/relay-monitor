@@ -5,7 +5,6 @@
 .jy-models-kpis-wrap { display: flex; flex-direction: column; gap: 6px; }
 .jy-models-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
 .jy-models-linkbtn:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
-.jy-hspin { flex: none; width: 14px; height: 14px; margin-top: 3px; border: 2px solid var(--jy-ink-3); border-top-color: transparent; border-radius: 50%; animation: jy-spin .9s linear infinite; }
 
 /* ─── 主表 ─── */
 .jy-models-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
@@ -16,30 +15,13 @@ table.jy-models-headroom { table-layout: fixed; }
 table.jy-models-headroom th { vertical-align: bottom; z-index: 1; }
 table.jy-models-headroom td { vertical-align: top; overflow: hidden; }
 table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
-.jy-hth { white-space: nowrap; }
 /* 单位写在表头第二行，格子里只写数；墨·次色，不用更淡的灰（对比度要过 4.5:1） */
-.jy-hunit { display: block; font-weight: 400; font-size: 11px; line-height: 16px; color: var(--jy-ink-2); }
 .jy-hnowrap { white-space: nowrap; font-size: 13px; }
-.jy-hkeyusers { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 13px; }
-.jy-hmargin { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
-.jy-hmargin-text { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.jy-hmargin-text.is-short { color: var(--jy-crit-ink); font-weight: 600; }
-.jy-hmargin-text.is-thin { color: var(--jy-ink); }
-.jy-hmargin-text.is-ok, .jy-hmargin-text.is-muted { color: var(--jy-ink-2); font-size: 13px; }
-.jy-hmargin-text .jy-sym { width: 11px; height: 11px; }
 /* 余量条（子弹图）：轨道、灰色填充（要）、竖线（能给）、红色超出段（缺口） */
-.jy-hbar { position: relative; display: block; width: 100%; max-width: 120px; height: 6px; border-radius: 3px; background: var(--jy-sunken); }
-.jy-hbar i { position: absolute; top: 0; bottom: 0; display: block; }
-.jy-hbar .fill { left: 0; border-radius: 3px 0 0 3px; background: var(--jy-ink-3); }
-.jy-hbar .over { background: var(--jy-crit); }
-.jy-hbar .line { top: -2px; bottom: -2px; width: 0; border-left: 2px solid var(--jy-ink); }
-.jy-hbar .line.is-dashed { border-left: 2px dashed var(--jy-ink); }
 .jy-models-restrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--jy-ink-2); }
 .jy-models-restrow > span { flex: 1; min-width: 0; }
 .jy-models-rest { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
 .jy-models-rest:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
-.jy-models-howmore { margin-top: 6px; }
-.jy-models-howbox { max-height: 260px; overflow: auto; }
 .jy-models-panel .jy-panel-foot { display: flex; flex-direction: column; gap: 4px; padding: 10px 16px; border-top: 1px solid var(--jy-rule); margin-top: 0; }
 /* 被自动停用的原因：一行放不下就截短，鼠标放上去（title）看全文 */
 .jy-models-reason { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -59,14 +41,8 @@ table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
 .jy-hcard .jy-mini-track { width: 48px; }
 .jy-hcard .r2 { margin-top: 6px; font-size: 13px; }
 .jy-hcard .r3 { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.jy-hcard .r3 .jy-hbar { width: 80px; }
-.jy-hcard .r4 { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; }
 .jy-hcard .r5 { margin-top: 4px; }
 .jy-hcard .r6 { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; }
-.jy-hreason { display: inline-flex; align-items: center; gap: 4px; }
-.jy-hreason i, .jy-hlegend i { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; }
-.jy-hfull { display: inline-flex; align-items: center; gap: 6px; color: var(--jy-crit-ink); font-size: 12px; }
-.jy-hfull .jy-sym { width: 10px; height: 10px; }
 
 /* 手机：一个模型一张卡片，四行 */
 .jy-models-cards { list-style: none; margin: 0; padding: 0; }
@@ -78,20 +54,16 @@ table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
 .jy-models-card .r1 { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .jy-models-cardname { min-width: 0; overflow-wrap: anywhere; }
 .jy-models-card .r2 { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.jy-models-card .r2 .jy-hbar { width: 80px; flex: none; }
 .jy-models-card .r3, .jy-models-card .r4 { display: block; }
 
 /* ─── 怎么算的 ─── */
-.jy-models-how { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
-.jy-models-how b { font-weight: 600; color: var(--jy-ink); }
 
 /* ─── 抽屉 ─── */
 .jy-models-drawer .ant-drawer-title { flex: 1; min-width: 0; }
 .jy-models-drawer-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .jy-models-drawer-title strong { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.jy-hlost { color: var(--jy-crit-ink); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .jy-hshort { display: inline-flex; align-items: center; gap: 6px; color: var(--jy-crit-ink); font-size: 13px; font-weight: 600; }
-.jy-hshort .jy-sym { width: 11px; height: 11px; }
-.jy-hshort-figure { color: var(--jy-crit-ink); }
 .jy-models-drawer .ant-drawer-body { display: flex; flex-direction: column; gap: 20px; padding-top: 16px; }
 .jy-models-drawer-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: row; }
 .jy-models-drawer-kpis .jy-kpi-figure { font-size: 18px; line-height: 26px; }
@@ -101,11 +73,6 @@ table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
 .jy-hlegend li { display: inline-flex; align-items: center; gap: 6px; }
 .jy-models-conclusion { margin: 10px 0 0; font-size: 13px; line-height: 20px; color: var(--jy-ink); }
 /* 图里：上限线（测到的实线、没测到的虚线）、高峰框 */
-.jy-hlimit { stroke: var(--jy-ink); stroke-width: 1.5; }
-.jy-hlimit.is-dashed { stroke-dasharray: 5 4; }
-.jy-hlimit-label { fill: var(--jy-ink); font-size: 11px; }
-.jy-hpeak { fill: none; stroke: var(--jy-ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
-.jy-hpeak-label { fill: var(--jy-ink-2); font-size: 11px; }
 /* 抽屉里渠道和上游那张表：固定列宽，再长的停用原因也只占一行（省略号），不撑宽「状态」列、不挤掉别的列 */
 .jy-models-drawer table.jy-models-channels { table-layout: fixed; }
 .jy-models-drawer table.jy-models-channels th { white-space: normal; }
@@ -144,7 +111,6 @@ table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
   .jy-models-panel > .jy-headroom-scroll { flex: 1 1 0; min-height: 0; }
   .jy-models-upstreams > .jy-hcards { flex: 1 1 0; min-height: 0; overflow: auto; }
   .jy-models-upstreams > .jy-panel-foot { padding: 10px 16px; border-top: 1px solid var(--jy-rule); margin-top: 0; }
-  .jy-models-howbox { max-height: 30vh; }
   /* 段内的表头第二行、卡片最后一行不被切 */
 }
 

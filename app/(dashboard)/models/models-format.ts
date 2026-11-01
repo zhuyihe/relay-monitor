@@ -1,19 +1,25 @@
-// 模型供需页的类型和把接口的数拼成页面上的字（字在 copy.ts；判断和算数在 lib/models-headroom.js，页面不重算，只拼字）。钱都按自营站点的汇率换成显示的币种。
+// 模型供需页的类型和把接口的数拼成页面上的字（字在 copy.ts；算数在 lib/models-lost.js、lib/models-headroom.js，页面不重算，只拼字）。钱都按自营站点的汇率换成显示的币种。
+// 页面只读 headroom.lost（近 24 小时缺货失败）和 headroom.upstreams；老的 state / kpis / rows 不读。
 import { EMPTY, formatDays, formatMoney, formatPct } from "../../../lib/format.js";
 import type { Level } from "../../components/status";
 import { COPY } from "./copy";
 import type { ChannelState } from "./copy";
-import type { BlockedByReason, HeadroomDetail, HeadroomPage, HeadroomRow, Margin, Peak, Quantity, Reco, UpstreamHeadroom } from "./headroom-types";
+import type { DetailChannelHeadroom, HeadroomDetail, HeadroomPage, LostByReason, LostCause, LostReco, LostRow, LostView, Peak, UpstreamHeadroom } from "./headroom-types";
 
-export type { BlockedByReason, HeadroomDetail, HeadroomPage, HeadroomRow, Margin, Peak, Quantity, Reco, UpstreamHeadroom };
-export type { ChannelState };
+export type { ChannelState, LostCause, LostReco, LostRow };
+
+// 等 PR E-A 把这几个字段写进类型以后，下面几个带 & 的可以去掉
+export type LostRowView = LostRow & { upstreamCount?: number };
+export type LostViewData = Omit<LostView, "rows"> & { rows: LostRowView[]; quiet?: { name: string; weekUsd: number }[] };
+export type UpstreamView = UpstreamHeadroom & { lost24?: LostByReason | null };
+export type ChannelView = DetailChannelHeadroom & { lost24?: number; mainCause?: LostCause | null };
 
 export type Runway = { days: number | null; noSpend: boolean; level: Level; text: string; failed: boolean; fixed?: boolean };
-// headroom 是 null：这一次没算出来（没有数据库、读库出错），页面当「读不到」处理
-export type ModelsPage = { asOf: number; tz: string; rate: number; critDays: number; headroom: HeadroomPage | null };
+// headroom 是 null：这一次没算出来（数据量太大、没有数据库、读库出错），页面写一句话
+export type ModelsPage = { asOf: number; tz: string; rate: number; critDays: number; headroom: (Omit<HeadroomPage, "lost" | "upstreams"> & { lost: LostViewData; upstreams: UpstreamView[] }) | null };
 export type SiteLinks = HeadroomPage["links"];
-// 页面里 headroom 一定有（没有就整页写「读不到」，不画下面这些）
-export type LoadedPage = ModelsPage & { headroom: HeadroomPage };
+// 页面里 headroom 一定有（没有就写一句话，不画下面这些）
+export type LoadedPage = ModelsPage & { headroom: NonNullable<ModelsPage["headroom"]> };
 // 抽屉里这几样还是第 0 步的读法：渠道的停用原因（stopReason、stopTime）、找货帮手（价格、在不在供）
 export type DetailChannel = { channelId: number; name: string; state: ChannelState; stopReason?: string | null; stopTime?: number | null };
 export type Price = { kind: "ratio" | "perCall"; value: number };
@@ -21,16 +27,19 @@ export type FinderRow = {
   upstreamId: string; name: string | null; price: Price | null; readable: boolean; supplying: boolean; runway: Runway | null; bindable: boolean;
   main: boolean; compare: { kind: "same" | "cheaper" | "pricier"; pct: number } | null;
 };
+export type DetailHeadroom = Omit<HeadroomDetail, "channels"> & { channels: ChannelView[] };
 export type ModelDetail = {
   name: string; rate: number; tz: string; asOf: number; critDays: number;
-  headroom: HeadroomDetail | null;
+  headroom: DetailHeadroom | null;
   channels: DetailChannel[];
   finder: FinderRow[];
 };
 
+// 钱：整数元，「约」由调用的字加（一个数前面最多一个「约」）
 export const money = (usd: number | null | undefined, rate: number, opts?: Parameters<typeof formatMoney>[1]) => (usd == null || !Number.isFinite(usd) ? EMPTY : formatMoney(usd * rate, opts));
+export const yuan = (usd: number | null | undefined, rate: number) => money(usd, rate, { dp: 0 });
 
-// 次数：千位逗号。带「约」「至少」的量是估出来的，不写到个位：1,000 以上取到百，100 以上取到十
+// 次数：千位逗号。预计的数（明天预计、每小时最多接）是估的，不写到个位：1,000 以上取到百，100 以上取到十
 export const count = (n: number) => Math.round(n).toLocaleString("en-US");
 export const approx = (n: number) => {
   const step = n >= 1000 ? 100 : n >= 100 ? 10 : 1;
@@ -38,7 +47,6 @@ export const approx = (n: number) => {
 };
 
 // 钟点写成「21–24 点」：一段连着的钟点，第一个到最后一个加 1（24 点就写 24，跨午夜 [23, 0] 写「23–1 点」）；不连着的几段用「、」隔开。
-// 主表的高峰时段、顶上的「最缺的」、抽屉的结论都用这一个函数，几处写法一样
 export const hoursText = (hours: number[]) => {
   const set = new Set(hours.map((h) => ((h % 24) + 24) % 24));
   // 每一段从「前一个钟点不在里面」的那个钟点开始（23 和 0 算连着）；全天都在时从 0 点起
@@ -52,124 +60,72 @@ export const hoursText = (hours: number[]) => {
 };
 export const peakText = (peak: Peak | null | undefined) => (peak?.hours?.length ? hoursText(peak.hours) : null);
 
-// 一个量写成字：测到的「约 X」、没碰到过上限的「至少 X」、数据积累中、拿不到「—」
-export function quantityText(q: Quantity | null | undefined): string {
-  if (!q) return COPY.dash;
-  if (q.kind === "accumulating") return COPY.accumulating;
-  if (q.kind === "unavailable" || q.value == null) return COPY.dash;
-  return q.kind === "atLeast" ? COPY.atLeast(approx(q.value)) : COPY.approx(approx(q.value));
-}
-
-// 涨幅「+9%」「−5%」；growth 是倍数
-export const growthText = (growth: number | null | undefined) => {
-  if (growth == null || !Number.isFinite(growth)) return COPY.growthNone;
-  const pct = Math.round((growth - 1) * 100);
-  return COPY.growth(`${pct > 0 ? "+" : pct < 0 ? "−" : ""}${Math.abs(pct)}%`);
-};
-
-// 错误日志和整站消费日志现在是什么情形：写几处字都看它。
-// switchOff 没开错误日志；noRecords 开着但读到现在一条也没有（能给还是「至少 X」，余量、没买到、被挡写「—」）；accumulating 不够 7 天；ok 都有。consumeLog 是整站消费日志（「算应付成本」）
-export type LogCtx = { mode: "ok" | "accumulating" | "switchOff" | "noRecords"; consumeLog: boolean };
-export const logCtxOf = (h: HeadroomPage): LogCtx => ({
-  mode: h.state === "noErrorLog" ? (h.noErrorLogReason === "noRecords" ? "noRecords" : "switchOff") : h.state,
-  consumeLog: h.consumeLog,
-});
-// 没有错误日志可用（拿不到被挡和没买到）：没开、或开着但一条也没有
-export const noErrorLogIn = (ctx: LogCtx) => ctx.mode === "switchOff" || ctx.mode === "noRecords";
-
-// 余量或缺口那一格：short 红菱形加「至少缺」，thin 墨色「余」，ok 灰色「余」，上限没测到、数据积累中、要开错误日志各写各的
-export type MarginView = { tone: "short" | "thin" | "ok" | "muted"; text: string };
-export function marginView(row: Pick<HeadroomRow, "margin" | "supply">, ctx: LogCtx): MarginView {
-  const { margin, supply } = row;
-  if (ctx.mode === "switchOff") return { tone: "muted", text: COPY.margin.needLog };
-  if (ctx.mode === "noRecords") return { tone: "muted", text: COPY.dash };
-  if (supply.kind === "accumulating") return { tone: "muted", text: COPY.accumulating };
-  // 能给只是「至少」：不说缺、也不写余多少，只写上限还没测到
-  if (supply.kind === "atLeast" || margin.status === "unknown") return { tone: "muted", text: COPY.margin.unknown };
-  if (margin.status === "none" || margin.value == null) return { tone: "muted", text: COPY.dash };
-  if (margin.status === "short") return { tone: "short", text: COPY.margin.short(approx(Math.abs(margin.value))) };
-  return { tone: margin.status === "thin" ? "thin" : "ok", text: COPY.margin.room(approx(margin.value)) };
-}
-// 抽屉「缺口 / 余量」那个数：测到的写「约 N」，别的写「—」
-export const marginNumberText = (margin: Margin) => (margin.value == null || margin.kind !== "measured" || margin.status === "unknown" || margin.status === "none" ? EMPTY : COPY.approx(approx(Math.abs(margin.value))));
-
 // 上游撑不到的小时数写成字，和上游列表同一种说法（formatDays）
 export const hoursLeftText = (hours: number | null | undefined) => (hours == null ? EMPTY : formatDays(hours / 24));
 
-// 建议：一句动作加一行理由。没开错误日志、数据积累中时只给钱的（撑不到今晚的先充值），别的写「上限还没测到」
-export type RecoView = { title: string; why: string; kind: Reco["kind"] };
-export function recoView(row: Pick<HeadroomRow, "reco" | "supply" | "margin">, ctx: LogCtx): RecoView {
-  const reco = row.reco;
+export const causeText = (cause: LostCause | null | undefined) => (cause ? COPY.causes[cause] : EMPTY);
+export const upstreamName = (ref: { name: string | null } | null | undefined) => ref?.name ?? COPY.thatUpstream;
+
+// 出在哪家上游：「上游甲」，涉及两家以上「上游甲 等 2 家」；没有写「—」
+export function upstreamCell(row: LostRowView): string {
+  if (!row.mainUpstream) return EMPTY;
+  const name = upstreamName(row.mainUpstream);
+  return (row.upstreamCount ?? 1) > 1 ? COPY.upstreamMany(name, row.upstreamCount!) : name;
+}
+// 明天预计：「约 200 次」；不到 1 次写「不缺」
+export const tomorrowText = (n: number) => (n < 0.5 ? COPY.tomorrowNone : COPY.tomorrowTimes(approx(n)));
+
+// 建议：一句话，不加理由行。X 是出问题的上游，Y 是能把量挪过去的上游
+export function recoText(reco: LostReco): string {
   const R = COPY.reco;
-  const name = (value: string | null) => value ?? R.thatUpstream;
-  if (reco.kind === "topup") return { kind: "topup", title: R.topup(name(reco.name)), why: R.topupWhy(hoursLeftText(reco.hoursLeft)) };
-  const unmeasured = (): RecoView => ({
-    kind: "unmeasured", title: R.unmeasured,
-    why: ctx.mode === "switchOff" ? R.unmeasuredNeedLog
-      : row.supply.kind === "atLeast" && row.supply.value != null ? R.unmeasuredAtLeast(approx(row.supply.value))
-        : !ctx.consumeLog ? R.unmeasuredNeedConsume
-          : ctx.mode === "noRecords" ? R.unmeasuredNoRecords : R.unmeasuredAccumulating,
-  });
-  if (ctx.mode !== "ok") return unmeasured();
+  const x = upstreamName(reco as { name: string | null });
   switch (reco.kind) {
-    case "switch": return { kind: "switch", title: R.switch(name(reco.name)), why: R.switchWhy(reco.keys) };
-    case "addKeys":
-      // 加几把 Key 至少 1 把才给
-      if (!(reco.n >= 1)) return { kind: "none", title: COPY.dash, why: "" };
-      return { kind: "addKeys", title: R.addKeys(reco.n, name(reco.name)), why: R.addKeysWhy(approx(reco.perKey)) };
-    case "thin": return { kind: "thin", title: R.thin, why: row.margin.value != null ? R.thinWhy(approx(row.margin.value)) : "" };
-    case "unmeasured": return unmeasured();
-    default: return { kind: "none", title: COPY.dash, why: "" };
+    case "topup": return R.topup(x);
+    case "rateLimit": {
+      const y = reco.moveTo ? upstreamName(reco.moveTo) : null;
+      if (reco.accountLimited) return y ? R.quota(x, y) : R.quotaOnly(x);
+      if (reco.addKeys && reco.addKeys.n >= 1) return y ? R.addKeysN(x, reco.addKeys.n, y) : R.addKeysNOnly(x, reco.addKeys.n);
+      return y ? R.addKeys(x, y) : R.addKeysOnly(x);
+    }
+    case "fault": return reco.moveTo ? R.fault(x, upstreamName(reco.moveTo)) : R.faultOnly(x);
+    case "openChannel": return R.openChannel;
+    default: return EMPTY;
   }
 }
 
 // 顶上三个数
-export type Kpi = { key: "willShort" | "notBought" | "topup"; title: string; value: string; sub: string; lead?: { kind: "model" | "upstream"; id: string; name: string } | null; subAfter?: string; extra?: string; more?: string | null };
-export function kpisOf(page: ModelsPage, headroom: HeadroomPage): Kpi[] {
-  const { kpis } = headroom, rate = page.rate;
-  const ctx = logCtxOf(headroom);
-  const noLogSub = ctx.mode === "noRecords" ? COPY.kpi.noRecords : ctx.mode === "accumulating" ? COPY.kpi.accumulating(headroom.errorLog.daysLeft ?? headroom.errorLog.needDays) : COPY.kpi.needLog;
-  const willShort: Kpi = !kpis.willShort
-    ? { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.dash, sub: noLogSub }
-    : kpis.willShort.worst && kpis.willShort.count > 0
-      ? { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.models(kpis.willShort.count), sub: "", lead: { kind: "model", id: kpis.willShort.worst.name, name: kpis.willShort.worst.name }, subAfter: COPY.kpi.willShortWorst(approx(kpis.willShort.worst.gap), peakText(kpis.willShort.worst.peak)) }
-      : { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.models(0), sub: COPY.kpi.willShortNone };
-  const nb = kpis.notBought;
-  const notBought: Kpi = !nb
-    ? { key: "notBought", title: COPY.kpi.notBought, value: COPY.kpi.dash, sub: noLogSub }
-    : {
-      key: "notBought", title: COPY.kpi.notBought, value: COPY.kpi.notBoughtValue(nb.f24),
-      sub: nb.f24 > 0 || nb.blockedRetried > 0
-        ? [nb.f24 > 0 ? COPY.kpi.notBoughtLost(money(nb.lostUsd, rate)) : null, nb.blockedRetried > 0 ? COPY.kpi.notBoughtRetried(nb.blockedRetried) : null].filter(Boolean).join("；")
-        : COPY.kpi.notBoughtNone,
-      extra: nb.keyUsers > 0 ? COPY.kpi.notBoughtUsers(nb.keyUsers) : undefined,
-    };
-  const topup = kpis.topup;
-  const upstream: Kpi = topup.count > 0 && topup.first
-    ? { key: "topup", title: COPY.kpi.topup, value: COPY.kpi.upstreams(topup.count), sub: "", lead: { kind: "upstream", id: topup.first.upstreamId, name: topup.first.name ?? COPY.reco.thatUpstream }, subAfter: COPY.kpi.topupFirst(hoursLeftText(topup.first.hoursLeft)), more: topup.count > 1 ? COPY.kpi.more(topup.count) : null }
-    : { key: "topup", title: COPY.kpi.topup, value: COPY.kpi.upstreams(0), sub: COPY.kpi.topupNone };
-  return [willShort, notBought, upstream];
+export type Kpi = {
+  key: "tomorrow" | "last24" | "topup"; title: string; value: string; sub: string;
+  // 下一行里可点的部分：最缺的模型、重点用户、快没钱的上游
+  lead?: { kind: "model" | "upstream"; id: string; name: string } | null; before?: string; after?: string; users?: number | null;
+};
+export function kpisOf(page: LoadedPage): Kpi[] {
+  const { lost } = page.headroom, K = COPY.kpi, rate = page.rate;
+  const off = lost.status === "noErrorLog";
+  const t = lost.kpis.tomorrow, l = lost.kpis.last24;
+  const worst = [...lost.rows].sort((a, b) => b.tomorrowLost - a.tomorrowLost)[0];
+  const tomorrow: Kpi = off || !t
+    ? { key: "tomorrow", title: K.tomorrow, value: K.dash, sub: "" }
+    : t.count > 0 && worst
+      ? { key: "tomorrow", title: K.tomorrow, value: K.models(t.count), sub: "", before: K.tomorrowBefore(approx(t.lost)), lead: { kind: "model", id: worst.name, name: worst.name } }
+      : { key: "tomorrow", title: K.tomorrow, value: K.models(0), sub: K.tomorrowNone };
+  const last24: Kpi = off || !l
+    ? { key: "last24", title: K.last24, value: K.dash, sub: "" }
+    : l.lost > 0
+      ? { key: "last24", title: K.last24, value: K.times(l.lost), sub: K.last24Lost(yuan(l.lostUsd, rate)), users: l.keyUsers > 0 ? l.keyUsers : null }
+      : { key: "last24", title: K.last24, value: K.times(0), sub: K.last24None };
+  const u = lost.kpis.topup;
+  const topup: Kpi = u.count > 0 && u.first
+    ? { key: "topup", title: K.topup, value: K.upstreams(u.count), sub: "", lead: u.first.upstreamId ? { kind: "upstream", id: u.first.upstreamId, name: upstreamName(u.first) } : null, before: u.first.upstreamId ? "" : upstreamName(u.first), after: u.count > 1 ? K.topupMany(u.count, noAbout(hoursLeftText(u.first.hoursLeft))) : K.topupOne(noAbout(hoursLeftText(u.first.hoursLeft))) }
+    : { key: "topup", title: K.topup, value: K.upstreams(0), sub: K.topupNone };
+  return [tomorrow, last24, topup];
 }
+// 「约 5 小时」去掉前面的「约」：这一句里数字前不叠「约」
+const noAbout = (text: string) => text.replace(/^约 /, "");
 
-// 余量条要的几个数：轨道最长 = 要和能给里大的那个再放宽一点；竖线 = 能给；灰色填充 = 要；超出竖线的那截 = 缺口
-export type BarShape = { track: number; line: number | null; fill: number; over: number; dashed: boolean };
-export function barShape(need: number | null, supply: Quantity | null | undefined): BarShape | null {
-  if (need == null || !supply || supply.value == null || (supply.kind !== "measured" && supply.kind !== "atLeast")) return null;
-  const top = Math.max(need, supply.value, 1) * 1.12;
-  const line = supply.value / top, fill = Math.min(need, supply.value) / top;
-  // 能给只是「至少」时不能说缺，不画红色那一截
-  return { track: 1, line, fill, over: supply.kind === "measured" && need > supply.value ? (need - supply.value) / top : 0, dashed: supply.kind === "atLeast" };
-}
-
-// 上游卡片
-export function upstreamLimitText(item: UpstreamHeadroom, ctx: LogCtx): string {
-  const U = COPY.upstream;
-  if (ctx.mode === "switchOff") return U.limitNeedLog;
-  if (item.limit.kind === "accumulating") return U.limitAccumulating;
-  if (item.limit.kind === "unavailable" || item.limit.value == null) return U.limitDash;
-  return item.limit.kind === "atLeast" ? U.limitAtLeast(approx(item.limit.value)) : U.limit(approx(item.limit.value));
-}
+// 上游卡片：近 24 小时限流、故障、没钱各几次
 export const upstreamRunway = (hours: number | null, critDays: number) => (hours == null ? null : { days: hours / 24, level: (hours / 24 <= critDays ? "crit" : "good") as Level, text: hoursLeftText(hours) });
+export const lostTotal = (lost: LostByReason | null | undefined) => (lost ? lost.rate_limit + lost.upstream + lost.auth_quota : 0);
 
 // 带 ↗ 的动作链接：到你的站或上游网站去，控制台不替用户改任何东西。地址由接口给（links）
 export function actionHref(action: "topup" | "addKey" | "weights", upstreamId: string | null, links: SiteLinks | null | undefined): string | null {
@@ -181,33 +137,27 @@ export function actionHref(action: "topup" | "addKey" | "weights", upstreamId: s
   return `${site.baseUrl}${action === "topup" ? "/console/topup" : "/console/token"}`;
 }
 
-// 抽屉里图下面一句结论（从 facts 拼）：每晚 21–23 点超过上限，被挡的多是上游限流，其中至少 186 个最后没买到；平时有约 3,000 次/小时的余量。
-export function conclusionText(facts: HeadroomDetail["facts"]): string {
+// 抽屉图下面一句：失败多在 21–24 点，主要是上游甲限流。
+export function conclusionText(lost: LostRowView | null): string {
   const C = COPY.drawer.conclusion;
-  let text = facts.overLimitHours.length ? C.over(hoursText(facts.overLimitHours)) : C.overNone;
-  if (facts.topReason) text += C.reason(C.reasons[facts.topReason]);
-  if (facts.notBought24 > 0) text += C.lost(facts.notBought24);
-  if (facts.typicalRoom != null && facts.typicalRoom > 0) text += C.room(approx(facts.typicalRoom));
-  return text + C.end;
+  if (!lost || lost.lost24 <= 0) return C.none;
+  const when = lost.peakFailHours?.hours.length ? C.when(hoursText(lost.peakFailHours.hours)) : "";
+  const who = lost.mainUpstream ? upstreamName(lost.mainUpstream) : "";
+  const tail = lost.mainCause === "no_channel" ? C.noChannel : lost.mainCause ? C.mainly(`${who}${causeText(lost.mainCause)}`) : "";
+  return `${[when, tail].filter(Boolean).join("，")}。`;
 }
 
-// 渠道状态那一格：满了 / 空约 / 上限没测到 / 被自动停用，不算 / 已停用，不算
-export function channelStatusText(item: HeadroomDetail["channels"][number]): { text: string; full: boolean } {
-  const S = COPY.drawer.channelStatus;
-  if (item.status === "full") return { text: S.full, full: true };
-  if (item.status === "room") return { text: item.room == null ? S.unmeasured : item.limit.kind === "atLeast" ? S.roomAtLeast(approx(item.room)) : S.room(approx(item.room)), full: false };
-  if (item.status === "auto") return { text: S.auto, full: false };
-  if (item.status === "off") return { text: S.off, full: false };
-  return { text: S.unmeasured, full: false };
-}
+// 抽屉渠道表的「每小时最多接约 X 次」：只在测到上限时写
+export const limitLine = (channel: ChannelView) => (channel.limit.kind === "measured" && channel.limit.value != null ? COPY.drawer.channelLimit(approx(channel.limit.value)) : null);
 
 // 找货帮手一行的「价格」「和现在用的比」
 export const priceText = (price: Price | null, rate: number) => (!price ? COPY.drawer.unreadablePrice : price.kind === "ratio" ? COPY.drawer.ratio(price.value) : COPY.drawer.perCall(money(price.value, rate, { dp: 4 })));
 export const compareText = (row: FinderRow) => (row.main ? COPY.drawer.mainNow : !row.compare ? EMPTY
   : row.compare.kind === "same" ? COPY.drawer.same : row.compare.kind === "cheaper" ? COPY.drawer.cheaper(formatPct(row.compare.pct, 0)) : COPY.drawer.pricier(formatPct(row.compare.pct, 0)));
-export const finderRoomText = (room: number | null | undefined) => (room == null ? EMPTY : COPY.drawer.finderRoom(approx(room)));
 
 // 去上游资源里那个上游的「绑定渠道」小窗口
 export const bindLink = (upstreamId: string) => `/stations?action=channels&stationId=${encodeURIComponent(upstreamId)}&bind=1`;
 // 用户运营页里那个用户的抽屉
 export const userLink = (userId: number) => `/users?user=${userId}`;
+// 用户运营页（顶上第二格「影响 N 个重点用户」点了去那里）
+export const USERS_LINK = "/users";

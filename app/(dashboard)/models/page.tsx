@@ -1,7 +1,7 @@
 "use client";
-// 模型供需：今晚高峰哪些模型的货不够、还差多少、补几把 Key、先救谁（design 模型供需 v4）。
-// 数据来自 /api/models 的 headroom（只在有人打开这一页时读，读完缓存 10 分钟，页面不自己轮询）；顶栏没有时间范围：近 7 天、近 24 小时是固定的口径。
-// 电脑上一屏放下、页面本身不滚：顶上三个数，下面左边「今晚高峰的余量」（9 列）、右边「按上游看」（3 列），两块各自在框里滚、表头固定。
+// 模型供需：近 24 小时哪些模型缺货失败、少收了多少、明天预计还会失败多少、该怎么办（design 模型供需 v5）。页面只写结论、数字、该做什么，不讲算法。
+// 数据来自 /api/models 的 headroom.lost 和 headroom.upstreams（只在有人打开这一页时读，读完缓存 10 分钟，页面不自己轮询）；顶栏没有时间范围：近 24 小时是固定的口径。
+// 电脑上一屏放下、页面本身不滚：顶上三个数，下面左边「近 24 小时缺货的模型」（9 列）、右边「按上游看」（3 列），两块各自在框里滚、表头固定。
 // 打开的模型写进地址栏（?model=），刷新、分享链接、后退键都回到同一屏；模型名里有「/」也照写，不放进路径。
 import "../../styles/pages/models.css";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -13,52 +13,17 @@ import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE, formatZonedTime } from
 import { describeError } from "../../../lib/error-copy";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
-import { Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { useShellPage } from "../../components/shell-context";
 import { useUrlParams } from "../../components/use-url-state";
 import { COPY } from "./copy";
 import { ModelDrawer } from "./model-drawer";
-import { kpisOf } from "./models-format";
+import { USERS_LINK, kpisOf } from "./models-format";
 import type { LoadedPage, ModelsPage } from "./models-format";
 import { ModelsTable } from "./models-table";
 import { UpstreamCards, upstreamDomId } from "./upstream-cards";
 
 const SETUP = workflowAction("setup_own_station");
-
-// 拿不到数据的两种情况和没开整站消费日志，页顶一条提示条（v4 §6）
-function StateBanners({ page }: { page: LoadedPage }) {
-  const { state, noErrorLogReason, errorLog, consumeLog } = page.headroom, B = COPY.banner;
-  const days = errorLog.coveredDays == null ? "" : errorLog.coveredDays < 1 ? B.daysUnder1 : B.days(Math.floor(errorLog.coveredDays));
-  return (
-    <>
-      {state === "noErrorLog" && noErrorLogReason !== "noRecords" && (
-        <div className="jy-banner" role="status">
-          <Sym kind="warn" />
-          <div className="jy-banner__body"><span><b>{B.switchOffLead}</b> {B.switchOff}</span></div>
-        </div>
-      )}
-      {state === "noErrorLog" && noErrorLogReason === "noRecords" && (
-        <div className="jy-banner jy-banner--info" role="status">
-          <Sym kind="info" />
-          <div className="jy-banner__body"><span>{B.noRecordsLead} {B.noRecords}</span></div>
-        </div>
-      )}
-      {state === "accumulating" && (
-        <div className="jy-banner jy-banner--info" role="status">
-          <span className="jy-hspin" aria-hidden="true" />
-          <div className="jy-banner__body"><span><b>{B.accumulatingLead(days, errorLog.needDays)}</b> {B.accumulating(errorLog.daysLeft ?? errorLog.needDays)}</span></div>
-        </div>
-      )}
-      {!consumeLog && (
-        <div className="jy-banner jy-banner--info" role="status">
-          <Sym kind="info" />
-          <div className="jy-banner__body"><span>{B.noConsumeLead}，<Link className="jy-link" href="/settings">{B.noConsumeLink}</Link></span></div>
-        </div>
-      )}
-    </>
-  );
-}
 
 export default function ModelsPageRoute() {
   const [params, setParams] = useUrlParams();
@@ -128,40 +93,41 @@ export default function ModelsPageRoute() {
     );
   }
 
-  // 高峰余量这一次没算出来（数据量太大、没有数据库或读库出错）：在放高峰余量的地方写一句，不画下面这些
+  // 这一次没算出来（数据量太大、没有数据库或读库出错）：只写一句，不画下面这些
   if (!page.headroom) {
     return (
       <div className="jy-page">
         {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
         <Panel label={NAV_LABELS.models}>
-          <p className="jy-models-empty jy-muted" role="status">{COPY.headroomNull}</p>
+          <p className="jy-models-empty jy-muted" role="status">{COPY.none.notComputed}</p>
         </Panel>
       </div>
     );
   }
   const loaded = page as LoadedPage;
-  const kpis = kpisOf(loaded, loaded.headroom);
+  const kpis = kpisOf(loaded);
   return (
     <div className="jy-page jy-models-page">
       {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
-      <StateBanners page={loaded} />
       <section className="jy-models-kpis-wrap" aria-label={COPY.kpiLabel}>
         <dl className="jy-kpis jy-models-kpis">
           {kpis.map((kpi) => (
             <div key={kpi.key}>
               <dt>{kpi.title}</dt>
               <dd className="jy-kpi-figure">{kpi.value}</dd>
-              <dd className="jy-caption">
-                {kpi.lead && (kpi.lead.kind === "model"
-                  ? <>{COPY.kpi.worstPrefix}<button type="button" className="jy-link jy-models-linkbtn" onClick={() => open(kpi.lead!.id)}>{kpi.lead.name}</button>{kpi.more ? ` ${kpi.more}` : ""} </>
-                  : <><button type="button" className="jy-link jy-models-linkbtn" onClick={() => toUpstream(kpi.lead!.id)}>{kpi.lead.name}</button>{kpi.more ? ` ${kpi.more}` : ""}</>)}
-                {kpi.sub}{kpi.subAfter}
-                {kpi.extra && <>。碰到 <b>{kpi.extra}</b></>}
-              </dd>
+              {(kpi.sub || kpi.before || kpi.lead || kpi.after || kpi.users != null) && (
+                <dd className="jy-caption">
+                  {kpi.before}
+                  {kpi.lead && <button type="button" className="jy-link jy-models-linkbtn" onClick={() => (kpi.lead!.kind === "model" ? open(kpi.lead!.id) : toUpstream(kpi.lead!.id))}>{kpi.lead.name}</button>}
+                  {kpi.after}
+                  {kpi.sub}
+                  {kpi.users != null && <>{kpi.sub ? " · " : ""}<Link className="jy-link" href={USERS_LINK}>{COPY.kpi.last24Users(kpi.users)}</Link></>}
+                </dd>
+              )}
             </div>
           ))}
         </dl>
-        <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
+        <p className="jy-caption jy-models-note">{COPY.asOf(formatZonedTime(page.asOf, page.tz))}</p>
       </section>
       <div className="jy-models-grid">
         <ModelsTable page={loaded} onOpen={open} />

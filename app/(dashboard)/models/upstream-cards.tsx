@@ -1,25 +1,18 @@
 "use client";
-// 「按上游看」（design 模型供需 v4 §4）：每家上游一张卡片——余额跑道、上限和高峰用了多少、满了还是还空着、被挡按原因分、供哪些模型、带 ↗ 的动作链接。
-// 带 ↗ 的链接都跳到用户的站或上游网站，控制台不替用户改任何东西。电脑上这块在框里自己滚（样式在 models.css）。
-import { Sym } from "../../components/icons";
+// 「按上游看」（design 模型供需 v5 §4）：每家上游一张卡片——余额还能撑多久、近 24 小时限流 / 故障 / 没钱各几次、影响哪些模型、带 ↗ 的动作链接；
+// 每小时最多接多少只在测到时多写一行。带 ↗ 的链接都跳到用户的站或上游网站，控制台不替用户改任何东西。电脑上这块在框里自己滚（样式在 models.css）。
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { COPY } from "./copy";
-import { REASON_COLOR } from "./charts";
-import { HeadroomBar } from "./headroom-bar";
-import { actionHref, approx, logCtxOf, upstreamLimitText, upstreamRunway } from "./models-format";
-import type { LoadedPage, UpstreamHeadroom } from "./models-format";
-
-const SHOWN_REASONS = ["rate_limit", "upstream", "auth_quota"] as const;
+import { actionHref, approx, lostTotal, upstreamRunway } from "./models-format";
+import type { LoadedPage, UpstreamView } from "./models-format";
 
 export function upstreamDomId(id: string | null) { return `jy-up-${id ?? "unbound"}`; }
 
-function Card({ item, page, onOpenModel }: { item: UpstreamHeadroom; page: LoadedPage; onOpenModel: (name: string) => void }) {
-  const U = COPY.upstream, { headroom, critDays } = page, ctx = logCtxOf(headroom);
+function Card({ item, page, onOpenModel }: { item: UpstreamView; page: LoadedPage; onOpenModel: (name: string) => void }) {
+  const U = COPY.upstream, { headroom, critDays } = page;
   const runway = upstreamRunway(item.hoursLeft, critDays);
-  const room = item.room;
-  const roomText = item.full ? null : room == null ? null : item.limit.kind === "atLeast" ? U.roomAtLeast(approx(room)) : U.room(approx(room));
-  const showUsage = item.limit.kind === "measured" || item.limit.kind === "atLeast";
+  const lost = item.lost24;
   const links = headroom.links;
   return (
     <li id={upstreamDomId(item.upstreamId)} className="jy-hcard" tabIndex={-1}>
@@ -29,26 +22,10 @@ function Card({ item, page, onOpenModel }: { item: UpstreamHeadroom; page: Loade
           {runway && (<><RunwayTrack mini days={runway.days} level={runway.level} critDays={critDays} /><span>{runway.text}</span></>)}
         </span>
       </div>
-      <div className="r2">
-        {showUsage && item.limit.value != null
-          ? <>{upstreamLimitText(item, ctx)} · {U.used(item.peakUsed == null ? COPY.dash : approx(item.peakUsed))}</>
-          : <span className="jy-muted">{upstreamLimitText(item, ctx)}</span>}
-      </div>
-      {showUsage && (
-        <div className="r3">
-          <HeadroomBar need={item.peakUsed} supply={item.limit} label={item.full ? U.full : roomText ?? ""} />
-          {item.full
-            ? <span className="jy-hfull"><Sym kind="crit" />{U.full}</span>
-            : roomText && <span className="jy-caption">{roomText}</span>}
-        </div>
+      {lost !== undefined && lost !== null && (
+        <div className="r2">{lostTotal(lost) > 0 ? U.last24(lost.rate_limit, lost.upstream, lost.auth_quota) : <span className="jy-muted">{U.last24None}</span>}</div>
       )}
-      {item.blocked24 && (
-        <div className="r4 jy-caption">
-          {SHOWN_REASONS.map((reason) => (
-            <span key={reason} className="jy-hreason"><i style={{ background: REASON_COLOR[reason] }} />{U.reasonCount(U.reasons[reason], item.blocked24![reason])}</span>
-          ))}
-        </div>
-      )}
+      {item.limit.kind === "measured" && item.limit.value != null && <div className="r3 jy-caption">{U.limit(approx(item.limit.value))}</div>}
       {item.models.count > 0 && (
         <div className="r5 jy-caption">
           {U.supplies(item.models.count)}
@@ -78,7 +55,6 @@ export function UpstreamCards({ page, onOpenModel }: { page: LoadedPage; onOpenM
     <Panel
       className="jy-models-upstreams"
       title={COPY.upstreamsTitle}
-      caption={COPY.unit}
       body={false}
       foot={COPY.upstream.foot}
     >
