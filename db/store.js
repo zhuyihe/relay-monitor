@@ -224,6 +224,13 @@ export class Store {
       if (meta.settings?.expectedCost === false) this.data.settings.expectedCost = true;
       this.data.settings.expectedCostMigratedV1b = true;
     }
+    // 一次性迁移（用户 11-01 定：重点用户快用完的提醒线默认从 3 天改成半天）：规则整份存库，#195 上线以后保存过规则的站，库里留着旧默认值 3 天 / 天。
+    // 没有迁移标记、而且值正好是旧默认（3 天、单位天）的，当成「没人动过」改成 12 小时，写上标记；以后站长自己改的带着标记，这里不会再碰
+    if (meta.notifications?.rules?.userEtaHalfDayV1 !== true) {
+      const saved = meta.notifications?.rules;
+      if (saved && saved.userEtaDays === 3 && (saved.userEtaUnit ?? "days") === "days") { this.data.notifications.rules.userEtaDays = 0.5; this.data.notifications.rules.userEtaUnit = "hours"; }
+      this.data.notifications.rules.userEtaHalfDayV1 = true;
+    }
     this.data.settings.historyRetentionDays =
       normalizeHistoryRetentionDays(this.data.settings.historyRetentionDays);
     // v2.2：旧规则没有渠道绑定字段；归一化成 5 个事件键齐全的独立对象

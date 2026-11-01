@@ -81,8 +81,8 @@ const ruleFormOf = (r: any): RuleForm => ({
   etaUnit: r?.etaUnit === "hours" ? "hours" : "days",
   etaVal: etaRuleDisplay(r),
   // 重点用户快用完的提醒天数：自己一份，和上面的各设各的
-  userEtaUnit: r?.userEtaUnit === "hours" ? "hours" : "days",
-  userEtaVal: etaRuleDisplay({ etaDays: r?.userEtaDays ?? 3, etaUnit: r?.userEtaUnit }),
+  userEtaUnit: r?.userEtaUnit === "days" ? "days" : "hours", // 默认半天，写「12 小时」
+  userEtaVal: etaRuleDisplay({ etaDays: r?.userEtaDays ?? 0.5, etaUnit: r?.userEtaUnit ?? "hours" }),
   renotify: Number(r?.renotifyHours ?? 24),
   errThreshold: Number(r?.errorThreshold ?? 1),
   errRetry: Number(r?.errorRetrySec ?? 30),
@@ -171,7 +171,7 @@ export default function NotificationsPage() {
       // 只有用户改过提醒天数才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把它改掉
       const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rulesRef.current, etaUnit: f.etaUnit });
       const val = Number(f.etaVal);
-      const userEtaEdited = f.userEtaVal != null && f.userEtaVal !== etaRuleDisplay({ etaDays: rulesRef.current.userEtaDays ?? 3, etaUnit: f.userEtaUnit });
+      const userEtaEdited = f.userEtaVal != null && f.userEtaVal !== etaRuleDisplay({ etaDays: rulesRef.current.userEtaDays ?? 0.5, etaUnit: f.userEtaUnit });
       const userVal = Number(f.userEtaVal);
       const r = await api("/api/notifications/rules", {
         method: "PUT",
@@ -458,7 +458,7 @@ export default function NotificationsPage() {
   // 重点用户快用完的提醒天数换单位：同上
   const onUserEtaUnitChange = (u: "days" | "hours") => {
     const f = ruleForm.value;
-    const saved = { etaDays: rules.userEtaDays ?? 3, etaUnit: rules.userEtaUnit };
+    const saved = { etaDays: rules.userEtaDays ?? 0.5, etaUnit: rules.userEtaUnit ?? "hours" };
     let userEtaVal = f.userEtaVal;
     if (f.userEtaVal === etaRuleDisplay(saved)) userEtaVal = etaRuleDisplay({ ...saved, etaUnit: u });
     else {

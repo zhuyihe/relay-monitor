@@ -452,6 +452,22 @@ test("老库里没有标记、存着 expectedCost:false：升级后一次性改�
   assert.deepEqual([fresh.settings.expectedCost, fresh.settings.expectedCostMigratedV1b], [true, true]);
 });
 
+test("重点用户快用完的提醒线默认改成半天：库里存着旧默认（3 天、单位天）又没有标记的，一次性改成 12 小时并写上标记；站长自己设的、带标记的都不动；新装直接是半天", async () => {
+  const rulesOf = async (rules) => (await new Store(fakePool([], [], {}, rules)).load()).rules;
+  const old = await rulesOf({ userEtaDays: 3, userEtaUnit: "days" });
+  assert.deepEqual([old.userEtaDays, old.userEtaUnit, old.userEtaHalfDayV1], [0.5, "hours", true], "旧默认：改成 12 小时");
+  const oldNoUnit = await rulesOf({ userEtaDays: 3 });
+  assert.deepEqual([oldNoUnit.userEtaDays, oldNoUnit.userEtaUnit], [0.5, "hours"]);
+  const mine = await rulesOf({ userEtaDays: 5, userEtaUnit: "days" });
+  assert.deepEqual([mine.userEtaDays, mine.userEtaUnit, mine.userEtaHalfDayV1], [5, "days", true], "站长设的 5 天不动，只写上标记");
+  const hours3 = await rulesOf({ userEtaDays: 3 / 24, userEtaUnit: "hours" });
+  assert.equal(hours3.userEtaDays, 3 / 24, "3 小时是站长自己设的，不动");
+  const chosen = await rulesOf({ userEtaDays: 3, userEtaUnit: "days", userEtaHalfDayV1: true });
+  assert.deepEqual([chosen.userEtaDays, chosen.userEtaUnit], [3, "days"], "带标记的：站长改回 3 天，重启不再被改");
+  const fresh = await rulesOf({});
+  assert.deepEqual([fresh.userEtaDays, fresh.userEtaUnit, fresh.userEtaHalfDayV1], [0.5, "hours", true], "新装：默认半天");
+});
+
 test("配置写库失败不会发布账号、设置、通知或站点变更", async () => {
   const changes = [
     (store) => store.updateSettings({ refreshIntervalSec: 90 }),
@@ -716,7 +732,7 @@ test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认�
   store.data.notifications.channels = [{ id: "ch-1", name: "A", type: "webhook", enabled: true }, { id: "ch-2", name: "B", type: "webhook", enabled: true }];
   const rules = await store.updateRules({ onUserExhaust: false, onUserEta: true, channelsFor: { userExhaust: ["ch-1", "ch-2", "bogus", "ch-1"], userEta: ["ch-2"] } });
   assert.deepEqual([rules.onUserExhaust, rules.onUserEta, rules.channelsFor.userExhaust, rules.channelsFor.userEta], [false, true, ["ch-1", "ch-2"], ["ch-2"]]);
-  assert.deepEqual([store.rules.userEtaDays, store.rules.userEtaUnit, store.rules.etaDays], [3, "days", 3], "重点用户的提醒天数默认 3 天，和上游的各存各的");
+  assert.deepEqual([store.rules.userEtaDays, store.rules.userEtaUnit, store.rules.etaDays], [0.5, "hours", 3], "重点用户的提醒线默认半天（12 小时），和上游的（3 天）各存各的");
   await store.updateRules({ userEtaDays: 12, userEtaUnit: "hours" });
   assert.deepEqual([store.rules.userEtaDays, store.rules.userEtaUnit, store.rules.etaDays, store.rules.etaUnit], [12, "hours", 3, "days"], "改一个不牵动另一个");
   await store.updateRules({ userEtaDays: -1 });
