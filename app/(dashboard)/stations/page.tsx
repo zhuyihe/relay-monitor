@@ -11,6 +11,7 @@ import { App, Button, Dropdown, Grid, Input, Modal, Select, Tooltip } from "antd
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { keepOrder } from "../../../lib/keep-order.js";
+import { OWN_LOAD } from "../../../lib/own-load.js";
 import { orderUpstreams } from "../../../lib/upstream-order.js";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
 import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
@@ -626,7 +627,9 @@ export default function StationsPage() {
   const staleAt = (v: StationView) => {
     if (testedIds[v.s.id]) return null;
     const at = readAt(v);
-    return Number.isFinite(at) && staleRef - at > (2 * refreshSec + 30) * 1000 ? formatAsOf(v.checkedAt, tz) : null;
+    // 自营站点后台只每 5 分钟读一次（lib/own-load.js），阈值按它的间隔算，不然它永远「数据截至」
+    const everySec = v.s.isOwn ? Math.max(refreshSec, OWN_LOAD.STATION_POLL_MS / 1000) : refreshSec;
+    return Number.isFinite(at) && staleRef - at > (2 * everySec + 30) * 1000 ? formatAsOf(v.checkedAt, tz) : null;
   };
   const retryAll = () => {
     reload().catch(() => {});

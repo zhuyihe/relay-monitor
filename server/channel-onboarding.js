@@ -1,3 +1,4 @@
+import { seedOwnChannelList } from "./own-helpers.js";
 import { createHash, randomUUID } from "node:crypto";
 import { queryNewApiReconciliationMetadata, queryReconciliationMetadata, queryAccountIdentity, queryKeyReconciliationStat, queryOwnChannels, queryStation } from "../lib/providers.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
@@ -781,7 +782,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!station) { syncError = OWN_STATION_UNSET; syncErrorCode = "OWN_STATION_UNSET"; return list(); }
       const resourceVersion = stationBusinessVersion(station), connection = structuredClone(station);
       try {
-        const ownSource = ownSourceIdentity(connection, await queryIdentity(connection));
+        const ownSource = ownSourceIdentity(connection, await queryIdentity(connection, { shareOwnSelf: true }));
         connection.userId ||= ownSource.accountId;
         const channels = await queryChannels(connection);
         const nextChannels = channels.map((channel) => ({
@@ -806,7 +807,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             rt._reconciliationResultCache?.clear();
             rt.reconciliation?.invalidateSources?.();
           }
-          delete rt._ownChannelsCache;
+          // 刚读到的这份就是最新的渠道列表：写进共用的缓存（利润、模型供需、对账读渠道列表都用它），不再清掉让它们各读一遍
+          seedOwnChannelList(rt, station, channels);
         }));
       } catch (error) { syncError = failure(error, [connection]); syncErrorCode = failureCode(error, [connection], "SYNC_FAILED"); }
       return list();

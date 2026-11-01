@@ -1,4 +1,5 @@
 // 对账深模块：把窗口、上游取数、本站收费、快照和告警收敛在一个 Interface 后。
+import { OWN_LOAD } from "../lib/own-load.js";
 import { createAutoVerifier } from "./upstream-auto-verify.js";
 import { createHash } from "node:crypto";
 import { isAccessTokenError } from "../lib/access-token-scopes.js";
@@ -58,7 +59,7 @@ import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconc
   reconciliationDisplayCurrency, fixedOffProfitStations, countsInSummary } from "../lib/reconciliation-view.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
-import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams } from "./own-helpers.js";
+import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, sharedOwnChannelList } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { createUserOps } from "./user-ops.js";
@@ -561,7 +562,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 减压 PR（总指挥 10-26 定）：没人看「今天」页面的起算点，由调用方注入——生产启动那一处（lib/runtime.js）传 Date.now()，
   // 刚启动、还没有页面来过就从这一刻起算 10 分钟，不然每次重启（watchtower 拉新镜像）都会把「没人看」清零；不传就是 null：
   // 从没有页面来过不算没人看（测试走这条，和以前一样）。重启后要是有人开着页面，页面每 30 秒来一次，马上刷新，不用存库。
-  viewerIdleSince = null } = {}) {
+  viewerIdleSince = null,
+  // 自营站点 /api/status 跨轮缓存多久（OWN_LOAD.STATUS_CACHE_MS，生产不传）；测试里要逐轮看 status 怎么读的传 0
+  ownStatusCacheMs = OWN_LOAD.STATUS_CACHE_MS } = {}) {
   const ownLog = createOwnLogIngest(rt, { store: ownLogStore || (rt._ownLogStore ||= new OwnLogStore(rt.pool)), log: (...args) => console.debug(...args) });
   const ownErrorLog = createOwnLogIngest(rt, { store: ownErrorStore || (rt._ownErrorStore ||= new OwnLogStore(rt.pool, ERROR_SPEC)), kind: ERROR_KIND, log: (...args) => console.debug(...args) });
   const upstreamPricing = (rt._upstreamPricing ||= createUpstreamPricing(rt));
@@ -1039,7 +1042,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const credential = credentialFingerprint(station);
     const cached = identityCache.get(station.id);
     if (!force && cached?.credential === credential && Date.now() - cached.at < maxAgeMs) return cached.value;
-    const value = await queryAccountIdentity(station);
+    // 自营站点的账号身份和它的后台轮询、渠道目录同步共用一次 /api/user/self（强制重读时真读）
+    const value = await queryAccountIdentity(station, { shareOwnSelf: !!station.isOwn && !force });
     identityCache.set(station.id, { at: Date.now(), credential, value });
     return value;
   }
@@ -1484,10 +1488,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 自营站点的 /api/status（quotaPerUnit）同一个 registry 里只读一次，各绑定共用；读失败不留。
   // 等着别的绑定发起的那一次、而那一次失败了的，自己再读一次（同时等着的几条共用这一次），不跟着一起失败
-  function ownStatusFor(registry, own) {
+  // /api/status（quota_per_unit、版本）几乎不变：轮询、页面读取缓存 OWN_LOAD.STATUS_CACHE_MS（跨轮）；结账（cache: false）永远真读一次，固定进账本的数不用旧值
+  const ownStatusCache = new Map();
+  function ownStatusFor(registry, own, { cache = true } = {}) {
     const key = `${own.id}:${credentialFingerprint(own)}`;
+    const cached = cache ? ownStatusCache.get(key) : null;
+    if (cached && Date.now() - cached.at < ownStatusCacheMs) return Promise.resolve(cached.value);
     const load = () => {
-      const pending = queryNewApiStatus(own);
+      const pending = queryNewApiStatus(own).then((value) => { ownStatusCache.set(key, { at: Date.now(), value }); return value; });
       registry.ownStatus.set(key, pending);
       pending.catch(() => { if (registry.ownStatus.get(key) === pending) registry.ownStatus.delete(key); });
       return pending;
@@ -1657,6 +1665,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const credential = credentialFingerprint(own), previous = ownActivity.get(id);
       // 换了凭据就不算安静，和 ownRevenue 键里的凭据指纹互为备份
       const known = previous?.credential === credential && previous.read ? previous : null;
+      // 没人看「今天」页面超过 OWN_VIEWER_IDLE_MS：这个探测也放慢到 OWN_VIEWER_IDLE_RECHECK_MS 才真的问一次，中间沿用上一次的结果（和各渠道 stat 的放慢是同一个规矩）
+      // 只在上一次探测说「安静」（没有新消费，各渠道本来就整个沿用、不发 stat）时才慢：这时这个探测是唯一的请求；有新消费时各渠道 stat 自己已经放慢了
+      if (known?.quietFrom != null && lastTodayViewAt.at != null && now - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS && now - known.checkedAt < OWN_VIEWER_IDLE_RECHECK_MS) {
+        registry.ownQuietFrom.set(id, { from: known.quietFrom, coveredFromMs: known.latest ? (known.latest.createdAtSec + 1) * 1000 : null });
+        return;
+      }
       const anchor = known?.latest ? known.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC : null;
       let sinceSec = !known ? Math.floor(now / 1000) - OWN_LOG_FIRST_LOOKBACK_SEC
         : anchor != null && anchor - known.sinceSec > OWN_LOG_ANCHOR_LAG_SEC ? anchor : known.sinceSec;
@@ -2111,6 +2125,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const readOnce = async () => {
       const cached = ownChannelsCache.get(station.id);
       if (!force && cached?.credential === credential && Date.now() - cached.at < 10 * 60000) return cached.value;
+      // 渠道目录同步（每 5 分钟）、利润、模型供需读到的共用列表还新鲜就直接用，不再自己发一次（只读不写：各自的强制重读、测试清自己的缓存不受影响）
+      const shared = force ? null : sharedOwnChannelList(rt, station);
+      if (shared) return shared;
       const flying = registry ? ownChannelsInflight.get(station.id) : null;
       if (flying?.credential === credential) return flying.promise;
       const request = Symbol();
@@ -2678,7 +2695,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const [catalogue, results] = await Promise.all([
             ownChannelsFor(own, { force: force && !settle, registry: ownerRegistry }).catch(() => null),
             // 多天的范围也按天拼、带「其中管理员自用」，和别处同一条路（审核 R1 低-3）
-            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own), registry: ownerRegistry, reuse: false, settle })
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own, { cache: !settle }), registry: ownerRegistry, reuse: false, settle })
               .catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -2993,7 +3010,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (channel.state === "missing") issues.push({ code: "SALES_CHANNEL_MISSING", scope: "channel", channelId: channel.channelId, detail: issueText("SALES_CHANNEL_MISSING", { channel: channel.name }), observedAt: Date.now() });
       }
       // 本站 /api/status 同一轮各绑定、各分段共用一次（ownStatusFor）；读取失败时每个分段照常按本站账单不可用处理。
-      const loadOwnStatus = () => ownStatusFor(ownerRegistry, own);
+      const loadOwnStatus = () => ownStatusFor(ownerRegistry, own, { cache: !settle });
       const reuseOwnRevenue = observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
       // 减压 PR：这一轮里哪些分段的渠道收入是沿用的（没人看、放慢）——有一段是，这整条绑定这一轮的结果就不进 resultCache
       // （downstreamResult.staleFromIdleSkip 在 foldSplitSegments/下面的对象展开里会丢，这里单独记一份）

@@ -21,6 +21,7 @@
 // 两条各有各的进度、暂存、桶（server/own-log-store.js 的 CONSUME_SPEC / ERROR_SPEC），请求额度和断路是同一个（lib/own-request-budget.js）：错误日志排在消费日志后面读，
 // 额度紧、断路时宁可落后也不多读；而且更省：每轮页数更少、窗口更小（窗口里 COUNT 要扫这段时间的全部日志，错误日志稀，不能用大窗口）、
 // 落后不到 minAdvanceMs（5 分钟）不读（没有新窗口、也没有没读完的窗口就不发请求）。
+import { OWN_LOAD } from "../lib/own-load.js";
 import { createHash } from "node:crypto";
 import { OWN_LOG_SLOT_MS, accumulateBuckets, bucketKeyOf } from "../lib/own-log-bucket.js";
 import { OWN_ERROR_SLOT_MS, accumulateErrorBuckets, errorBucketKeyOf, scaleErrorBuckets } from "../lib/own-error-bucket.js";
@@ -75,7 +76,9 @@ export const cachedRetrySettings = (rt, own) => rt._ownRetrySettings?.get(own.id
 // 一条流水线读哪种日志：type、桶怎么加、桶的键、要不要管理员名单、每轮页数和窗口的上限（不写就用 INGEST 里的）；
 // prepare：每轮读之前问一下额外的上下文（错误日志要站点的重试设置），返回 { 给 accumulate 的字段, key（进暂存的口径指纹，变了就丢掉没读完的暂存重读） }
 export const CONSUME_KIND = Object.freeze({
-  name: "consume", type: 2, tag: "own-log-ingest", slotMs: OWN_LOG_SLOT_MS, accumulate: accumulateBuckets, keyOf: bucketKeyOf, needsAdmins: true, limits: Object.freeze({}),
+  name: "consume", type: 2, tag: "own-log-ingest", slotMs: OWN_LOG_SLOT_MS, accumulate: accumulateBuckets, keyOf: bucketKeyOf, needsAdmins: true,
+  // 追平以后每 5 分钟才读一次（落后不到 5 分钟又没有读到一半的窗口，这一轮不发请求）：给用户站减负，桶只用于结账、应付成本和今天的汇总，不需要分钟级
+  limits: Object.freeze({ minAdvanceMs: OWN_LOAD.CONSUME_LOG_MS }),
 });
 export const ERROR_KIND = Object.freeze({
   name: "error", type: 5, tag: "own-error-ingest", slotMs: OWN_ERROR_SLOT_MS, accumulate: accumulateErrorBuckets, keyOf: errorBucketKeyOf, needsAdmins: false,

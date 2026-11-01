@@ -616,13 +616,15 @@ test("一直在充小额：余额每小时都在涨、预计天数一直在提�
 });
 
 // ===== 有人在看：每分钟一档 =====
-const minuteStep = (f) => async () => {
-  f.clock.now += MIN;
-  for (const user of f.site.users) if (user.burn > 0) user.balance = Math.max(0, user.balance - user.burn / 60);
+// viewing：页面一直开着（到点前 10 秒来取了一次数）
+const minuteStep = (f, minutes = 1, { viewing = false } = {}) => async () => {
+  f.clock.now += minutes * MIN - (viewing ? 10000 : 0);
+  if (viewing) { f.ops.markViewing(); f.clock.now += 10000; }
+  for (const user of f.site.users) if (user.burn > 0) user.balance = Math.max(0, user.balance - (user.burn / 60) * minutes);
   return f.ops.runOnce();
 };
 
-test("页面开着（页面来取数续 90 秒）：每分钟读一次用户列表和最近 3 小时的用量，不写快照；到 10 分钟照旧整轮；没人看就只有 10 分钟一档", async (t) => {
+test("页面开着（页面来取数续 90 秒）：每 5 分钟读一次用户列表和最近 3 小时的用量，不写快照；到 10 分钟照旧整轮；没人看就只有 10 分钟一档", async (t) => {
   const f = makeSite(t, crowd());
   for (let run = 0; run < 32; run += 1) await f.step(); // 回补补完，整轮刚跑过
   const minute = minuteStep(f);
@@ -630,26 +632,21 @@ test("页面开着（页面来取数续 90 秒）：每分钟读一次用户列�
   let before = f.site.requests.length;
   assert.deepEqual(await minute(), { skipped: "interval" });
   assert.equal(f.site.requests.length, before);
-  // 有人看：每分钟 2 个请求（用户列表 1 + data/users 最近几个小时 1），不写余额快照
+  // 有人看，但离上一次读还不到 5 分钟：不读（以前每分钟读一次，给用户站减负）
+  for (let n = 0; n < 3; n += 1) { f.ops.markViewing(); assert.deepEqual(await minute(), { skipped: "interval" }, `第 ${n + 2} 分钟`); }
+  assert.equal(f.site.requests.length, before, "页面开着，5 分钟之内也不读");
+  // 满 5 分钟：2 个请求（用户列表 1 + data/users 最近几个小时 1），不写余额快照
   const points = f.store.calls.addBalancePoints;
   f.ops.markViewing();
-  before = f.site.requests.length;
   const live = await minute();
   assert.equal(live.live, true);
   assert.deepEqual(f.site.requests.slice(before), ["/api/user/", "/api/data/users?recent"]);
   assert.equal(f.store.calls.addBalancePoints, points, "实时一档不写快照");
-  // 没有页面再来取：下一分钟就不读了
+  // 没有页面再来取：再过 1 分钟也不读
   assert.deepEqual(await minute(), { skipped: "interval" });
-  // 页面来取一次续 90 秒：89 秒后还算在看，91 秒后不算
+  // 到 10 分钟整轮：照旧写快照、重算（有没有人看都做）
   f.ops.markViewing();
-  f.clock.now += 89000;
-  assert.equal((await f.ops.runOnce()).live, true);
-  f.ops.markViewing();
-  f.clock.now += 91000;
-  assert.deepEqual(await f.ops.runOnce(), { skipped: "interval" });
-  // 页面每分钟来一次：一直是实时一档；第 10 分钟整轮到点，照旧写快照、重算
-  f.ops.markViewing();
-  while (f.clock.now < f.ops.getView().at + 9 * MIN) { f.ops.markViewing(); assert.equal((await minute()).live, true, String(f.clock.now - f.ops.getView().at)); }
+  while (f.clock.now < f.ops.getView().at + 9 * MIN) { f.ops.markViewing(); assert.deepEqual(await minute(), { skipped: "interval" }); }
   f.ops.markViewing();
   const full = await minute();
   assert.equal(full.live, undefined, "第 10 分钟是整轮");
@@ -657,35 +654,47 @@ test("页面开着（页面来取数续 90 秒）：每分钟读一次用户列�
   assert.equal(f.ops.getView().at, f.clock.now, "整轮重算了");
 });
 
-test("实时一档：页面上的余额、数据截至的时刻每分钟更新；还能用几天、重点用户、提醒不动；额度紧时不读", async (t) => {
+test("「有人在看」按页面来取数续 90 秒：离上一次读满 5 分钟时，89 秒前来取过算在看，91 秒前来取的不算", async (t) => {
+  const watched = makeSite(t, crowd());
+  for (let run = 0; run < 32; run += 1) await watched.step();
+  watched.clock.now += 211000; watched.ops.markViewing(); watched.clock.now += 89000;
+  assert.equal((await watched.ops.runOnce()).live, true);
+  const gone = makeSite(t, crowd());
+  for (let run = 0; run < 32; run += 1) await gone.step();
+  gone.clock.now += 209000; gone.ops.markViewing(); gone.clock.now += 91000;
+  assert.deepEqual(await gone.ops.runOnce(), { skipped: "interval" });
+});
+
+test("实时一档：页面上的余额、数据截至的时刻每 5 分钟更新；还能用几天、重点用户、提醒不动；额度紧时不读", async (t) => {
   const f = makeSite(t, crowd());
   for (let run = 0; run < 32; run += 1) await f.step();
-  const minute = minuteStep(f);
+  const minute = minuteStep(f, 5, { viewing: true });
   const first = await pageOf(f);
   const fullAt = f.ops.getView().at;
   assert.equal(first.syncedMs, fullAt);
-  f.ops.markViewing();
   await minute();
   const page = await pageOf(f);
   assert.ok(page !== first, "数更新了，整页重算");
   assert.equal(page.syncedMs, f.clock.now);
   const big1 = f.site.users.find((user) => user.username === "big1");
-  assert.ok(Math.abs(page.users.find((row) => row.username === "big1").balanceUsd - big1.balance) < 1e-4, "余额是这一分钟读到的");
+  assert.ok(Math.abs(page.users.find((row) => row.username === "big1").balanceUsd - big1.balance) < 1e-4, "余额是这一次读到的");
   assert.equal(f.ops.getView().at, fullAt, "整轮的结果（可用天数、重点用户）没重算");
   assert.equal(await pageOf(f), page, "同一时刻再取：用缓存");
-  for (let n = 0; n < 220; n += 1) noteOwnRequest("https://own.test/api/x", { status: 200, now: f.clock.now });
-  f.ops.markViewing();
-  const before = f.site.requests.length;
-  assert.deepEqual(await minute(), { skipped: "budget" });
-  assert.equal(f.site.requests.length, before, "额度紧：一个请求都不发");
+  // 额度紧：另起一个站点（离整轮还有 5 分钟，实时一档到点）：一个请求都不发
+  const tight = makeSite(t, crowd());
+  for (let run = 0; run < 32; run += 1) await tight.step();
+  const tightMinute = minuteStep(tight, 5, { viewing: true });
+  for (let n = 0; n < 220; n += 1) noteOwnRequest("https://own.test/api/x", { status: 200, now: tight.clock.now + 5 * MIN });
+  const before = tight.site.requests.length;
+  assert.deepEqual(await tightMinute(), { skipped: "budget" });
+  assert.equal(tight.site.requests.length, before, "额度紧：一个请求都不发");
 });
 
-test("实时一档：回补没补完时接着补，页面上的补全进度跟着走；对自营站点每分钟的请求：用户列表 1 + data/users 1，回补最多再加 3", async (t) => {
+test("实时一档：回补没补完时接着补，页面上的补全进度跟着走；对自营站点每次（5 分钟一次）的请求：用户列表 1 + data/users 1，回补最多再加 3", async (t) => {
   const f = makeSite(t, crowd());
   await f.step();
   assert.equal(f.ops.getView().backfill.days, 3);
-  const minute = minuteStep(f);
-  f.ops.markViewing();
+  const minute = minuteStep(f, 5, { viewing: true });
   const before = f.site.requests.length;
   const out = await minute();
   assert.equal(out.backfill.steps, 3);

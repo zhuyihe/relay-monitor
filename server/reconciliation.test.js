@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
 import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
@@ -18,6 +18,9 @@ import { createFakeSub2Api, secondsInDay } from "./test-support/fake-sub2api.js"
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
 import { maskKey } from "../lib/key-fingerprint.js";
+import { resetOwnSelfShare } from "../lib/providers.js";
+
+beforeEach(() => resetOwnSelfShare()); // 自营站点的 /api/user/self 在 4 分钟内共用（lib/providers.js），测试之间不能互相带
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
   const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
@@ -1363,7 +1366,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     { id: "upstream", type: "newapi", baseUrl: `http://127.0.0.1:${upstreamServer.address().port}`, accessToken: "pat" },
     { id: "own", type: "newapi", isOwn: true, baseUrl: `http://127.0.0.1:${ownServer.address().port}`, accessToken: "admin" },
   ];
-  const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id), channels: [] } });
+  const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id), channels: [] } }, { ownStatusCacheMs: 0 });
   trustedLegacyRule(rule, stations, 7, 1);
   const window = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1120000 };
 
@@ -4678,7 +4681,7 @@ function ownLogList(logs, calls = [], { clickhouse = false, testLogs = [] } = {}
 
 test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没有新的消费就沿用渠道收费；渠道状态、「今天」快照没变不写，满 10 分钟照写", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1, 4], rr_two: [2], rr_three: [3] } });
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1, 4], rr_two: [2], rr_three: [3] }, moduleOptions: { ownStatusCacheMs: 0 } }); // 逐轮看 /api/status 怎么读的：不用跨轮缓存
   const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }], siteCalls = [];
   const newLog = (created_at = Math.floor(now / 1000) - 1) => logs.push({ id: logs.length + 1, created_at });
   const siteLogs = ownLogList(logs, siteCalls);
@@ -4732,8 +4735,8 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
   now += 10 * 60000;
   assert.deepEqual(await round(), { status: 1, channel: 0, states: 4, today: 3, site: 1 });
 
-  // 全站那一次读失败：这一轮照旧逐个读
-  now += 60000;
+  // 全站那一次读失败：这一轮照旧逐个读（没人看时「安静」的探测 5 分钟才问一次，隔 6 分钟它才真问、才会失败）
+  now += 6 * 60000;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
     if (url.host === "own.test" && url.pathname === "/api/log/" && !ownSourceRead(url)) { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
@@ -4905,7 +4908,7 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
 
 test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入安静期、换凭据、同一轮 /api/status 失败、跨零点、分段终点往前改，都照旧现读", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => now });
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { ownStatusCacheMs: 0 } }); // 逐轮看 /api/status 怎么读的：不用跨轮缓存
   let ownQuotaPerUnit = 100, failChannelStat = false, failStatusOnce = false;
   const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 600 }];
   const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) });
@@ -5150,7 +5153,7 @@ test("减压 PR（审核 #137 中-1 复现）：没人看时渠道来了新消�
 // 审核 #137 中-3：没人看期间某一轮真问了渠道，但读到的窗口没包住最新那条日志（站点钟快、日志落在终点那一秒）；之后站点安静，不能一直沿用旧数
 test("减压 PR（审核 #137 中-3）：站点的钟快、真问那一轮没包住最新日志，之后站点安静——轮询这一侧要补问，不能一直沿用旧数", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => now });
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { ownStatusCacheMs: 0 } });
   const sec = () => Math.floor(now / 1000);
   const logs = [{ id: 1, channel: 2, created_at: sec() - 60, quota: 100 }];
   const add = (created_at) => logs.push({ id: logs.length + 1, channel: 2, created_at, quota: 100 });
@@ -5178,9 +5181,11 @@ test("减压 PR（审核 #137 中-3）：站点的钟快、真问那一轮没包
   let guard = 0; while ((await round()) === 0 && guard++ < 10);
   for (let i = 0; i < 4; i += 1) assert.equal(await round(), 0, "放慢：沿用");
   add(sec() + 60 + 30); // 这一轮真问时它还在窗口终点之后（站点钟快）
-  assert.ok((await round()) > 0, "真问了，但没包住那笔日志，读到旧数");
+  // 没人看时「安静」的整站探测 5 分钟才问一次：最晚 5 分钟（6 轮）内这条渠道会真问一次
+  let firstAsk = 0; for (let i = 0; i < 6 && !firstAsk; i += 1) firstAsk = await round();
+  assert.ok(firstAsk > 0, "真问了，但没包住那笔日志，读到旧数");
   let asked = 0;
-  for (let i = 0; i < 3; i += 1) asked += await round(); // 之后站点没有新日志：不能一直沿用旧数
+  for (let i = 0; i < 12; i += 1) asked += await round(); // 之后站点没有新日志：不能一直沿用旧数（5 分钟一次的探测和放慢的 stat 各有 5 分钟的节拍，多等几轮）
   assert.ok(asked > 0, "站点转安静后，没包住最新日志的渠道要补问");
   assert.equal(await liveTwo(), 2, "页面看到的是新数");
 });
@@ -9915,3 +9920,39 @@ function upstreamReadFixture(t, type = "newapi") {
   const module = rt.reconciliation = createReconciliationModule(rt);
   return { rt, module, store, state, station: store.get("resource") };
 }
+
+test("给用户站减负：自营 /api/status 30 分钟内跨轮只读一次（结账永远真读）；没人看、上一次探测说安静时，「有没有新消费」的探测 5 分钟才问一次，有新消费就照旧每轮问", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  // 没人看今天页面已经 20 分钟（生产启动那一处传的起算点）
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1, 4], rr_two: [2], rr_three: [3] }, moduleOptions: { viewerIdleSince: now - 20 * 60000 } });
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }], siteCalls = [];
+  const siteLogs = ownLogList(logs, siteCalls);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    return prev(input, init);
+  });
+  const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path && !request.sourceRead).length;
+  const round = async () => {
+    const before = { status: ownCalls("/api/status"), site: siteCalls.length };
+    await f.module.refreshDue(now);
+    return { status: ownCalls("/api/status") - before.status, site: siteCalls.length - before.site };
+  };
+  assert.deepEqual(await round(), { status: 1, site: 2 }, "第一轮：读 status；探测从 2 小时前起读一次，马上按最新一条重定起点再读一次");
+  now += 60000;
+  assert.deepEqual(await round(), { status: 0, site: 1 }, "第二轮：status 用 30 分钟内读到的；探测没有可沿用的「安静」，照问，问出来是安静");
+  // 之后没人看、上一次是安静的：探测 5 分钟才问一次（以前每轮一次）
+  const probes = [];
+  for (let minute = 0; minute < 10; minute += 1) { now += 60000; probes.push((await round()).site); }
+  assert.deepEqual(probes, [0, 0, 0, 0, 1, 0, 0, 0, 0, 1], "没人看且安静：5 分钟一次");
+  assert.equal(ownCalls("/api/status"), 1, "12 分钟里 status 只读了第一轮那一次");
+  // 过了 30 分钟，status 才再读
+  now += 20 * 60000;
+  assert.equal((await round()).status, 1, "30 分钟后重读 status");
+  // 有新消费了：最晚一个探测间隔（5 分钟）内探测发现、各渠道重读收费（以前最晚 1 分钟）
+  logs.push({ id: 2, created_at: Math.floor(now / 1000) });
+  const statsBefore = ownCalls("/api/log/stat");
+  for (let minute = 0; minute < 6; minute += 1) { now += 60000; await round(); }
+  assert.ok(ownCalls("/api/log/stat") > statsBefore, "有新消费，最晚 5 分钟内各渠道重读");
+});

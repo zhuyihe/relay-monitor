@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { ERROR_KIND, INGEST, RETRY_SETTINGS_FAIL_TTL_MS, RETRY_SETTINGS_TTL_MS, cachedRetrySettings, createOwnLogIngest, readRetrySettings, samplePlan } from "./own-log-ingest.js";
@@ -7,8 +7,11 @@ import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { ownUsersKey } from "./own-helpers.js";
 import { noteOwnRequest, resetOwnRequestBudget, INGEST_FLOOR_PER_MIN, INGEST_RESERVE, OWN_RATE_LIMIT } from "../lib/own-request-budget.js";
 import { OWN_LOG_SLOT_MS } from "../lib/own-log-bucket.js";
+import { resetOwnOptionShare } from "../lib/providers.js";
+import { OWN_LOAD } from "../lib/own-load.js";
 
 // 业务时区上海：now 是 10-09 11:00，昨天 0 点是 10-07 16:00Z
+beforeEach(() => resetOwnOptionShare());
 const NOW = Date.parse("2026-10-09T03:00:00Z");
 const YESTERDAY_START = Date.parse("2026-10-07T16:00:00Z");
 const USERS = [{ id: 1, username: "root", role: 100 }, { id: 2, username: "alice", role: 1 }];
@@ -621,7 +624,7 @@ test("站点的重试设置：读 GET /api/option/ 的 RetryTimes 和 AutomaticR
   let mode = "ok", calls = 0;
   const { own, rt, requests } = await fakeSite(t, [], { options: (send) => { calls += 1; return mode === "ok" ? send(200, { success: true, data: retryOptions(3, "429，500-599") }) : mode === "denied" ? send(403, { success: false, message: "无权进行此操作，权限不足" }) : send(500, { success: false }); } });
   let now = NOW;
-  const read = () => readRetrySettings(rt, own, { now });
+  const read = () => { resetOwnOptionShare(); return readRetrySettings(rt, own, { now }); }; // 这里测的是 ingest 自己的 1 小时缓存，不让 providers 里 10 分钟的搭便车缓存插进来
   assert.deepEqual(await read(), { retryTimes: 3, retryRanges: [[429, 429], [500, 599]] });
   assert.deepEqual(cachedRetrySettings(rt, own), { retryTimes: 3, retryRanges: [[429, 429], [500, 599]] });
   assert.equal(requests.filter((r) => r.path === "/api/option/").length, 1);
@@ -694,7 +697,7 @@ test("重试设置变了（口径指纹变了）：这一窗口没读完的暂�
   let partial = null;
   for (let i = 0; i < 40 && !partial; i += 1) { resetOwnRequestBudget(); await ingest.ingestOnce(own); const pending = await store.getPending("own"); if (pending && pending.nextPage > 1) partial = pending; }
   assert.ok(partial, "停在窗口中间");
-  ranges = "429"; now += RETRY_SETTINGS_TTL_MS + 1000; rt._ownRetrySettings.clear(); resetOwnRequestBudget();
+  ranges = "429"; now += RETRY_SETTINGS_TTL_MS + 1000; rt._ownRetrySettings.clear(); resetOwnOptionShare(); resetOwnRequestBudget();
   const changed = await ingest.ingestOnce(own);
   assert.equal(changed.error, "pending-classification-changed");
   assert.equal(await store.getPending("own"), null, "没读完的暂存丢了");
@@ -704,4 +707,25 @@ test("重试设置变了（口径指纹变了）：这一窗口没读完的暂�
   const olderRows = logs.filter((log) => log.created_at * 1000 < partial.fromMs).length;
   assert.equal(buckets.filter((b) => b.retryable === 1).reduce((sum, b) => sum + b.count, 0), olderRows, "口径变之前已经读完入桶的窗口留着旧口径，没读完的窗口全按新口径（503 不能重试）重读");
   assert.ok(buckets.some((b) => b.retryable === 0));
+});
+
+test("给用户站减负：整站消费日志追平以后每 5 分钟才读一次（落后不到 5 分钟又没有读到一半的窗口，这一轮一个请求都不发）；落后更多时照旧每轮读", async (t) => {
+  resetOwnRequestBudget();
+  const logs = [row(1, NOW - 3 * 3600000)];
+  let now = NOW;
+  const { own, rt, requests } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore();
+  await store.startCursor("own", wholeSecondMs(NOW - 3600000), NOW);
+  const ingest = createOwnLogIngest(rt, { store, now: () => now });
+  const reads = () => requests.filter((r) => r.path === "/api/log/").length;
+  for (let i = 0; i < 80; i += 1) { resetOwnRequestBudget(); if ((await ingest.ingestOnce(own)).skipped === "caught-up") break; }
+  assert.equal((await store.getCursor("own")).coveredToMs, now - INGEST.LAG_MS, "追平了");
+  const before = reads();
+  for (let minute = 1; minute <= 4; minute += 1) { now += 60000; resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); assert.equal(r.skipped, "caught-up", `第 ${minute} 分钟`); }
+  assert.equal(reads(), before, "不到 5 分钟一个请求都不发");
+  now += 60000; resetOwnRequestBudget();
+  const r5 = await ingest.ingestOnce(own);
+  assert.ok(!r5.skipped && r5.pages >= 1, "满 5 分钟读一次");
+  assert.ok(reads() > before);
+  assert.equal(OWN_LOAD.CONSUME_LOG_MS, 5 * 60000);
 });
