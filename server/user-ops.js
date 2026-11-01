@@ -2,7 +2,7 @@
 // 每 10 分钟（挂在对账轮询的每一轮后面，自己限频）：
 //   1. 读用户列表（server/own-helpers.js 的 getOwnUsers，10 分钟缓存），给每个非管理员用户记一条余额快照（变了才写，没变每天补一条）；
 //   2. 读 /api/data/users 最近 3 小时，按小时覆盖写进 user_usage_hours；
-//   3. 第一次往回补 30 天：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
+//   3. 第一次往回补 60 天（页面趋势图要画近 30 天和前 30 天）：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
 //   4. 算每个用户还能用几天（lib/user-balance.js）和重点用户（日均消费占全站八成），结果放在 rt._userOpsView 里（以后页面读）；
 //   5. 站长提醒：规则「用户余额」（rules.onUserBalance，默认关）开着、数据新鲜、回补完成时，只推送重点用户，几位一起推一条。
 // 对用户自己 New API 的读取：每轮 1 个用户列表（每页 100 个）+ 1 个 data/users，回补期间再加最多 3 个；每个请求之前先问 lib/own-request-budget.js：
@@ -24,9 +24,9 @@ export const USER_OPS = Object.freeze({
   USERS_MAX_AGE_MS: 9 * 60000, // 用户列表缓存超过这么久就重读，保证每轮的快照是新的
   SNAPSHOT_REFRESH_MS: DAY_MS, // 余额没变的用户每天补一条
   USAGE_LOOKBACK_HOURS: 3,
-  BACKFILL_DAYS: 30,
+  BACKFILL_DAYS: 60,
   BACKFILL_PER_RUN: 3,
-  USAGE_KEEP_MS: 35 * DAY_MS, // 30 天曲线 + 在下滑要比前 14 天
+  USAGE_KEEP_MS: 65 * DAY_MS, // 趋势图近 30 天 + 前 30 天，再留 5 天余量
   BALANCE_KEEP_MS: 14 * DAY_MS, // 7 天窗口 + 余量
   EVAL_LOOKBACK_MS: 8 * DAY_MS,
   // 最近 180 秒这个站点已经发了这么多请求（共 360 个额度）就整轮不读：比整站日志读取的份额更保守，别的读取（运营总览、对账）优先
@@ -105,7 +105,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     return rows.length;
   }
 
-  // 回补：从「现在」往前一天一个请求，补到 30 天前的 0 点；每轮最多 BACKFILL_PER_RUN 个，每个之前问额度
+  // 回补：从「现在」往前一天一个请求，补到 60 天前的 0 点；每轮最多 BACKFILL_PER_RUN 个，每个之前问额度
   async function backfill(ops, own, at) {
     const tz = businessTimeZone();
     let progress = await ops.getProgress(own.id);

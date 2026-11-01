@@ -83,14 +83,15 @@ test("第一轮：给非管理员用户记余额快照、读最近 3 小时用�
   assert.ok(usage.length > 0 && usage.every((row) => row.quota > 0));
 });
 
-test("回补 30 天：每轮最多 3 个请求，10 轮补完；补完以后每轮只剩用户列表 + 最近 3 小时两个请求；回补期间页面写补全进度", async (t) => {
+test("回补 60 天：每轮最多 3 个请求，20 轮补完；补完以后每轮只剩用户列表 + 最近 3 小时两个请求；回补期间页面写补全进度", async (t) => {
   const f = makeSite(t, crowd());
   const progress = [];
-  for (let run = 1; run <= 10; run += 1) { await f.step(); progress.push(f.ops.getView().backfill); }
-  assert.deepEqual([progress[0].done, progress[0].days, progress[0].total], [false, 3, 30], "补全中 3/30");
+  for (let run = 1; run <= 20; run += 1) { await f.step(); progress.push(f.ops.getView().backfill); }
+  assert.deepEqual([progress[0].done, progress[0].days, progress[0].total], [false, 3, 60], "补全中 3/60");
   assert.deepEqual([progress[4].done, progress[4].days], [false, 15]);
-  assert.deepEqual([progress.at(-1).done, progress.at(-1).days], [true, 30]);
-  assert.equal(f.count("/api/data/users?day"), 30, "一天一个请求，共 30 个");
+  assert.deepEqual([progress[18].done, progress[18].days], [false, 57]);
+  assert.deepEqual([progress.at(-1).done, progress.at(-1).days], [true, 60]);
+  assert.equal(f.count("/api/data/users?day"), 60, "一天一个请求，共 60 个");
   const before = f.site.requests.length;
   await f.step();
   assert.deepEqual(f.site.requests.slice(before), ["/api/user/", "/api/data/users?recent"]);
@@ -207,7 +208,7 @@ test("回补没完成之前不推送：回补读不成，到了 24 小时也不�
   assert.equal(f.sent.length, 0);
   assert.equal(f.ops.getView().backfill.done, false);
   f.site.softBackfill = false;
-  await f.stepsTo(33);
+  await f.stepsTo(34);
   assert.equal(f.ops.getView().backfill.done, true);
   assert.equal(f.sent.length >= 1, true);
 });
@@ -252,7 +253,7 @@ test("删除自营站点（或改地址）时正在跑的那一轮：迟到的�
   f.site.gate = null;
   const next = await f.step();
   assert.equal(next.backfill.steps, 3, "下一轮从头回补");
-  assert.ok((await f.store.getProgress("own1")).backfillTargetMs > START - 31 * 24 * H);
+  assert.ok((await f.store.getProgress("own1")).backfillTargetMs > START - 61 * 24 * H);
   assert.equal(f.ops._state.lastUsers.length, f.site.users.length, "用户列表是新读的");
 });
 
@@ -262,7 +263,7 @@ test("回补进度行只有半截（回补目标是空的）：重新初始化�
   const out = await f.step();
   assert.equal(out.backfill.steps, 3);
   const progress = await f.store.getProgress("own1");
-  assert.ok(progress.backfillTargetMs > START - 31 * 24 * H && progress.backfillTargetMs < START - 29 * 24 * H, String(progress.backfillTargetMs));
+  assert.ok(progress.backfillTargetMs > START - 61 * 24 * H && progress.backfillTargetMs < START - 59 * 24 * H, String(progress.backfillTargetMs));
   assert.equal(f.count("/api/data/users?day"), 3);
 });
 
