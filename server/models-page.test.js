@@ -38,7 +38,7 @@ function makeRt(t, { channels, rows, flow, perf, series, upstreams, rules, prici
     const key = url.pathname;
     if (failures[key]) return { status: failures[key], text: async () => "{}" };
     const reply = (data) => ({ status: 200, text: async () => JSON.stringify({ success: true, data }) });
-    if (key === "/api/channel/") return reply({ total: channels.length, items: channels.map((c) => ({ id: c.id, name: c.name, type: 1, status: c.status ?? 1, base_url: "https://x.test", group: "default", models: c.models.join(","), priority: c.priority ?? 0, weight: c.weight ?? 0, key: "secret" })) });
+    if (key === "/api/channel/") return reply({ total: channels.length, items: channels.map((c) => ({ id: c.id, name: c.name, type: 1, status: c.status ?? 1, base_url: "https://x.test", group: "default", models: c.models.join(","), priority: c.priority ?? 0, other_info: c.otherInfo ?? "", weight: c.weight ?? 0, key: "secret" })) });
     if (key === "/api/data/") return reply(rows);
     if (key === "/api/data/flow") return reply(flow.map((f) => ({ username: f.user, use_group: "default", model_name: f.model, channel_id: f.channelId, channel_name: "x", token_name: "t", token_used: 1, quota: Math.round(f.usd * QUOTA), count: 1 })));
     if (key === "/api/perf-metrics/summary") return reply({ models: perf.map(([model, rate]) => ({ model_name: model, success_rate: rate, avg_latency_ms: 100, avg_tps: 1 })) });
@@ -64,7 +64,7 @@ const table = (item, groups = { default: 1, vip: 0.5 }) => ({ models: new Map([[
 const world = () => ({
   channels: [
     { id: 1, name: "渠道 1", models: ["gpt-5"], priority: 10 }, { id: 2, name: "渠道 2", models: ["gpt-5"] }, { id: 3, name: "渠道 3", models: ["glm"], status: 2 },
-    { id: 4, name: "渠道 4", models: ["claude-x"] }, { id: 5, name: "渠道 5", models: ["deepseek-ai/DeepSeek-V3"], status: 3 }, { id: 6, name: "渠道 6", models: ["gpt-5"], status: 2 },
+    { id: 4, name: "渠道 4", models: ["claude-x"] }, { id: 5, name: "渠道 5", models: ["deepseek-ai/DeepSeek-V3"], status: 3, otherInfo: JSON.stringify({ status_reason: "status code 401: Invalid token", status_time: 1793520000, secret: "keep-out" }) }, { id: 6, name: "渠道 6", models: ["gpt-5"], status: 2 },
   ],
   rows: [...usageRows("gpt-5", { week: 140, prev: 140, success: 90 }), ...usageRows("claude-x", { week: 140, prev: 28 }), ...usageRows("glm", { week: 70, prev: 70 }), ...usageRows("deepseek-ai/DeepSeek-V3", { week: 35, prev: 35 })],
   flow: [{ user: "alice", model: "gpt-5", channelId: 1, usd: 7 }, { user: "bob", model: "gpt-5", channelId: 2, usd: 3 }, { user: "alice", model: "claude-x", channelId: 4, usd: 5 }, { user: "root", model: "gpt-5", channelId: 1, usd: 1 }],
@@ -94,7 +94,10 @@ test("整页：打开一次读渠道、按小时用量、模型 × 渠道流量�
   assert.equal(Object.hasOwn(by.glm, "flags") || Object.hasOwn(by.glm, "lost"), false, "页面不用的判断中间量不进响应");
   assert.deepEqual(by["deepseek-ai/DeepSeek-V3"].tags, ["out"], "被自动停用的渠道不算开着");
   assert.deepEqual([by["gpt-5"].supply, by.glm.supply], [{ upstreams: 2, open: 2, stopped: 1 }, { upstreams: 0, open: 0, stopped: 1 }]);
-  assert.deepEqual([by["gpt-5"].main.name, by["gpt-5"].main.share, by["claude-x"].main.runway.days], ["上游甲", 8 / 11, 2], "流量 7+1 : 3，上游甲占 8/11");
+  // 货源还能撑：开着的渠道对应的上游里撑得最久的；gpt-5 有甲（10 天）和乙（2 天）：甲；claude-x 只有乙
+  assert.deepEqual([by["gpt-5"].longest.name, by["gpt-5"].longest.runway.days, by["claude-x"].longest.name, by["claude-x"].longest.runway.days], ["上游甲", 10, "上游乙", 2]);
+  assert.equal(Object.hasOwn(by["gpt-5"], "main"), false, "主要上游只留在抽屉里找货帮手用");
+  assert.equal(page.perfEmpty, false);
   await modelsPage(rt, { now: NOW + 5 * 60000 });
   assert.equal(requests.length, 4, "10 分钟内不重读");
   await modelsPage(rt, { now: NOW + MODELS_TTL_MS + 1000 });
@@ -117,8 +120,8 @@ test("读不到时降级：性能统计读不到 → 成功率写「读不到」
   const page = await modelsPage(rt, { now: NOW });
   assert.deepEqual([page.perfReadable, page.flowReadable], [false, false]);
   const by = Object.fromEntries(page.rows.map((row) => [row.name, row]));
-  assert.deepEqual([by["gpt-5"].success.state, by["gpt-5"].tags, by["gpt-5"].main], ["unread", [], null]);
-  assert.deepEqual(by["claude-x"].tags, ["single", "rising"], "没有主要上游，不判快断货");
+  assert.deepEqual([by["gpt-5"].success.state, by["gpt-5"].tags, by["gpt-5"].longest.name], ["unread", [], "上游甲"]);
+  assert.deepEqual(by["claude-x"].tags, ["soon", "single", "rising"], "快断货只看渠道绑的上游，流量占比读不到也照判");
   assert.deepEqual(by.glm.tags, ["out"], "断货不靠这两样");
 });
 
@@ -198,6 +201,10 @@ test("抽屉：多读成功率时间序列一个请求（模型名里的「/」�
   const slash = await modelDetail(rt, "deepseek-ai/DeepSeek-V3", { now: NOW });
   assert.equal(requests.at(-1), "/api/perf-metrics?model=deepseek-ai%2FDeepSeek-V3&hours=720");
   assert.equal(slash.name, "deepseek-ai/DeepSeek-V3");
+  // 被自动停用的渠道：停用原因和时间（只这两个字段）；启用着的、手动停用的渠道不带
+  assert.deepEqual([slash.channels[0].state, slash.channels[0].stopReason, slash.channels[0].stopTime], ["auto", "status code 401: Invalid token", 1793520000000]);
+  assert.equal(JSON.stringify(slash).includes("keep-out"), false);
+  assert.deepEqual(detail.channels.map((c) => "stopReason" in c), [false, false, false]);
   assert.equal(slash.successLine.points.every((p) => p.rate == null), true, "没有点就是 null，不画 0");
 });
 

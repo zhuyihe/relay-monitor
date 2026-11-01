@@ -12,6 +12,7 @@ import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE, formatZonedTime } from
 import { describeError } from "../../../lib/error-copy";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
+import { Sym } from "../../components/icons";
 import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { useShellPage } from "../../components/shell-context";
@@ -91,9 +92,15 @@ export default function ModelsPageRoute() {
   const kpis = kpisOf(page);
   const how = COPY.how, nums = howNumbers(page.rate);
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-models-page">
       {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
       <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
+      {page.perfEmpty && (
+        <div className="jy-banner" role="status">
+          <Sym kind="warn" />
+          <div className="jy-banner__body"><span>{COPY.perfEmpty}</span></div>
+        </div>
+      )}
       <Panel label={COPY.kpiLabel}>
         <dl className="jy-kpis jy-models-kpis">
           {kpis.map((kpi) => (
@@ -115,6 +122,8 @@ export default function ModelsPageRoute() {
           <li><b>{how.blindTitle}</b>{how.blind}</li>
           <li><b>{how.lostTitle}</b>{how.lost(nums.failPct)}</li>
           <li><b>{how.otherTitle}</b>{how.other(nums.soonDays, nums.ratio, nums.minPrev)}</li>
+          <li><b>{how.supplyTitle}</b>{how.supply}</li>
+          <li><b>{how.smallTitle}</b>{how.small(nums.minShare)}</li>
         </ul>
       </More>
       <p className="jy-models-foot"><Link className="jy-link" href={MY_LINK}>{COPY.toMy}</Link></p>
