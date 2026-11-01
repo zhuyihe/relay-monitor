@@ -102,7 +102,7 @@ export const wallHourOf = (slotMs, tz = DEFAULT_BUSINESS_TIME_ZONE) => wallHourO
  *   byModel: [{ model, ...agg, finalFailures }]（被拒多的在前）；byUpstream: [{ upstreamStationId, channelIds, ...agg }]；
  *   byChannel: [{ channelId, ruleId, upstreamStationId, ...agg, hours: [{ slotMs, ...agg }] }]——这个渠道所有模型加起来的成交和被拒，按小时，测上限用；
  *   byHour: [{ slotMs, dayKey, hour, repeated, ...agg, finalFailures }]（每个小时都有，没有的是 0）；
- *   byModelHour: [{ slotMs, model, ...agg, finalFailures, retriedOrStopped }]；
+ *   byModelHour: [{ slotMs, model, ...agg, finalFailures, finalFailuresByReason: { rate_limit, upstream, auth_quota }（加起来是 finalFailures）, retriedOrStopped }]；
  *   cells: [{ slotMs, channelId, model, success, rejected, rejectedRequests, attempts: { retryable: [1–10 档], nonRetryable: [1–10 档] } }]（渠道 × 模型 × 小时，有数的才有）
  * }
  */
@@ -141,6 +141,12 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
       const cell = cellOf(bucket.slotMs, bucket.channelId, bucket.model), modelHour = modelHourOf(bucket.slotMs, bucket.model);
       addError(cell, bucket); addAttempts(cell, bucket);
       addError(modelHour, bucket); addAttempts(modelHour, bucket);
+      // 按原因分开记尝试数：F 按原因拆（主要原因），拆开的各项加起来正好是 F
+      if (!NOT_IN_F.has(bucket.reason)) {
+        const byReason = (modelHour.reasonAttempts ||= {});
+        const holder = (byReason[bucket.reason] ||= { attempts: SHARED_ATTEMPTS });
+        addAttempts(holder, bucket);
+      }
     }
     for (const bucket of consumeBuckets) {
       cellOf(bucket.slotMs, bucket.channelId, bucket.model).success += bucket.requests;
@@ -172,8 +178,10 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
   const byModelHour = [];
   for (const entry of modelHours.values()) {
     const { finalFailures, retriedOrStopped } = estimateFinalFailures(entry.attempts, retryTimes);
-    const { attempts, ...rest } = entry;
-    byModelHour.push({ ...rest, finalFailures, retriedOrStopped });
+    const { attempts, reasonAttempts, ...rest } = entry;
+    const finalFailuresByReason = { rate_limit: 0, upstream: 0, auth_quota: 0 };
+    for (const [reason, holder] of Object.entries(reasonAttempts || {})) finalFailuresByReason[reason] = estimateFinalFailures(holder.attempts, retryTimes).finalFailures;
+    byModelHour.push({ ...rest, finalFailures, finalFailuresByReason, retriedOrStopped });
     total.finalFailures += finalFailures;
     models.get(entry.model).finalFailures += finalFailures;
     const hour = hours.get(entry.slotMs); if (hour) hour.finalFailures += finalFailures;
