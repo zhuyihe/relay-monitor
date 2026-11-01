@@ -5,6 +5,16 @@ import { HEADROOM, buildHeadroom } from "../lib/models-headroom.js";
 
 const HOUR_MS = 3600000, DAY_MS = 86400000;
 
+// 动作链接要去的地方只给公开地址：只要 http / https（别的协议，比如 javascript:，给 null）；去掉地址里的用户名密码（user:pass@）、查询串和 #；去掉末尾的斜杠。
+// 令牌、Key 从来不进这里（只读站点配置里的 baseUrl 这一个字段）
+export function publicBaseUrl(raw) {
+  let url;
+  try { url = new URL(String(raw ?? "").trim()); } catch { return null; }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+  return url.toString().replace(/\/+$/, "");
+}
+
 // ctx：{ own, now, tz, modelRows（数据看板按模型的小时行）, channels（自营渠道列表）, rules（这个自营站点现在在算的绑定）, upstreams（Map，见 models-page.js）, weekUsd（Map）, small（Set）}
 // 返回 { page, detailOf } 或 null（没有数据库，或者读库出错：老页面照常，headroom 是 null）
 export async function readHeadroom(rt, ctx) {
@@ -15,7 +25,7 @@ export async function readHeadroom(rt, ctx) {
     const settings = rt.store?.settings || {};
     const channelUpstream = channelUpstreamMap(ctx.rules, own.id);
     const [supply, rejectedUsers, errorCursor, consumeCursor, latest] = await Promise.all([
-      queryErrorSupply({ errors, consume, stationId: own.id, fromMs: now - HEADROOM.WINDOW_DAYS * DAY_MS, toMs: now, channelUpstream, tz, retry: rt.reconciliation?.ownRetrySettings?.(own) ?? null }),
+      queryErrorSupply({ errors, consume, stationId: own.id, fromMs: now - HEADROOM.WINDOW_DAYS * DAY_MS, toMs: now, channelUpstream, tz, retry: rt.reconciliation?.ownRetrySettings?.(own) ?? null, maxRows: HEADROOM.MAX_BUCKET_ROWS }),
       queryRejectedUsers({ errors, stationId: own.id, fromMs: now - 24 * HOUR_MS, toMs: now }),
       errors.getCursor(own.id), consume.getCursor(own.id), errors.latestSlot(own.id),
     ]);
@@ -35,12 +45,16 @@ export async function readHeadroom(rt, ctx) {
       cells: supply.cells, byModelHour: supply.byModelHour, rejectedUsers, usersById, channels, upstreams: ctx.upstreams, weekUsd: ctx.weekUsd, small: ctx.small,
     });
     // 动作链接要去的地方：公开地址，不给令牌和账号
-    const links = { own: String(own.baseUrl || "").replace(/\/+$/, "") || null, upstreams: {} };
-    for (const card of result.page.upstreams) if (card.upstreamId != null) { const up = ctx.upstreams.get(card.upstreamId); links.upstreams[card.upstreamId] = up?.baseUrl ? { baseUrl: up.baseUrl, type: up.type } : null; }
+    const links = { own: publicBaseUrl(own.baseUrl), upstreams: {} };
+    for (const card of result.page.upstreams) {
+      if (card.upstreamId == null) continue;
+      const up = ctx.upstreams.get(card.upstreamId), baseUrl = publicBaseUrl(up?.baseUrl);
+      links.upstreams[card.upstreamId] = baseUrl ? { baseUrl, type: String(up.type) } : null;
+    }
     result.page.links = links;
     return result;
   } catch (error) {
-    console.debug("models-headroom", error?.code || error?.message || "failed");
+    console.debug("models-headroom", error?.code || error?.message || "failed"); // TOO_MANY_BUCKETS：桶太多这次不算
     return null;
   }
 }

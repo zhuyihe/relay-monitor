@@ -219,3 +219,26 @@ test("谁被拒了：按用户 ID，被拒次数、被拒过的请求数（第 1
   assert.deepEqual(await queryRejectedUsers({ errors, stationId: "nobody", fromMs: 0, toMs: 99 * H }), []);
   assert.ok(!JSON.stringify(all).match(/username|email|name"/), "只有用户 ID");
 });
+
+test("汇总分批读（每批 24 个小时）：结果和一次读一样；没有错误的格子共用同一份冻住的空对象，第一次加错误才复制；桶行数超过 maxRows 抛 TOO_MANY_BUCKETS", async () => {
+  const { errors, consume } = await seeded();
+  const calls = [];
+  const spy = (store, name) => new Proxy(store, { get: (target, key) => (key === "listBuckets" ? async (station, from, to, options) => { calls.push([name, (to - from) / H]); return target.listBuckets(station, from, to, options); } : target[key].bind ? target[key].bind(target) : target[key]) });
+  const wide = await queryErrorSupply({ errors: spy(errors, "e"), consume: spy(consume, "c"), stationId: "own", fromMs: 0, toMs: 60 * H, channelUpstream: channelUpstreamMap(rules, "own"), tz: "UTC", retry: { retryTimes: 2 } });
+  assert.deepEqual(calls.map(([name, hours]) => hours), [24, 24, 24, 24, 12, 12], "60 个小时分 3 批 × 2 个存取");
+  const once = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 0, toMs: 60 * H, channelUpstream: channelUpstreamMap(rules, "own"), tz: "UTC", retry: { retryTimes: 2 } });
+  assert.deepEqual(wide, once, "分批读和整段读结果一样");
+  // 只有成交没有错误的格子：共用冻住的空对象
+  const store = new MemoryOwnLogStore(ERROR_SPEC), sales = new MemoryOwnLogStore();
+  await store.startCursor("own", 0, 0); await sales.startCursor("own", 0, 0);
+  await sales.applyWindow("own", { fromMs: 0, toMs: 5 * H, buckets: [consumeBucket(H, { channelId: 1 }), consumeBucket(H, { channelId: 2 })] });
+  await store.applyWindow("own", { fromMs: 0, toMs: 5 * H, buckets: [errorBucket(H, { channelId: 2, count: 3 })] });
+  const result = await queryErrorSupply({ errors: store, consume: sales, stationId: "own", fromMs: 0, toMs: 2 * H, tz: "UTC", retry: { retryTimes: 1 } });
+  const [clean, bad] = [result.cells.find((c) => c.channelId === 1), result.cells.find((c) => c.channelId === 2)];
+  assert.ok(Object.isFrozen(clean.rejected) && Object.isFrozen(clean.attempts), "没有错误的格子共用冻住的空对象");
+  assert.ok(!Object.isFrozen(bad.rejected) && bad.rejected.rate_limit === 3, "有错误的格子自己有一份");
+  assert.deepEqual(clean.rejected, { rate_limit: 0, upstream: 0, auth_quota: 0, other: 0, total: 0 });
+  // 桶行数封顶
+  await assert.rejects(queryErrorSupply({ errors: store, consume: sales, stationId: "own", fromMs: 0, toMs: 2 * H, tz: "UTC", maxRows: 2 }), (error) => error.code === "TOO_MANY_BUCKETS");
+  assert.ok(await queryErrorSupply({ errors: store, consume: sales, stationId: "own", fromMs: 0, toMs: 2 * H, tz: "UTC", maxRows: 3 }), "正好 3 行：不封");
+});
