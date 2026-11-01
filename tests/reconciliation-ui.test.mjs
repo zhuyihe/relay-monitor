@@ -435,11 +435,11 @@ test("每日利润小毛病：人民币时顶上四个数不折行、四格一�
 
 // ---- 模型供需页（第 1 步「高峰余量」，design models-v4）：夹具照接口形状（app/(dashboard)/models/headroom-types.ts）手写，数和设计稿里的一样（汇率 7，钱按人民币写） ----
 const MODELS_TZ = "Asia/Shanghai", MODELS_NOW = Date.parse("2026-11-02T16:50:00+08:00");
-function modelsFixture({ mode = "ok", consumeLog = true } = {}) {
+function modelsFixture({ mode = "ok", consumeLog = true, headroomNull = false } = {}) {
   const grid = dayGrid(MODELS_NOW, MODELS_TZ, MODELS_VIEW.DAYS);
   const q = (kind, value = null) => ({ kind, value });
   const none = { rate_limit: 0, upstream: 0, auth_quota: 0, other: 0 };
-  const noLog = mode === "nolog", accum = mode === "accum";
+  const noLog = mode === "nolog", accum = mode === "accum", noRecords = mode === "norecords";
   const row = (name, week, extra) => ({
     name, weekUsd: week / 7, group: "ok", peak: { hours: [21, 22] }, need: { value: 1000, growth: 1, basis: "second" }, supply: q("measured", 2000),
     margin: { value: 1000, status: "ok" }, keyUsers: { count: 0, top: [] }, reco: { kind: "none" }, notBought: { f24: 0, lostUsd: 0, blockedRetried: 0 }, gapUsdPerHour: null, ...extra,
@@ -450,15 +450,21 @@ function modelsFixture({ mode = "ok", consumeLog = true } = {}) {
     row("gemini-2.5-pro", 203.19, { group: "short", peak: { hours: [20, 21] }, need: { value: 2600, growth: 1.04, basis: "second" }, supply: q("measured", 2000), margin: { value: -600, status: "short" }, keyUsers: ku("wang-lab"), reco: { kind: "topup", upstreamId: "main", name: "主力上游", hoursLeft: 5 }, notBought: { f24: 120, lostUsd: 3, blockedRetried: 200 }, gapUsdPerHour: 300 }),
     row("claude-haiku-4.5", 52.54, { group: "short", need: { value: 1500, growth: 1.25, basis: "second" }, supply: q("measured", 1300), margin: { value: -200, status: "short" }, reco: { kind: "switch", upstreamId: "main", name: "主力上游", keys: 3 }, notBought: { f24: 40, lostUsd: 1, blockedRetried: 80 }, gapUsdPerHour: 50 }),
     row("gpt-5", 340.14, { group: "thin", peak: { hours: [14, 15] }, need: { value: 3400, growth: 0.95, basis: "lastWeek" }, supply: q("measured", 3700), margin: { value: 300, status: "thin" }, keyUsers: ku("kevin-ai"), reco: { kind: "thin" }, notBought: { f24: 74, lostUsd: 2, blockedRetried: 66 } }),
-    row("deepseek-v3", 110.13, { group: "ok", peak: { hours: [10, 11] }, need: { value: 1100, growth: 0.88, basis: "second" }, supply: q("atLeast", 2400), margin: { value: 1300, status: "ok" }, reco: { kind: "unmeasured" } }),
-    row("qwen3-coder", 39.35, { group: "ok", need: { value: 420, growth: 1, basis: "second" }, supply: q("accumulating"), margin: { value: null, status: "none" }, reco: { kind: "unmeasured" } }),
+    row("deepseek-v3", 110.13, { group: "unknown", peak: { hours: [10, 11] }, need: { value: 1100, growth: 0.88, basis: "second" }, supply: q("atLeast", 2400), margin: { value: 1300, status: "ok" }, reco: { kind: "unmeasured" } }),
+    row("qwen3-coder", 39.35, { group: "unknown", need: { value: 420, growth: 1, basis: "second" }, supply: q("accumulating"), margin: { value: null, status: "none" }, reco: { kind: "unmeasured" } }),
     row("gpt-5-mini", 0.4, { group: "small", need: null, supply: q("unavailable"), margin: { value: null, status: "none" }, peak: null }),
   ];
-  if (noLog) rows = rows.map((r) => ({ ...r, supply: q("unavailable"), margin: { value: null, status: "none" }, keyUsers: { count: 0, top: [] }, notBought: null, reco: r.reco.kind === "topup" ? r.reco : { kind: "unmeasured" } }));
-  if (accum) rows = rows.map((r) => ({ ...r, supply: q("accumulating"), margin: { value: null, status: "none" }, reco: r.reco.kind === "topup" ? r.reco : { kind: "unmeasured" } }));
+  // 没开错误日志、数据积累中时所有模型都判不了（group unknown，量很小的除外）
+  const unknown = (r, extra) => ({ ...r, group: r.group === "small" ? "small" : "unknown", margin: { value: null, status: "none" }, reco: r.reco.kind === "topup" ? r.reco : { kind: "unmeasured" }, ...extra });
+  if (noLog) rows = rows.map((r) => unknown(r, { supply: q("unavailable"), keyUsers: { count: 0, top: [] }, notBought: null }));
+  if (accum) rows = rows.map((r) => unknown(r, { supply: q("accumulating") }));
+  // 开着但一条错误也没有：能给还是「至少 X」（最高成交是真的），余量、没买到、被挡写「—」
+  if (noRecords) rows = rows.map((r, i) => unknown(r, { supply: r.group === "small" ? q("unavailable") : q("atLeast", 2000 + i * 100), keyUsers: { count: 0, top: [] }, notBought: null }));
+  // 没开整站消费日志（「算应付成本」）：每个渠道每小时的成交读不到，能给和上限是 unavailable
+  if (!consumeLog && mode === "ok") rows = rows.map((r) => unknown(r, { supply: q("unavailable") }));
   const up = (upstreamId, name, hoursLeft, limit, peakUsed, room, full, blocked24, models, actions, extra = {}) => ({
-    upstreamId, name, hoursLeft, limit: noLog ? q("unavailable") : accum ? q("accumulating") : limit, peakUsed: noLog || accum ? null : peakUsed, room: noLog || accum ? null : room, full: !noLog && !accum && full,
-    accountLimited: false, blocked24: noLog ? null : blocked24, models, actions, ...extra,
+    upstreamId, name, hoursLeft, limit: noLog || (!consumeLog && mode === "ok") ? q("unavailable") : accum ? q("accumulating") : noRecords ? q("atLeast", limit.value) : limit, peakUsed: noLog || accum ? null : peakUsed, room: noLog || accum ? null : room, full: !noLog && !accum && !noRecords && full,
+    accountLimited: false, blocked24: noLog || noRecords ? null : blocked24, models, actions, ...extra,
   });
   const upstreams = [
     up("main", "主力上游", 5, q("measured", 9000), 9000, 0, true, { rate_limit: 1452, upstream: 0, auth_quota: 0, other: 0 }, { count: 12, names: ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5"] }, ["topup", "addKey"]),
@@ -466,18 +472,18 @@ function modelsFixture({ mode = "ok", consumeLog = true } = {}) {
     up("c", "上游丙", 960, q("atLeast", 4400), 2600, 1800, false, { ...none }, { count: 8, names: ["deepseek-v3", "gpt-5-mini"] }, []),
   ];
   const headroom = {
-    state: noLog ? "noErrorLog" : accum ? "accumulating" : "ok", noErrorLogReason: noLog ? "switchOff" : null,
+    state: noLog || noRecords ? "noErrorLog" : accum ? "accumulating" : "ok", noErrorLogReason: noLog ? "switchOff" : noRecords ? "noRecords" : null,
     errorLog: { coveredDays: noLog ? null : accum ? 1 : 9, needDays: 7, daysLeft: accum ? 6 : 0 }, consumeLog, peak: { hours: [21, 22] },
     kpis: {
-      willShort: noLog ? null : { count: 3, worst: { name: "claude-sonnet-4.6", gap: 1000, peak: { hours: [21, 22] } } },
-      notBought: noLog ? null : { f24: 420, lostUsd: 38 / 7, blockedRetried: 1400, keyUsers: 4 },
+      willShort: noLog || noRecords ? null : { count: 3, worst: { name: "claude-sonnet-4.6", gap: 1000, peak: { hours: [21, 22] } } },
+      notBought: noLog || noRecords ? null : { f24: 420, lostUsd: 38 / 7, blockedRetried: 1400, keyUsers: 4 },
       topup: { count: 1, first: { upstreamId: "main", name: "主力上游", hoursLeft: 5 } },
     },
     rows, upstreams,
     numbers: { needDays: 7, minAttempts: 50, minSuccessShare: 0.5, minRateLimitShare: 0.05, limitPercentile: 0.75, windowDays: 14, growthMin: 0.8, growthMax: 1.25, thinMargin: 500 },
     links: { own: "https://own.example", upstreams: { main: { baseUrl: "https://main.example", type: "newapi" }, backup: { baseUrl: "https://backup.example", type: "newapi" }, c: { baseUrl: "https://c.example", type: "sub2api" } } },
   };
-  const data = { asOf: MODELS_NOW, tz: MODELS_TZ, rate: 7, critDays: 3, headroom };
+  const data = { asOf: MODELS_NOW, tz: MODELS_TZ, rate: 7, critDays: 3, headroom: headroomNull ? null : headroom };
   const longReason = "status code 401: Invalid token (request id: 202611010930123456789) — 上游说这个 Key 已经被停用，请到上游后台重新生成一个 Key，再把新的 Key 填到这个渠道上。".repeat(6);
   const runway = (days, extra = {}) => ({ days, noSpend: false, level: days != null && days <= 3 ? "crit" : "good", text: days == null ? "—" : `约 ${days} 天`, failed: false, ...extra });
   const detail = (name) => {
@@ -511,8 +517,8 @@ function modelsFixture({ mode = "ok", consumeLog = true } = {}) {
   };
   return { data, detail, grid };
 }
-async function openModelsPage(t, { viewport, search = "", mode = "ok", consumeLog = true } = {}) {
-  const fixture = modelsFixture({ mode, consumeLog }), requests = [];
+async function openModelsPage(t, { viewport, search = "", mode = "ok", consumeLog = true, headroomNull = false } = {}) {
+  const fixture = modelsFixture({ mode, consumeLog, headroomNull }), requests = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
@@ -520,12 +526,12 @@ async function openModelsPage(t, { viewport, search = "", mode = "ok", consumeLo
     if (url.pathname === "/api/models/detail") { const name = url.searchParams.get("name"); requests.push(`${url.pathname}?name=${name}`); return fulfill(route, fixture.detail(name)); }
     throw new Error("unexpected models fixture API: " + url.pathname);
   }, viewport, MODELS_NOW, null, `/models${search ? `?${search}` : ""}`);
-  await page.getByText(MODELS_COPY.tableTitle, { exact: true }).first().waitFor();
+  await page.getByText(headroomNull ? MODELS_COPY.headroomNull : MODELS_COPY.tableTitle, { exact: !headroomNull }).first().waitFor();
   return { page, requests };
 }
 const modelRow = (page, name) => page.locator("tbody tr").filter({ has: page.getByRole("button", { name: MODELS_COPY.rowOpen(name), exact: true }) });
 
-test("模型供需（电脑）：一屏、顶上三个数、主表默认只列缺的和余量薄的（其余收在按钮后面）、余量条、建议、按上游看；整页不滚、两块各自在框里滚、表头固定", async (t) => {
+test("模型供需（电脑）：一屏、顶上三个数、主表默认只列缺的、余量薄的和判不了的（其余收在按钮后面）、余量条、建议、按上游看；整页不滚、两块各自在框里滚、表头固定", async (t) => {
   const { page } = await openModelsPage(t, {});
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByText(MODELS_COPY.readNote("16:50"), { exact: true }).waitFor();
@@ -533,10 +539,10 @@ test("模型供需（电脑）：一屏、顶上三个数、主表默认只列�
   assert.match(await kpi(MODELS_COPY.kpi.willShort).innerText(), /3 个模型[\s\S]*最缺的 claude-sonnet-4\.6 至少差约 1,000 次\/小时（21–23 点）/);
   assert.match(await kpi(MODELS_COPY.kpi.notBought).innerText(), /至少 420 个[\s\S]*至少少收约 ¥38\.\d\d；另有 1,400 个被挡过后靠重试买到。碰到 4 个重点用户/);
   assert.match(await kpi(MODELS_COPY.kpi.topup).innerText(), /1 家[\s\S]*主力上游[\s\S]*约 5 小时后没钱，撑不到今晚高峰/);
-  // 默认只列缺的（3 个）和余量薄的（1 个）：4 行；其余 3 个收在按钮后面
+  // 默认只列缺的（3 个）、余量薄的（1 个）和判不了的（2 个）：6 行；量很小的 1 个收在按钮后面
   const names = () => page.locator("tbody .jy-models-name").allInnerTexts();
-  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5"]);
-  await page.getByText(MODELS_COPY.restNote(3), { exact: true }).waitFor();
+  assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "deepseek-v3", "qwen3-coder"]);
+  await page.getByText(MODELS_COPY.restNote(1), { exact: true }).waitFor();
   // 一屏：1440×900 整页不出滚动条；左右两块各占满剩下的高度
   const fits = () => page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight);
   assert.equal(await fits(), true, "1440×900 整页不出滚动条");
@@ -579,8 +585,8 @@ test("模型供需（电脑）：一屏、顶上三个数、主表默认只列�
   assert.equal(await backup.getByRole("link", { name: MODELS_COPY.upstream.actions.weights }).getAttribute("href"), "https://own.example/console/channel");
   assert.equal(await main.getByRole("link", { name: MODELS_COPY.upstream.actions.topup }).getAttribute("target"), "_blank");
   await page.getByText(MODELS_COPY.upstream.foot, { exact: true }).waitFor();
-  // 点开「其余」：表里多出 3 个，没测到的能给写「至少」、数据积累中、量很小的收在最后；整页仍不滚
-  await page.getByRole("button", { name: MODELS_COPY.restShow(3), exact: true }).click();
+  // 判不了的：没测到的能给写「至少」，余量写「余 至少」，竖线虚线；数据积累中的写「数据积累中」；点开「其余」多出量很小的 1 个，整页仍不滚
+  await page.getByRole("button", { name: MODELS_COPY.restShow(1), exact: true }).click();
   assert.deepEqual(await names(), ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5", "gpt-5", "deepseek-v3", "qwen3-coder", "gpt-5-mini"]);
   assert.match(await modelRow(page, "deepseek-v3").locator("td").nth(3).innerText(), /至少 2,400/);
   assert.match(await modelRow(page, "deepseek-v3").locator("td").nth(4).innerText(), /余 至少 1,300/);
@@ -666,8 +672,8 @@ test("模型供需（手机 375）：顶上三个数两两一排、一个模型�
   const { page } = await openModelsPage(t, { viewport: { width: 375, height: 812 } });
   const cards = page.locator(".jy-models-card");
   await cards.first().waitFor();
-  assert.equal(await cards.count(), 4, "手机也是默认只列缺的和余量薄的");
-  await page.getByText(MODELS_COPY.restNote(3), { exact: true }).waitFor();
+  assert.equal(await cards.count(), 6, "手机也是默认只列缺的、余量薄的和判不了的");
+  await page.getByText(MODELS_COPY.restNote(1), { exact: true }).waitFor();
   const first = await cards.first().innerText();
   assert.match(first, /claude-sonnet-4\.6[\s\S]*至少缺 1,000/);
   assert.match(first, /21–23 点 要约 9,800 · 能给约 8,800/);
@@ -677,7 +683,7 @@ test("模型供需（手机 375）：顶上三个数两两一排、一个模型�
   // 三个数：第三格占满一行
   const kpis = await page.locator(".jy-models-kpis > div").evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().width)));
   assert.ok(kpis[2] > kpis[0] * 1.6, `第三格占满一行：${kpis}`);
-  await page.getByRole("button", { name: MODELS_COPY.restShow(3), exact: true }).click();
+  await page.getByRole("button", { name: MODELS_COPY.restShow(1), exact: true }).click();
   assert.equal(await cards.count(), 7);
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-page-375x812.png` }); }
   await cards.first().click();
@@ -717,14 +723,14 @@ test("模型供需：没开错误日志——黄色提示条、顶上两个数�
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-nolog-1440x900.png` }); }
 });
 
-test("模型供需：刚开错误日志、数据不够——灰色提示条带转圈、写还差几天；能给和余量写「数据积累中」；被挡、没买到和重点用户照常；没开整站消费日志时另有一句", async (t) => {
-  const { page } = await openModelsPage(t, { mode: "accum", consumeLog: false });
+test("模型供需：刚开错误日志、数据不够——灰色提示条带转圈、写还差几天；能给和余量写「数据积累中」；被挡、没买到和重点用户照常", async (t) => {
+  const { page } = await openModelsPage(t, { mode: "accum" });
   await page.setViewportSize({ width: 1440, height: 900 });
   const banner = page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.accumulatingLead(MODELS_COPY.banner.days(1), 7) });
   await banner.waitFor();
   assert.equal(await banner.locator(".jy-hspin").count(), 1, "带转圈的小圈");
   assert.match(await banner.innerText(), /还差 6 天/);
-  await page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noConsumeLead }).waitFor();
+  assert.equal(await page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noConsumeLead }).count(), 0, "整站消费日志开着，没有那一条");
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
   assert.match(await kpi(MODELS_COPY.kpi.notBought).innerText(), /至少 420 个/, "没买到照常");
   const sonnet = modelRow(page, "claude-sonnet-4.6");
@@ -735,6 +741,42 @@ test("模型供需：刚开错误日志、数据不够——灰色提示条带�
   assert.match(cells[6], /上限还没测到\s*数据不够 7 天/);
   assert.match(await page.locator("#jy-up-main").innerText(), /上限：数据积累中[\s\S]*限流 1,452/);
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-accum-1440x900.png` }); }
+});
+
+test("模型供需：开着但这 24 小时一条错误日志都没有——灰色提示条、能给照样写「至少 X」、余量和没买到和重点用户写「—」（不写 0）、按上游看不写被挡", async (t) => {
+  const { page } = await openModelsPage(t, { mode: "norecords" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const banner = page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noRecordsLead });
+  await banner.waitFor();
+  assert.equal(await banner.locator(".jy-sym").count(), 1);
+  const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
+  for (const title of [MODELS_COPY.kpi.willShort, MODELS_COPY.kpi.notBought]) assert.match(await kpi(title).innerText(), /—[\s\S]*这 24 小时一条错误日志都没有/);
+  const cells = await modelRow(page, "claude-sonnet-4.6").locator("td").allInnerTexts();
+  assert.match(cells[3], /^至少 2,000$/, "能给照样显示至少 X");
+  assert.equal(cells[4].trim(), "—", "余量写「—」，不是 0");
+  assert.equal(cells[5], "—");
+  assert.match(cells[6], /上限还没测到\s*从没被限流过，最高一小时 2,000/);
+  assert.equal(await modelRow(page, "claude-sonnet-4.6").locator(".jy-hbar .line.is-dashed").count(), 1, "能给是「至少」，竖线画虚线");
+  assert.match(await page.locator("#jy-up-main").innerText(), /上限至少 9,000/);
+  assert.equal(await page.locator("#jy-up-main .jy-hreason").count(), 0);
+  assert.equal(await page.locator("#jy-up-main .jy-hfull").count(), 0, "不写满了");
+});
+
+test("模型供需：没开「算应付成本」——提示条「要打开「算应付成本」才看得出能给多少」，能给和上限写「—」，建议写测不出的原因", async (t) => {
+  const { page } = await openModelsPage(t, { consumeLog: false });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(".jy-banner--info", { hasText: MODELS_COPY.banner.noConsumeLead }).waitFor();
+  const cells = await modelRow(page, "claude-sonnet-4.6").locator("td").allInnerTexts();
+  assert.equal(cells[3].trim(), "—");
+  assert.equal(cells[4].trim(), "—");
+  assert.match(cells[6], /上限还没测到\s*没开「算应付成本」，测不出/);
+  assert.match(await page.locator("#jy-up-main").innerText(), /上限：—/);
+});
+
+test("模型供需：高峰余量这一次没算出来（headroom 是 null）——整页写「读不到高峰余量」，不画表和卡片", async (t) => {
+  const { page } = await openModelsPage(t, { headroomNull: true });
+  assert.equal(await page.locator(".jy-models-panel").count(), 0);
+  assert.equal(await page.locator(".jy-models-upstreams").count(), 0);
 });
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };

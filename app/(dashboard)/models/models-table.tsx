@@ -1,6 +1,6 @@
 "use client";
 // 主表「今晚高峰的余量」（design 模型供需 v4 §3）：一个模型一行，要多少、能给多少、差多少放在同一行，后面是受影响的重点用户和一句建议。
-// 接口给的行已经排好（缺的在前，按缺口 × 每次卖多少排；余的在后，余量越薄越靠前；量很小的最后）；默认只列缺的和余量薄的，其余收在表下面的按钮后面，搜索时在全部里找。
+// 接口给的行已经排好（缺的在前，按缺口 × 每次卖多少排；余的在后，余量越薄越靠前；量很小的最后）；默认只列缺的、余量薄的和判不了的，其余收在表下面的按钮后面，搜索时在全部里找。
 // 电脑上这块占满剩下的高度，在框里自己滚、表头固定（样式在 models.css）。手机一个模型一张卡片。
 import { useMemo, useState } from "react";
 import Link from "next/link";
@@ -12,8 +12,8 @@ import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { COPY } from "./copy";
 import { HeadroomBar } from "./headroom-bar";
-import { approx, growthText, marginView, money, peakText, quantityText, recoView, userLink } from "./models-format";
-import type { HeadroomRow, ModelsPage, Runway } from "./models-format";
+import { approx, growthText, logCtxOf, marginView, money, noErrorLogIn, peakText, quantityText, recoView, userLink } from "./models-format";
+import type { HeadroomRow, LoadedPage, LogCtx, Runway } from "./models-format";
 
 // 余下的跑道（上游列表同一个组件、同一种说法）；读不到余额画虚线空条
 export function RunwayCell({ runway, critDays }: { runway: Runway | null; critDays: number }) {
@@ -27,8 +27,8 @@ export function RunwayCell({ runway, critDays }: { runway: Runway | null; critDa
 }
 
 // 受影响的重点用户：名字是链接，开用户运营的抽屉；没有写「没有」；没开错误日志写「—」
-function KeyUsers({ row, state }: { row: HeadroomRow; state: ModelsPage["headroom"]["state"] }) {
-  if (state === "noErrorLog") return <span className="jy-muted">{COPY.dash}</span>;
+function KeyUsers({ row, ctx }: { row: HeadroomRow; ctx: LogCtx }) {
+  if (noErrorLogIn(ctx)) return <span className="jy-muted">{COPY.dash}</span>;
   const { count, top } = row.keyUsers;
   if (!count) return <span className="jy-muted">{COPY.keyUsersNone}</span>;
   return (
@@ -39,8 +39,8 @@ function KeyUsers({ row, state }: { row: HeadroomRow; state: ModelsPage["headroo
   );
 }
 
-function MarginCell({ row, state }: { row: HeadroomRow; state: ModelsPage["headroom"]["state"] }) {
-  const view = marginView(row, state);
+function MarginCell({ row, ctx }: { row: HeadroomRow; ctx: LogCtx }) {
+  const view = marginView(row, ctx);
   return (
     <span className="jy-hmargin">
       <span className={`jy-hmargin-text is-${view.tone}`}>{view.tone === "short" && <Sym kind="crit" />}{view.text}</span>
@@ -49,8 +49,8 @@ function MarginCell({ row, state }: { row: HeadroomRow; state: ModelsPage["headr
   );
 }
 
-function RecoCell({ row, state }: { row: HeadroomRow; state: ModelsPage["headroom"]["state"] }) {
-  const reco = recoView(row, state);
+function RecoCell({ row, ctx }: { row: HeadroomRow; ctx: LogCtx }) {
+  const reco = recoView(row, ctx);
   if (reco.kind === "none") return <span className="jy-muted">{COPY.dash}</span>;
   return (
     <span className="jy-cell-two">
@@ -60,7 +60,7 @@ function RecoCell({ row, state }: { row: HeadroomRow; state: ModelsPage["headroo
   );
 }
 
-export function HowBody({ page }: { page: ModelsPage }) {
+export function HowBody({ page }: { page: LoadedPage }) {
   const how = COPY.how, n = page.headroom.numbers;
   return (
     <ul className="jy-models-how">
@@ -77,14 +77,14 @@ export function HowBody({ page }: { page: ModelsPage }) {
   );
 }
 
-export function ModelsTable({ page, onOpen }: { page: ModelsPage; onOpen: (name: string) => void }) {
+export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name: string) => void }) {
   const phone = Grid.useBreakpoint().md === false;
   const [text, setText] = useState("");
   const [showRest, setShowRest] = useState(false);
-  const { headroom, rate } = page, state = headroom.state;
+  const { headroom, rate } = page, ctx = logCtxOf(headroom);
   const needle = text.trim().toLowerCase();
-  // 默认只列缺的和余量薄的；搜索时、点开「其余」时列全部
-  const gap = useMemo(() => headroom.rows.filter((row) => row.group === "short" || row.group === "thin"), [headroom.rows]);
+  // 默认只列缺的、余量薄的和判不了的；搜索时、点开「其余」时列全部
+  const gap = useMemo(() => headroom.rows.filter((row) => row.group === "short" || row.group === "thin" || row.group === "unknown"), [headroom.rows]);
   const restCount = headroom.rows.length - gap.length;
   const shown = needle ? headroom.rows.filter((row) => row.name.toLowerCase().includes(needle)) : showRest ? headroom.rows : gap;
   const emptyText = needle ? COPY.noMatch : headroom.rows.length ? COPY.noShort : COPY.empty;
@@ -124,7 +124,7 @@ export function ModelsTable({ page, onOpen }: { page: ModelsPage; onOpen: (name:
         shown.length ? (
           <ul className="jy-models-cards">
             {shown.map((row) => {
-              const view = marginView(row, state), reco = recoView(row, state);
+              const view = marginView(row, ctx), reco = recoView(row, ctx);
               const peak = peakText(row.peak);
               return (
                 <li key={row.name}>
@@ -134,7 +134,7 @@ export function ModelsTable({ page, onOpen }: { page: ModelsPage; onOpen: (name:
                       <span>{COPY.cardLine(peak ?? COPY.dash, row.need ? COPY.approx(approx(row.need.value)) : COPY.dash, quantityText(row.supply))}</span>
                       <HeadroomBar need={row.need?.value ?? null} supply={row.supply} label={view.text} />
                     </span>
-                    {state !== "noErrorLog" && row.keyUsers.count > 0 && <span className="r3 jy-caption"><KeyUsers row={row} state={state} /></span>}
+                    {!noErrorLogIn(ctx) && row.keyUsers.count > 0 && <span className="r3 jy-caption"><KeyUsers row={row} ctx={ctx} /></span>}
                     {reco.kind !== "none" && <span className="r4 jy-caption">{COPY.cardReco(reco.title, reco.why)}</span>}
                   </div>
                 </li>
@@ -158,9 +158,9 @@ export function ModelsTable({ page, onOpen }: { page: ModelsPage; onOpen: (name:
                     ? <span className="jy-cell-two jy-cell-two--r"><span>{COPY.approx(approx(row.need.value))}</span><span className="jy-caption">{growthText(row.need.growth)}</span></span>
                     : <span className="jy-muted">{COPY.dash}</span>}</td>
                   <td className="r">{row.supply.kind === "accumulating" ? <span className="jy-muted">{COPY.accumulating}</span> : quantityText(row.supply)}</td>
-                  <td><MarginCell row={row} state={state} /></td>
-                  <td><KeyUsers row={row} state={state} /></td>
-                  <td><RecoCell row={row} state={state} /></td>
+                  <td><MarginCell row={row} ctx={ctx} /></td>
+                  <td><KeyUsers row={row} ctx={ctx} /></td>
+                  <td><RecoCell row={row} ctx={ctx} /></td>
                 </tr>
               ))}
             </tbody>

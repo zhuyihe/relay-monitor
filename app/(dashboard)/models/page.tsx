@@ -20,22 +20,28 @@ import { useUrlParams } from "../../components/use-url-state";
 import { COPY } from "./copy";
 import { ModelDrawer } from "./model-drawer";
 import { kpisOf } from "./models-format";
-import type { ModelsPage } from "./models-format";
+import type { LoadedPage, ModelsPage } from "./models-format";
 import { ModelsTable } from "./models-table";
 import { UpstreamCards, upstreamDomId } from "./upstream-cards";
 
 const SETUP = workflowAction("setup_own_station");
 
 // 拿不到数据的两种情况和没开整站消费日志，页顶一条提示条（v4 §6）
-function StateBanners({ page }: { page: ModelsPage }) {
+function StateBanners({ page }: { page: LoadedPage }) {
   const { state, noErrorLogReason, errorLog, consumeLog } = page.headroom, B = COPY.banner;
   const days = errorLog.coveredDays == null ? "" : errorLog.coveredDays < 1 ? B.daysUnder1 : B.days(Math.floor(errorLog.coveredDays));
   return (
     <>
-      {state === "noErrorLog" && (
+      {state === "noErrorLog" && noErrorLogReason !== "noRecords" && (
         <div className="jy-banner" role="status">
           <Sym kind="warn" />
-          <div className="jy-banner__body"><span><b>{noErrorLogReason === "noRecords" ? B.noRecordsLead : B.switchOffLead}</b> {noErrorLogReason === "noRecords" ? B.noRecords : B.switchOff}</span></div>
+          <div className="jy-banner__body"><span><b>{B.switchOffLead}</b> {B.switchOff}</span></div>
+        </div>
+      )}
+      {state === "noErrorLog" && noErrorLogReason === "noRecords" && (
+        <div className="jy-banner jy-banner--info" role="status">
+          <Sym kind="info" />
+          <div className="jy-banner__body"><span>{B.noRecordsLead}</span></div>
         </div>
       )}
       {state === "accumulating" && (
@@ -47,7 +53,7 @@ function StateBanners({ page }: { page: ModelsPage }) {
       {!consumeLog && (
         <div className="jy-banner jy-banner--info" role="status">
           <Sym kind="info" />
-          <div className="jy-banner__body"><span><b>{B.noConsumeLead}</b> {B.noConsume}</span></div>
+          <div className="jy-banner__body"><span>{B.noConsumeLead}</span></div>
         </div>
       )}
     </>
@@ -122,11 +128,23 @@ export default function ModelsPageRoute() {
     );
   }
 
-  const kpis = kpisOf(page);
+  // 高峰余量这一次没算出来（没有数据库、读库出错）：整页写「读不到」，不画下面这些
+  if (!page.headroom) {
+    return (
+      <div className="jy-page">
+        {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
+        <Panel label={NAV_LABELS.models}>
+          <ErrorState center what={COPY.headroomNull} error={new Error("headroom unavailable")} onRetry={() => load()} />
+        </Panel>
+      </div>
+    );
+  }
+  const loaded = page as LoadedPage;
+  const kpis = kpisOf(loaded, loaded.headroom);
   return (
     <div className="jy-page jy-models-page">
       {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
-      <StateBanners page={page} />
+      <StateBanners page={loaded} />
       <section className="jy-models-kpis-wrap" aria-label={COPY.kpiLabel}>
         <dl className="jy-kpis jy-models-kpis">
           {kpis.map((kpi) => (
@@ -146,10 +164,10 @@ export default function ModelsPageRoute() {
         <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
       </section>
       <div className="jy-models-grid">
-        <ModelsTable page={page} onOpen={open} />
-        <UpstreamCards page={page} onOpenModel={open} />
+        <ModelsTable page={loaded} onOpen={open} />
+        <UpstreamCards page={loaded} onOpenModel={open} />
       </div>
-      <ModelDrawer name={model} page={page} onClose={close} />
+      <ModelDrawer name={model} page={loaded} onClose={close} />
     </div>
   );
 }

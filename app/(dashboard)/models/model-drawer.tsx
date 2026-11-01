@@ -14,13 +14,13 @@ import { Seg } from "../../components/seg";
 import { ChartLegend, HourlyChart } from "./charts";
 import { COPY } from "./copy";
 import { RunwayCell } from "./models-table";
-import { approx, bindLink, channelStatusText, compareText, conclusionText, finderRoomText, growthText, money, peakText, priceText, quantityText, recoView, userLink } from "./models-format";
-import type { DetailChannel, ModelDetail, ModelsPage } from "./models-format";
+import { approx, bindLink, channelStatusText, compareText, conclusionText, finderRoomText, growthText, logCtxOf, money, noErrorLogIn, peakText, priceText, quantityText, recoView, userLink } from "./models-format";
+import type { DetailChannel, LoadedPage, LogCtx, ModelDetail } from "./models-format";
 import type { HourBar } from "./charts";
 
 type Mode = "last24" | "clock7d";
 
-export function ModelDrawer({ name, page, onClose }: { name: string | null; page: ModelsPage; onClose: () => void }) {
+export function ModelDrawer({ name, page, onClose }: { name: string | null; page: LoadedPage; onClose: () => void }) {
   const open = name != null;
   const screens = Grid.useBreakpoint();
   const phone = screens.md === false;
@@ -54,12 +54,13 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
   const row = page.headroom.rows.find((item) => item.name === name) ?? null;
   const rate = page.rate;
   // 标题旁的红菱形：缺的写「今晚高峰缺约 N 次/小时」；详情还没读回来先用主表那一行的
-  const margin = detail?.headroom.margin ?? row?.margin ?? null;
+  const margin = detail?.headroom?.margin ?? row?.margin ?? null;
   const gap = margin?.status === "short" && margin.value != null ? Math.abs(margin.value) : null;
 
   const body = () => {
     if (state === "notFound") return <p className="jy-muted">{COPY.drawer.notFound}</p>;
     if (state === "failed") return <ErrorState what={COPY.drawer.failed} error={error} onRetry={name != null ? () => load(name, false) : undefined} />;
+    if (detail && !detail.headroom) return <p className="jy-muted">{COPY.drawer.headroomNull}</p>;
     if (state === "loading" || !detail) return <div className="jy-stack" aria-busy="true"><Skeleton height={64} /><Skeleton height={200} /><Skeleton height={120} /></div>;
     return <DrawerBody detail={detail} mode={mode} setMode={setMode} phone={phone} rate={rate} page={page} />;
   };
@@ -91,8 +92,8 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
   );
 }
 
-function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: ModelDetail; mode: Mode; setMode: (m: Mode) => void; phone: boolean; rate: number; page: ModelsPage }) {
-  const h = detail.headroom, D = COPY.drawer, state = page.headroom.state;
+function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: ModelDetail & { headroom: NonNullable<ModelDetail["headroom"]> }; mode: Mode; setMode: (m: Mode) => void; phone: boolean; rate: number; page: LoadedPage }) {
+  const h = detail.headroom, D = COPY.drawer, ctx = logCtxOf(page.headroom);
   const peak = peakText(h.peak);
   const margin = h.margin;
   const channelsOn = h.channels.filter((channel) => channel.state === "on").length;
@@ -120,12 +121,12 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Mode
         <div>
           <dt>{isShort ? D.kpiGap : D.kpiRoom}</dt>
           <dd className={`jy-kpi-figure${isShort ? " jy-hshort-figure" : ""}`}>{margin.value == null || margin.status === "unknown" || margin.status === "none" ? EMPTY : approx(Math.abs(margin.value))}</dd>
-          <dd className="jy-caption">{recoLine(detail, state)}</dd>
+          <dd className="jy-caption">{recoLine(h, ctx)}</dd>
         </div>
         <div>
           <dt>{D.kpiNotBought}</dt>
           <dd className="jy-kpi-figure">{nb ? COPY.kpi.notBoughtValue(nb.f24) : EMPTY}</dd>
-          <dd className="jy-caption">{nb ? D.notBoughtSub(money(nb.lostUsd, rate), nb.blockedRetried) : D.notBoughtNone}</dd>
+          <dd className="jy-caption">{nb ? D.notBoughtSub(money(nb.lostUsd, rate), nb.blockedRetried) : ctx.mode === "noRecords" ? D.notBoughtNoRecords : D.notBoughtNone}</dd>
         </div>
       </dl>
       <section className="jy-models-chart">
@@ -142,11 +143,11 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Mode
                 <ChartLegend bars={bars} />
               </>
             )}
-        {bars != null && !empty && state !== "noErrorLog" && <p className="jy-models-conclusion">{conclusionText(h.facts)}</p>}
+        {bars != null && !empty && !noErrorLogIn(ctx) && <p className="jy-models-conclusion">{conclusionText(h.facts)}</p>}
       </section>
       <section className="jy-models-chart">
         <div className="jy-chart-sub"><h3>{D.usersTitle}</h3><span className="jy-caption">{D.usersSub}</span></div>
-        <Users detail={detail} state={state} />
+        <Users detail={detail} ctx={ctx} />
       </section>
       <section className="jy-models-chart">
         <div className="jy-chart-sub"><h3>{D.channelsTitle}</h3><span className="jy-caption">{D.channelsSub}</span></div>
@@ -161,15 +162,15 @@ function DrawerBody({ detail, mode, setMode, phone, rate, page }: { detail: Mode
 }
 
 // 缺口那格下面写建议（和主表同一句）；余量够就写余量的说法
-function recoLine(detail: ModelDetail, state: ModelsPage["headroom"]["state"]): string {
-  const view = recoView({ reco: detail.headroom.reco, supply: detail.headroom.supply, margin: detail.headroom.margin }, state);
+function recoLine(h: NonNullable<ModelDetail["headroom"]>, ctx: LogCtx): string {
+  const view = recoView({ reco: h.reco, supply: h.supply, margin: h.margin }, ctx);
   return view.kind === "none" ? EMPTY : view.title;
 }
 
 // 受影响最多的用户：近 24 小时被挡过几次，前 5 个，重点用户带「重点」小标签，名字开用户运营的用户抽屉；下面「其他 18 个人被挡 326 次」
-function Users({ detail, state }: { detail: ModelDetail; state: ModelsPage["headroom"]["state"] }) {
+function Users({ detail, ctx }: { detail: ModelDetail & { headroom: NonNullable<ModelDetail["headroom"]> }; ctx: LogCtx }) {
   const D = COPY.drawer, { users } = detail.headroom;
-  if (state === "noErrorLog") return <p className="jy-muted">{D.usersNeedLog}</p>;
+  if (noErrorLogIn(ctx)) return <p className="jy-muted">{ctx.mode === "noRecords" ? D.usersNoRecords : D.usersNeedLog}</p>;
   if (!users.top.length && !users.others) return <p className="jy-muted">{D.usersNone}</p>;
   const biggest = Math.max(1, ...users.top.map((user) => user.blocked));
   return (
@@ -201,7 +202,7 @@ const stateText = (channel: DetailChannel | undefined, state: "on" | "off" | "au
   ? COPY.drawer.stateAt(COPY.drawer.channelState.auto, formatAsOfTime(channel.stopTime, tz, asOf)) : COPY.drawer.channelState[state]);
 
 // 各渠道的上限：渠道、上游、上限（「约」或「至少」）、高峰用了，最后一格「满了」（红字）/「空约 300」/「被自动停用，不算」；被停用的渠道灰字，停用原因和时间沿用第 0 步
-function Channels({ detail, phone }: { detail: ModelDetail; phone: boolean }) {
+function Channels({ detail, phone }: { detail: ModelDetail & { headroom: NonNullable<ModelDetail["headroom"]> }; phone: boolean }) {
   const D = COPY.drawer, cols = D.channelCols;
   const channels = detail.headroom.channels;
   if (!channels.length) return <p className="jy-muted">{D.channelNone}</p>;
@@ -251,7 +252,7 @@ function Channels({ detail, phone }: { detail: ModelDetail; phone: boolean }) {
 }
 
 // 找货帮手：已经加了的上游里，谁也卖这个模型，按价格从低到高，多一项「高峰空约」（便宜的那家高峰还有没有空，决定能不能挪过去）；还没在供的最右边一个「去绑定渠道」
-function Finder({ detail, rate, critDays, phone }: { detail: ModelDetail; rate: number; critDays: number; phone: boolean }) {
+function Finder({ detail, rate, critDays, phone }: { detail: ModelDetail & { headroom: NonNullable<ModelDetail["headroom"]> }; rate: number; critDays: number; phone: boolean }) {
   const D = COPY.drawer, cols = D.finderCols, room = detail.headroom.finderRoom;
   const cards = (
     <ul className="jy-models-subcards">

@@ -9,9 +9,11 @@ export type { BlockedByReason, HeadroomDetail, HeadroomPage, HeadroomRow, Margin
 export type { ChannelState };
 
 export type Runway = { days: number | null; noSpend: boolean; level: Level; text: string; failed: boolean; fixed?: boolean };
-// 带 ↗ 的动作链接要的地址（到你的站、上游网站）：接口给，没有就不放链接
-export type SiteLinks = { own: string | null; upstreams: Record<string, { baseUrl: string; type: string } | null> };
-export type ModelsPage = { asOf: number; tz: string; rate: number; critDays: number; headroom: HeadroomPage & { links?: SiteLinks | null } };
+// headroom 是 null：这一次没算出来（没有数据库、读库出错），页面当「读不到」处理
+export type ModelsPage = { asOf: number; tz: string; rate: number; critDays: number; headroom: HeadroomPage | null };
+export type SiteLinks = HeadroomPage["links"];
+// 页面里 headroom 一定有（没有就整页写「读不到」，不画下面这些）
+export type LoadedPage = ModelsPage & { headroom: HeadroomPage };
 // 抽屉里这几样还是第 0 步的读法：渠道的停用原因（stopReason、stopTime）、找货帮手（价格、在不在供）
 export type DetailChannel = { channelId: number; name: string; state: ChannelState; stopReason?: string | null; stopTime?: number | null };
 export type Price = { kind: "ratio" | "perCall"; value: number };
@@ -21,7 +23,7 @@ export type FinderRow = {
 };
 export type ModelDetail = {
   name: string; rate: number; tz: string; asOf: number; critDays: number;
-  headroom: HeadroomDetail;
+  headroom: HeadroomDetail | null;
   channels: DetailChannel[];
   finder: FinderRow[];
 };
@@ -69,11 +71,21 @@ export const growthText = (growth: number | null | undefined) => {
   return COPY.growth(`${pct > 0 ? "+" : pct < 0 ? "−" : ""}${Math.abs(pct)}%`);
 };
 
+// 错误日志和整站消费日志现在是什么情形：写几处字都看它。
+// switchOff 没开错误日志；noRecords 开着但读到现在一条也没有（能给还是「至少 X」，余量、没买到、被挡写「—」）；accumulating 不够 7 天；ok 都有。consumeLog 是整站消费日志（「算应付成本」）
+export type LogCtx = { mode: "ok" | "accumulating" | "switchOff" | "noRecords"; consumeLog: boolean };
+export const logCtxOf = (h: HeadroomPage): LogCtx => ({
+  mode: h.state === "noErrorLog" ? (h.noErrorLogReason === "noRecords" ? "noRecords" : "switchOff") : h.state,
+  consumeLog: h.consumeLog,
+});
+// 没有错误日志可用（拿不到被挡和没买到）：没开、或开着但一条也没有
+export const noErrorLogIn = (ctx: LogCtx) => ctx.mode === "switchOff" || ctx.mode === "noRecords";
+
 // 余量或缺口那一格：short 红菱形加「至少缺」，thin 墨色「余」，ok 灰色「余」，上限没测到、数据积累中、要开错误日志各写各的
 export type MarginView = { tone: "short" | "thin" | "ok" | "muted"; text: string };
-export function marginView(row: Pick<HeadroomRow, "margin" | "supply">, state: HeadroomPage["state"]): MarginView {
+export function marginView(row: Pick<HeadroomRow, "margin" | "supply">, ctx: LogCtx): MarginView {
   const { margin, supply } = row;
-  if (state === "noErrorLog") return { tone: "muted", text: COPY.margin.needLog };
+  if (ctx.mode === "switchOff") return { tone: "muted", text: COPY.margin.needLog };
   if (supply.kind === "accumulating") return { tone: "muted", text: COPY.accumulating };
   if (margin.status === "unknown") return { tone: "muted", text: COPY.margin.unknown };
   if (margin.status === "none" || margin.value == null) return { tone: "muted", text: COPY.dash };
@@ -87,17 +99,19 @@ export const hoursLeftText = (hours: number | null | undefined) => (hours == nul
 
 // 建议：一句动作加一行理由。没开错误日志、数据积累中时只给钱的（撑不到今晚的先充值），别的写「上限还没测到」
 export type RecoView = { title: string; why: string; kind: Reco["kind"] };
-export function recoView(row: Pick<HeadroomRow, "reco" | "supply" | "margin">, state: HeadroomPage["state"]): RecoView {
+export function recoView(row: Pick<HeadroomRow, "reco" | "supply" | "margin">, ctx: LogCtx): RecoView {
   const reco = row.reco;
   const R = COPY.reco;
   const name = (value: string | null) => value ?? R.thatUpstream;
   if (reco.kind === "topup") return { kind: "topup", title: R.topup(name(reco.name)), why: R.topupWhy(hoursLeftText(reco.hoursLeft)) };
   const unmeasured = (): RecoView => ({
     kind: "unmeasured", title: R.unmeasured,
-    why: state === "noErrorLog" ? R.unmeasuredNeedLog
-      : row.supply.kind === "atLeast" && row.supply.value != null ? R.unmeasuredAtLeast(approx(row.supply.value)) : R.unmeasuredAccumulating,
+    why: ctx.mode === "switchOff" ? R.unmeasuredNeedLog
+      : row.supply.kind === "atLeast" && row.supply.value != null ? R.unmeasuredAtLeast(approx(row.supply.value))
+        : !ctx.consumeLog ? R.unmeasuredNeedConsume
+          : ctx.mode === "noRecords" ? R.unmeasuredNoRecords : R.unmeasuredAccumulating,
   });
-  if (state !== "ok") return unmeasured();
+  if (ctx.mode !== "ok") return unmeasured();
   switch (reco.kind) {
     case "switch": return { kind: "switch", title: R.switch(name(reco.name)), why: R.switchWhy(reco.keys) };
     case "addKeys": return { kind: "addKeys", title: R.addKeys(reco.n, name(reco.name)), why: R.addKeysWhy(approx(reco.perKey)) };
@@ -109,16 +123,17 @@ export function recoView(row: Pick<HeadroomRow, "reco" | "supply" | "margin">, s
 
 // 顶上三个数
 export type Kpi = { key: "willShort" | "notBought" | "topup"; title: string; value: string; sub: string; lead?: { kind: "model" | "upstream"; id: string; name: string } | null; subAfter?: string; extra?: string; more?: string | null };
-export function kpisOf(page: ModelsPage): Kpi[] {
-  const { headroom } = page, { kpis } = headroom, rate = page.rate;
+export function kpisOf(page: ModelsPage, headroom: HeadroomPage): Kpi[] {
+  const { kpis } = headroom, rate = page.rate;
+  const ctx = logCtxOf(headroom), noLogSub = ctx.mode === "noRecords" ? COPY.kpi.noRecords : COPY.kpi.needLog;
   const willShort: Kpi = !kpis.willShort
-    ? { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.dash, sub: COPY.kpi.needLog }
+    ? { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.dash, sub: noLogSub }
     : kpis.willShort.worst && kpis.willShort.count > 0
       ? { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.models(kpis.willShort.count), sub: "", lead: { kind: "model", id: kpis.willShort.worst.name, name: kpis.willShort.worst.name }, subAfter: COPY.kpi.willShortWorst(approx(kpis.willShort.worst.gap), peakText(kpis.willShort.worst.peak)) }
       : { key: "willShort", title: COPY.kpi.willShort, value: COPY.kpi.models(0), sub: COPY.kpi.willShortNone };
   const nb = kpis.notBought;
   const notBought: Kpi = !nb
-    ? { key: "notBought", title: COPY.kpi.notBought, value: COPY.kpi.dash, sub: COPY.kpi.needLog }
+    ? { key: "notBought", title: COPY.kpi.notBought, value: COPY.kpi.dash, sub: noLogSub }
     : {
       key: "notBought", title: COPY.kpi.notBought, value: COPY.kpi.notBoughtValue(nb.f24),
       sub: nb.f24 > 0 || nb.blockedRetried > 0
@@ -143,9 +158,9 @@ export function barShape(need: number | null, supply: Quantity | null | undefine
 }
 
 // 上游卡片
-export function upstreamLimitText(item: UpstreamHeadroom, state: HeadroomPage["state"]): string {
+export function upstreamLimitText(item: UpstreamHeadroom, ctx: LogCtx): string {
   const U = COPY.upstream;
-  if (state === "noErrorLog") return U.limitNeedLog;
+  if (ctx.mode === "switchOff") return U.limitNeedLog;
   if (item.limit.kind === "accumulating") return U.limitAccumulating;
   if (item.limit.kind === "unavailable" || item.limit.value == null) return U.limitDash;
   return item.limit.kind === "atLeast" ? U.limitAtLeast(approx(item.limit.value)) : U.limit(approx(item.limit.value));

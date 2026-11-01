@@ -7,15 +7,15 @@ import { RunwayTrack } from "../../components/runway";
 import { COPY } from "./copy";
 import { REASON_COLOR } from "./charts";
 import { HeadroomBar } from "./headroom-bar";
-import { actionHref, approx, upstreamLimitText, upstreamRunway } from "./models-format";
-import type { ModelsPage, UpstreamHeadroom } from "./models-format";
+import { actionHref, approx, logCtxOf, upstreamLimitText, upstreamRunway } from "./models-format";
+import type { LoadedPage, UpstreamHeadroom } from "./models-format";
 
 const SHOWN_REASONS = ["rate_limit", "upstream", "auth_quota"] as const;
 
 export function upstreamDomId(id: string | null) { return `jy-up-${id ?? "unbound"}`; }
 
-function Card({ item, page, onOpenModel }: { item: UpstreamHeadroom; page: ModelsPage; onOpenModel: (name: string) => void }) {
-  const U = COPY.upstream, { headroom, critDays } = page, state = headroom.state;
+function Card({ item, page, onOpenModel }: { item: UpstreamHeadroom; page: LoadedPage; onOpenModel: (name: string) => void }) {
+  const U = COPY.upstream, { headroom, critDays } = page, ctx = logCtxOf(headroom);
   const runway = upstreamRunway(item.hoursLeft, critDays);
   const room = item.room;
   const roomText = item.full ? null : room == null ? null : item.limit.kind === "atLeast" ? U.roomAtLeast(approx(room)) : U.room(approx(room));
@@ -31,8 +31,8 @@ function Card({ item, page, onOpenModel }: { item: UpstreamHeadroom; page: Model
       </div>
       <div className="r2">
         {showUsage && item.limit.value != null
-          ? <>{upstreamLimitText(item, state)} · {U.used(item.peakUsed == null ? COPY.dash : approx(item.peakUsed))}</>
-          : <span className="jy-muted">{upstreamLimitText(item, state)}</span>}
+          ? <>{upstreamLimitText(item, ctx)} · {U.used(item.peakUsed == null ? COPY.dash : approx(item.peakUsed))}</>
+          : <span className="jy-muted">{upstreamLimitText(item, ctx)}</span>}
       </div>
       {showUsage && (
         <div className="r3">
@@ -72,7 +72,7 @@ function Card({ item, page, onOpenModel }: { item: UpstreamHeadroom; page: Model
   );
 }
 
-export function UpstreamCards({ page, onOpenModel }: { page: ModelsPage; onOpenModel: (name: string) => void }) {
+export function UpstreamCards({ page, onOpenModel }: { page: LoadedPage; onOpenModel: (name: string) => void }) {
   const items = page.headroom.upstreams;
   return (
     <Panel
