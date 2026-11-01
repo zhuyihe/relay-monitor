@@ -54,7 +54,9 @@ export const COPY = Object.freeze({
     kpiLabel: "用户消费的四个数",
     metricLabel: "图上看哪个数",
     chartTitle: "每天的用户消费",
-    chartLabel: "每天的用户消费折线图",
+    // 图的标题跟着切换的数走
+    chartTitles: Object.freeze({ cost: "每天的用户消费", users: "每天有消费的用户", fresh: "每天的新用户" }),
+    chartLabels: Object.freeze({ cost: "每天的用户消费折线图", users: "每天有消费的用户折线图", fresh: "每天的新用户折线图" }),
     metrics: Object.freeze({ cost: "消费", users: "有消费的用户", fresh: "新用户" }),
     legendNow: "近 30 天",
     legendPrev: "前 30 天",

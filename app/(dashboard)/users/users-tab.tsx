@@ -86,7 +86,6 @@ export function UsersTab({
     <>
     <Panel
       title={COPY.users.tableTitle}
-      className="jy-users-panel"
       body="flush"
       extra={
         <Input allowClear prefix={<Icon name="search" />} placeholder={COPY.users.search} aria-label={COPY.users.search} value={q} onChange={(event) => setQ(event.target.value)} className="jy-users-search" />
@@ -138,8 +137,6 @@ export function UsersTab({
         )
       ) : (
         <DataTable<UsersRow>
-          scroll
-          tall
           caption={COPY.users.tableTitle}
           rows={rows}
           rowKey={(row) => String(row.id)}

@@ -205,21 +205,22 @@ export function Bars({
 
 // 抽屉：余额变化的线，往上跳的那一下是充值，标一个点；悬停写那一刻的余额
 export function BalanceLine({
-  points, recharges, tz, money, height = 160, label,
+  points, recharges, tz, money, rate, height = 160, label,
 }: {
   points: { t: number; usd: number }[]; recharges: { t: number; usd: number }[];
-  tz: string; money: (usd: number) => string; height?: number; label: string;
+  // money 收美元；rate 是自营站点的汇率：刻度和线都要换成显示的币种，和悬停里的数一个单位
+  tz: string; money: (usd: number) => string; rate: number; height?: number; label: string;
 }) {
   const [ref, w] = useElementWidth();
   const [hover, setHover] = useState<number | null>(null);
   const n = points.length;
   const t0 = points[0]?.t ?? 0, t1 = points[n - 1]?.t ?? 1;
-  const yt = niceTicks(0, Math.max(0, ...points.map((p) => p.usd)), 3);
+  const yt = niceTicks(0, Math.max(0, ...points.map((p) => p.usd * rate)), 3);
   const Lp = 48, Rp = 12, Tp = 10, Bp = 24;
   const pw = Math.max(1, w - Lp - Rp);
   const x = (t: number) => Lp + ((t - t0) / (t1 - t0 || 1)) * pw;
   const y = (v: number) => Tp + (1 - v / yt.hi) * (height - Tp - Bp);
-  const line = points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.usd).toFixed(1)}`).join("");
+  const line = points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.usd * rate).toFixed(1)}`).join("");
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (!w || !n) return;
     const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
@@ -244,8 +245,8 @@ export function BalanceLine({
               const px = x(r.t), anchor = px > w - 150 ? "end" : "start";
               return (
                 <g key={r.t}>
-                  <circle className="hover-dot" r={4.5} cx={px} cy={y(at.usd)} style={{ fill: "var(--jy-s1)" }} />
-                  <text className="end-label" x={anchor === "end" ? px - 8 : px + 8} y={Math.max(Tp + 10, y(at.usd) - 8)} textAnchor={anchor}>{text}</text>
+                  <circle className="hover-dot" r={4.5} cx={px} cy={y(at.usd * rate)} style={{ fill: "var(--jy-s1)" }} />
+                  <text className="end-label" x={anchor === "end" ? px - 8 : px + 8} y={Math.max(Tp + 10, y(at.usd * rate) - 8)} textAnchor={anchor}>{text}</text>
                 </g>
               );
             })}
@@ -254,7 +255,7 @@ export function BalanceLine({
             {hp && (
               <>
                 <line className="cross" x1={x(hp.t)} x2={x(hp.t)} y1={Tp} y2={height - Bp} />
-                <circle className="hover-dot" r={4} cx={x(hp.t)} cy={y(hp.usd)} style={{ fill: "var(--jy-s1)" }} />
+                <circle className="hover-dot" r={4} cx={x(hp.t)} cy={y(hp.usd * rate)} style={{ fill: "var(--jy-s1)" }} />
               </>
             )}
           </svg>

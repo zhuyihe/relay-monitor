@@ -42,8 +42,6 @@
 .jy-users-bigcheck { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; font-size: 13px; color: var(--jy-ink); }
 .jy-users-bigcheck input { width: 16px; height: 16px; margin: 0; accent-color: var(--jy-cobalt); cursor: pointer; }
 .jy-users-search { width: 220px; }
-/* 整页就一个表：高一点（视口高度减去上面的页签、筛选），表头和合计行吸附 */
-.jy-users-panel .jy-table-scroll.jy-my-tall { max-height: max(420px, calc(100vh - 300px)); }
 .jy-panel-body--flush > .jy-table-scroll { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; }
 table.jy-data tbody tr.is-clickable { cursor: pointer; }
 table.jy-data .jy-cell-runway { justify-content: flex-start; }

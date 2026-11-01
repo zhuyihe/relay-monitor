@@ -44,7 +44,7 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
         </dl>
       </Panel>
       <Panel
-        title={COPY.overview.chartTitle}
+        title={COPY.overview.chartTitles[metric]}
         extra={
           <Seg<Metric>
             size="sm"
@@ -73,7 +73,7 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
               asOf={page.asOf}
               height={300}
               hoverOn={page.backfill.done || metric === "fresh"}
-              label={COPY.overview.chartLabel}
+              label={COPY.overview.chartLabels[metric]}
             />
           </>
         )}

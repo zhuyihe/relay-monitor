@@ -99,7 +99,7 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
         <section className="jy-users-chart">
           <div className="jy-chart-sub"><h3>{COPY.drawer.balanceTitle}</h3><span className="jy-caption">{COPY.drawer.balanceSub(balanceDays)}</span></div>
           {detail.balance.length >= 2
-            ? <BalanceLine points={detail.balance} recharges={detail.recharges} tz={tz} money={(usd) => m(usd)} label={COPY.drawer.balanceTitle} />
+            ? <BalanceLine points={detail.balance} recharges={detail.recharges} tz={tz} money={(usd) => m(usd)} rate={rate} label={COPY.drawer.balanceTitle} />
             : <p className="jy-muted">{COPY.drawer.balanceNone}</p>}
         </section>
       </>
