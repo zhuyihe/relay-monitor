@@ -38,8 +38,8 @@ import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
 import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
-import { OwnLogStore } from "./own-log-store.js";
-import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
+import { ERROR_SPEC, OwnLogStore } from "./own-log-store.js";
+import { ERROR_KIND, INGEST, cachedRetrySettings, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
 import { lastSaleAtOf, noteTodayIncome } from "../lib/sale-tracker.js";
@@ -556,11 +556,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   lookbackBudget = null, lookbackTimeMs = null, lookbackDelayMs = 60000 + Math.floor(Math.random() * 4 * 60000),
   // 自营站点整站日志的小时桶（应付成本 V1-a）：测试传内存实现；ownLogIngest: false 关掉整站读（只在测试里）
   ownLogStore = null, ownLogIngest = true,
+  // 自营站点错误日志的计数（模型供需第 1 步，和整站日志同一条流水线）：测试传内存实现；跟着 ownLogIngest 一起关
+  ownErrorStore = null,
   // 减压 PR（总指挥 10-26 定）：没人看「今天」页面的起算点，由调用方注入——生产启动那一处（lib/runtime.js）传 Date.now()，
   // 刚启动、还没有页面来过就从这一刻起算 10 分钟，不然每次重启（watchtower 拉新镜像）都会把「没人看」清零；不传就是 null：
   // 从没有页面来过不算没人看（测试走这条，和以前一样）。重启后要是有人开着页面，页面每 30 秒来一次，马上刷新，不用存库。
   viewerIdleSince = null } = {}) {
   const ownLog = createOwnLogIngest(rt, { store: ownLogStore || (rt._ownLogStore ||= new OwnLogStore(rt.pool)), log: (...args) => console.debug(...args) });
+  const ownErrorLog = createOwnLogIngest(rt, { store: ownErrorStore || (rt._ownErrorStore ||= new OwnLogStore(rt.pool, ERROR_SPEC)), kind: ERROR_KIND, log: (...args) => console.debug(...args) });
   const upstreamPricing = (rt._upstreamPricing ||= createUpstreamPricing(rt));
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
@@ -4406,11 +4409,30 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (justTurnedOn && allSkipChecked) await rt.store?.updateSettings?.({ expectedCostWasOff: false })?.catch?.(() => {});
         await ownLog.pruneIfDue();
       }
+      // 自营站点错误日志的计数（模型供需第 1 步）：设置里「读取错误日志」开着（默认开，只有明确关才关）才读；排在整站消费日志后面读，共用请求额度和断路，
+      // 额度紧、断路时宁可落后也不多读；关→开那一下和消费日志同一个规矩：进度比昨天 0 点还旧就挪到昨天 0 点（关着那段不补）
+      if (ownLogIngest) {
+        const errorsOn = rt.store?.settings?.ownErrorLog !== false;
+        const errorsWasOff = rt.store?.settings?.ownErrorLogWasOff === true;
+        if (!errorsOn && !errorsWasOff) await rt.store?.updateSettings?.({ ownErrorLogWasOff: true })?.catch?.(() => {});
+        if (errorsOn) {
+          const ownStation = rt.store?.list?.().find((station) => station.isOwn && station.type === "newapi" && !station.archivedAt);
+          if (ownStation) {
+            const result = await ownErrorLog.ingestOnce(ownStation, { justTurnedOn: errorsWasOff }).catch((error) => { console.error("自营站点错误日志读取失败:", error?.message || String(error)); return null; });
+            if (errorsWasOff && result?.skipChecked) await rt.store?.updateSettings?.({ ownErrorLogWasOff: false })?.catch?.(() => {});
+          }
+          await ownErrorLog.pruneIfDue();
+        }
+      }
     },
     // 应付成本 V1-a：整站日志读取和上游价目表，给 V1-b 的结账和只读试算用
     ingestOwnLog: (own) => ownLog.ingestOnce(own),
     backfillExpectedCost,
     ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
+    // 错误日志的小时计数（模型供需用，server/own-error-supply.js 在它上面汇总）
+    ownErrorBuckets: (stationId, fromSlotMs, toSlotMs, options) => (ownErrorStore || rt._ownErrorStore).listBuckets(stationId, fromSlotMs, toSlotMs, options),
+    // 站点的重试设置（错误日志读之前读到的，1 小时一读；没读到过是 null）：queryErrorSupply 的 retry 参数
+    ownRetrySettings: (own) => cachedRetrySettings(rt, own),
     upstreamPricing: (station) => upstreamPricing.pricingFor(station),
     // 自营站点记不记收费记录的最近一次读取结果（{ state: on | off | denied | unavailable, reason? }），没读过是 null；设置页用
     consumeLogStatus: consumeLogStatusOf,

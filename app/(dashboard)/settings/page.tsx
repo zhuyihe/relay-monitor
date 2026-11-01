@@ -84,6 +84,7 @@ export default function SettingsPage() {
     interval: `${uid}-interval`,
     expectedCost: `${uid}-expected-cost`,
     userOps: `${uid}-user-ops`,
+    errorLog: `${uid}-error-log`,
     retention: `${uid}-retention`,
     username: `${uid}-username`,
     pwOld: `${uid}-pw-old`,
@@ -149,6 +150,13 @@ export default function SettingsPage() {
     label: COPY.userOps,
     save: async (v) => (await putSettings({ userOpsEnabled: v })).userOpsEnabled !== false,
   });
+  // 「读取错误日志」开关：一改就存；关了模型供需就不再更新，也不再对自营站点读错误日志
+  const errorLog = useAutoSave<boolean>(true, {
+    queue,
+    label: COPY.errorLog,
+    save: async (v) => (await putSettings({ ownErrorLog: v })).ownErrorLog !== false,
+  });
+  const [errorLogQuiet, setErrorLogQuiet] = useState(false);
   const [ownLogCoveredTo, setOwnLogCoveredTo] = useState<number | null>(null);
   // 保留天数：缩短时先预览会删多少，再由确认框明确同意不可恢复的删除；取消就回到原来的天数
   const retention = useAutoSave<number | null>(null, {
@@ -172,6 +180,8 @@ export default function SettingsPage() {
       interval.sync(result.settings.refreshIntervalSec);
       expectedCost.sync(result.settings.expectedCost !== false);
       userOps.sync(result.settings.userOpsEnabled !== false);
+      errorLog.sync(result.settings.ownErrorLog !== false);
+      setErrorLogQuiet(result.errorLogQuiet === true);
       setOwnLogCoveredTo(Number.isFinite(Number(result.ownLog?.coveredToMs)) ? Number(result.ownLog.coveredToMs) : null);
       retention.sync(days);
       setCustomRetention((custom) => custom || !isPreset(days));
@@ -480,7 +490,7 @@ export default function SettingsPage() {
                 </>
               ) : (
                 <>
-                  <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving || expectedCost.saving || userOps.saving} dirty={interval.dirty || expectedCost.dirty || userOps.dirty} at={Math.max(interval.savedAt, expectedCost.savedAt, userOps.savedAt)} tz={tz} failures={[interval.failure, expectedCost.failure, userOps.failure]} />}>
+                  <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving || expectedCost.saving || userOps.saving || errorLog.saving} dirty={interval.dirty || expectedCost.dirty || userOps.dirty || errorLog.dirty} at={Math.max(interval.savedAt, expectedCost.savedAt, userOps.savedAt, errorLog.savedAt)} tz={tz} failures={[interval.failure, expectedCost.failure, userOps.failure, errorLog.failure]} />}>
                     <div className="jy-field jy-settings-field">
                       <label htmlFor={ids.interval}>{COPY.interval}</label>
                       <InputNumber
@@ -535,6 +545,22 @@ export default function SettingsPage() {
                         />
                       </div>
                       <span className="jy-caption" id={`${ids.userOps}-desc`}>{COPY.userOpsHint}</span>
+                    </div>
+                    <div className="jy-field jy-settings-field">
+                      <div className="jy-settings-switch">
+                        <label htmlFor={ids.errorLog}>{COPY.errorLog}</label>
+                        <Switch
+                          id={ids.errorLog}
+                          checked={errorLog.value}
+                          onChange={(checked) => {
+                            errorLog.setValue(checked);
+                            void errorLog.commit(checked);
+                          }}
+                          aria-describedby={`${ids.errorLog}-desc`}
+                        />
+                      </div>
+                      <span className="jy-caption" id={`${ids.errorLog}-desc`}>{COPY.errorLogHint}</span>
+                      {errorLog.value && errorLogQuiet ? <span className="jy-caption">{COPY.errorLogQuiet}</span> : null}
                     </div>
                     <p className="jy-caption">
                       {COPY.lowLineMovedBefore}

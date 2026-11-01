@@ -39,6 +39,25 @@ test("GET /api/settings 带 ownLog：进度两头、落后多少、哪几天没�
   assert.equal(await read(runtime({ cursor: null })), null);
 });
 
+test("GET /api/settings 带 errorLogQuiet：连续 24 小时一条错误都没读到才是 true；开关关着、没有自营站点、没有进度、有近 24 小时的数都是 false", async (t) => {
+  t.mock.method(Date, "now", () => NOW);
+  const { GET } = await settingsRoute();
+  const H = 3600000;
+  const read = async ({ own = true, off = false, cursor = { coveredFromMs: NOW - 30 * H, coveredToMs: NOW - 5 * 60000 }, latest = null } = {}) => {
+    const rt = runtime({ own });
+    rt._ownErrorStore = { getCursor: async () => cursor, latestSlot: async () => latest };
+    if (off) rt.store.settings.ownErrorLog = false;
+    return (await (await GET(new Request("http://x/api/settings"), rt)).json()).errorLogQuiet;
+  };
+  assert.equal(await read(), true, "读了 30 小时、一个有数的小时都没有");
+  assert.equal(await read({ cursor: { coveredFromMs: NOW - 20 * H, coveredToMs: NOW - 5 * 60000 } }), false, "才读了 20 小时：还不到 24 小时");
+  assert.equal(await read({ latest: NOW - 3 * H }), false, "3 小时前还有数");
+  assert.equal(await read({ latest: NOW - 40 * H }), true, "最近一个有数的小时是 40 小时前");
+  assert.equal(await read({ own: false }), false);
+  assert.equal(await read({ off: true }), false, "开关关着不提示");
+  assert.equal(await read({ cursor: null }), false);
+});
+
 test("PUT /api/settings 只带 expectedCost：只认真正的 true / false，别的值一律当关；不带就不动", async () => {
   const { PUT } = await settingsRoute();
   const rt = runtime();
@@ -48,4 +67,14 @@ test("PUT /api/settings 只带 expectedCost：只认真正的 true / false，别
   assert.equal((await (await put({ expectedCost: "yes" })).json()).settings.expectedCost, false, "字符串不算开");
   await put({ expectedCost: false });
   assert.equal((await (await put({ refreshIntervalSec: 90 })).json()).settings.expectedCost, false, "不带 expectedCost 就不动");
+});
+
+test("PUT /api/settings 带 ownErrorLog（「读取错误日志」，模型供需）：只有明确 false 才关，别的值当开；不带就不动", async () => {
+  const { PUT } = await settingsRoute();
+  const rt = runtime();
+  const put = (body) => PUT(new Request("http://x/api/settings", { method: "PUT", body: JSON.stringify(body) }), rt);
+  assert.equal((await (await put({ ownErrorLog: false })).json()).settings.ownErrorLog, false);
+  assert.equal((await (await put({ refreshIntervalSec: 90 })).json()).settings.ownErrorLog, false, "不带就不动");
+  assert.equal((await (await put({ ownErrorLog: "no" })).json()).settings.ownErrorLog, true, "只认真正的 false 才关");
+  assert.equal((await (await put({ ownErrorLog: true })).json()).settings.ownErrorLog, true);
 });

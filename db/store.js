@@ -57,6 +57,9 @@ const DEFAULT_SETTINGS = {
   expectedCostWasOff: false,
   // 「用户运营数据采集」总开关（server/user-ops.js）：关了就一个请求都不发给自营站点。默认开
   userOpsEnabled: true,
+  // 「读取错误日志」总开关（模型供需，默认开，只有明确关才关）和「上一次看到开关是关着的」内部标记（关→开时进度挪到昨天 0 点，同「算应付成本」）
+  ownErrorLog: true,
+  ownErrorLogWasOff: false,
 };
 
 function uid(prefix = "st") {
@@ -441,6 +444,7 @@ export class Store {
         };
       }
       if ("userOpsEnabled" in patch) patch = { ...patch, userOpsEnabled: patch.userOpsEnabled !== false }; // 只有明确关（false）才关，别的值当开
+      if ("ownErrorLog" in patch) patch = { ...patch, ownErrorLog: patch.ownErrorLog !== false }; // 同上
       if ("expectedCost" in patch) patch = { ...patch, expectedCost: patch.expectedCost === true }; // 只认真正的 true / false，别的值一律当关（审核 #123 第三轮 低-1）
       if ("historyRetentionDays" in patch) {
         patch = {

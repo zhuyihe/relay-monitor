@@ -721,6 +721,17 @@ test("accountUse（K2c）：上游账号是不是只给自营站点的渠道用�
   assert.equal(store.get(fresh.id).accountUse, null, "不认识的值当没回答，不抛错");
 });
 
+test("「读取错误日志」总开关 settings.ownErrorLog（模型供需）：默认开；只有明确关（false）才关，别的值当开；「上一次关着」的内部标记默认 false", async () => {
+  const store = await new Store(fakePool([])).load();
+  assert.deepEqual([store.settings.ownErrorLog, store.settings.ownErrorLogWasOff], [true, false]);
+  await store.updateSettings({ ownErrorLog: false });
+  assert.equal(store.settings.ownErrorLog, false);
+  await store.updateSettings({ ownErrorLog: "no" });
+  assert.equal(store.settings.ownErrorLog, true, "只认真正的 false 才关，别的值当开");
+  await store.updateSettings({ ownErrorLogWasOff: true });
+  assert.equal(store.settings.ownErrorLogWasOff, true);
+});
+
 test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认开；只有明确关（false）才关；规则「重点用户余额用完」「重点用户快用完」默认开，通知方式只接受存在的 id，删通知方式时一起清掉", async () => {
   const store = await new Store(fakePool([])).load();
   assert.equal(store.settings.userOpsEnabled, true);
