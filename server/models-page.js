@@ -13,6 +13,7 @@ import { dayGrid } from "../lib/user-ops-view.js";
 import { createReconciliationModule } from "./reconciliation.js";
 import { createChannelProfitModule } from "./channel-profit.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
+import { readHeadroom } from "./models-headroom.js";
 import { readOwnRows } from "./own-raw-rows.js";
 import { ownChannelList } from "./own-helpers.js";
 import { USER_OPS } from "./user-ops.js";
@@ -37,7 +38,7 @@ export function runwayOf(rt, station) {
 // 上游运行时的样子（页面和抽屉都用）：Map(id → { id, name, type, runway })
 function upstreamsOf(rt) {
   return new Map(rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && !station.archivedAt)
-    .map((station) => [String(station.id), { id: String(station.id), name: stationDisplayName(station), type: station.type, runway: runwayOf(rt, station) }]));
+    .map((station) => [String(station.id), { id: String(station.id), name: stationDisplayName(station), type: station.type, baseUrl: String(station.baseUrl || "").replace(/\/+$/, "") || null, runway: runwayOf(rt, station) }]));
 }
 
 // 用户运营页认得的用户（用户名 → id），「谁在用」点名字能打开那边的用户抽屉；那边没有数据时没有链接
@@ -77,11 +78,14 @@ async function read(rt, own, now, tz, rate) {
     now, tz, modelRows: rows.value, flowRows: flow.status === "fulfilled" ? flow.value : null, channels: channels.value, ruleOf, upstreams,
     perf: perf.status === "fulfilled" ? new Map(perf.value.models.map((item) => [item.model, item.successRate])) : null, userIds: userIdsOf(rt),
   });
+  // 高峰余量（模型供需第 1 步）：只读库里已有的计数和上面读到的数；读不到（没有数据库、读库出错）是 null，老字段照常
+  const headroom = await readHeadroom(rt, { own, now, tz, modelRows: rows.value, channels: channels.value, rules: rules.status === "fulfilled" ? rules.value.rules : [], upstreams,
+    weekUsd: new Map(view.rows.map((row) => [row.name, row.week])), small: view.small });
   // 页面不用的判断中间量（flags、lost）不放进响应：一百个模型能少 1/4 的字节
-  const payload = { asOf: now, tz, rate, critDays: etaWindowDays(rt.store.rules), rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable, perfEmpty: view.perfEmpty };
+  const payload = { asOf: now, tz, rate, critDays: etaWindowDays(rt.store.rules), rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable, perfEmpty: view.perfEmpty, headroom: headroom?.page ?? null };
   // 成功率被额度、断路拦下（不是读失败）：这一页先给，但不缓存，额度回来再开就读
   const blocked = perf.status === "rejected" && perf.reason?.code === "BUSY" || flow.status === "rejected" && flow.reason?.code === "BUSY";
-  return { payload, details: view.details, upstreams, rules: rules.status === "fulfilled" ? rules.value.rules : [], modelRows: rows.value, grid: view.grid, at: now, blocked };
+  return { payload, headroom, details: view.details, upstreams, rules: rules.status === "fulfilled" ? rules.value.rules : [], modelRows: rows.value, grid: view.grid, at: now, blocked };
 }
 
 // 整页（带抽屉要的）：10 分钟内不重读；同一时间来几个请求只读一次；读失败的 2 分钟内不重读（直接给同一个错），被额度、断路拦下的不记
@@ -185,6 +189,7 @@ export async function modelDetail(rt, name, options = {}) {
     successLine: series ? dailySuccessLine({ now, tz: ctx.payload.tz, groups: series.groups }) : null,
     channels: detail.channels, users: detail.users, finder,
     flowReadable: ctx.payload.flowReadable,
+    headroom: ctx.headroom?.detailOf(name) ?? null,
   };
 }
 

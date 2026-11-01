@@ -1,7 +1,8 @@
 "use client";
-// 模型供需：哪些模型缺货、每天少收多少、去哪找货（design 模型供需 v1）。
-// 数据来自 /api/models（只在有人打开这一页时读自营站点，读完缓存 10 分钟，页面不自己轮询）；顶栏没有时间范围：近 7 天、近 24 小时、近 30 天是固定的口径。
-// 排法和打开的模型都写进地址栏（?sort=&dir=&model=），刷新、分享链接、后退键都回到同一屏；模型名里有「/」也照写，不放进路径。
+// 模型供需：今晚高峰哪些模型的货不够、还差多少、补几把 Key、先救谁（design 模型供需 v4）。
+// 数据来自 /api/models 的 headroom（只在有人打开这一页时读，读完缓存 10 分钟，页面不自己轮询）；顶栏没有时间范围：近 7 天、近 24 小时是固定的口径。
+// 电脑上一屏放下、页面本身不滚：顶上三个数，下面左边「今晚高峰的余量」（9 列）、右边「按上游看」（3 列），两块各自在框里滚、表头固定。
+// 打开的模型写进地址栏（?model=），刷新、分享链接、后退键都回到同一屏；模型名里有「/」也照写，不放进路径。
 import "../../styles/pages/models.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -13,21 +14,54 @@ import { describeError } from "../../../lib/error-copy";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
 import { Sym } from "../../components/icons";
-import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { useShellPage } from "../../components/shell-context";
 import { useUrlParams } from "../../components/use-url-state";
 import { COPY } from "./copy";
 import { ModelDrawer } from "./model-drawer";
-import { MY_LINK, SORT_KEYS, howNumbers, kpisOf, parseSort } from "./models-format";
-import type { ModelsPage, Sort } from "./models-format";
+import { kpisOf } from "./models-format";
+import type { LoadedPage, ModelsPage } from "./models-format";
 import { ModelsTable } from "./models-table";
+import { UpstreamCards, upstreamDomId } from "./upstream-cards";
 
 const SETUP = workflowAction("setup_own_station");
 
+// 拿不到数据的两种情况和没开整站消费日志，页顶一条提示条（v4 §6）
+function StateBanners({ page }: { page: LoadedPage }) {
+  const { state, noErrorLogReason, errorLog, consumeLog } = page.headroom, B = COPY.banner;
+  const days = errorLog.coveredDays == null ? "" : errorLog.coveredDays < 1 ? B.daysUnder1 : B.days(Math.floor(errorLog.coveredDays));
+  return (
+    <>
+      {state === "noErrorLog" && noErrorLogReason !== "noRecords" && (
+        <div className="jy-banner" role="status">
+          <Sym kind="warn" />
+          <div className="jy-banner__body"><span><b>{B.switchOffLead}</b> {B.switchOff}</span></div>
+        </div>
+      )}
+      {state === "noErrorLog" && noErrorLogReason === "noRecords" && (
+        <div className="jy-banner jy-banner--info" role="status">
+          <Sym kind="info" />
+          <div className="jy-banner__body"><span>{B.noRecordsLead} {B.noRecords}</span></div>
+        </div>
+      )}
+      {state === "accumulating" && (
+        <div className="jy-banner jy-banner--info" role="status">
+          <span className="jy-hspin" aria-hidden="true" />
+          <div className="jy-banner__body"><span><b>{B.accumulatingLead(days, errorLog.needDays)}</b> {B.accumulating(errorLog.daysLeft ?? errorLog.needDays)}</span></div>
+        </div>
+      )}
+      {!consumeLog && (
+        <div className="jy-banner jy-banner--info" role="status">
+          <Sym kind="info" />
+          <div className="jy-banner__body"><span>{B.noConsumeLead}，<Link className="jy-link" href="/settings">{B.noConsumeLink}</Link></span></div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function ModelsPageRoute() {
   const [params, setParams] = useUrlParams();
-  const sort = parseSort(params.get("sort"), params.get("dir"));
   const model = params.get("model") || null;
   const [page, setPage] = useState<ModelsPage | null>(null);
   const [err, setErr] = useState<Error | null>(null);
@@ -54,9 +88,14 @@ export default function ModelsPageRoute() {
   // 「数据截至」写这份数读的时刻（服务端 10 分钟内不重读，页面上写的和服务端一致）
   useShellPage({ onRefresh, asOf: unset ? null : page?.asOf ?? null, tz: page?.tz });
 
-  const onSort = (next: Sort) => setParams({ sort: next ? next.key : null, dir: next ? next.dir : null });
   const open = (name: string) => setParams({ model: name });
   const close = () => setParams({ model: null });
+  // 顶上「快没钱的上游」点名字：滚到右边那张卡片
+  const toUpstream = (id: string) => {
+    const el = document.getElementById(upstreamDomId(id));
+    el?.scrollIntoView({ block: "nearest" });
+    el?.focus({ preventScroll: true });
+  };
 
   if (unset) {
     return (
@@ -89,45 +128,46 @@ export default function ModelsPageRoute() {
     );
   }
 
-  const kpis = kpisOf(page);
-  const how = COPY.how, nums = howNumbers(page.rate);
+  // 高峰余量这一次没算出来（数据量太大、没有数据库或读库出错）：在放高峰余量的地方写一句，不画下面这些
+  if (!page.headroom) {
+    return (
+      <div className="jy-page">
+        {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
+        <Panel label={NAV_LABELS.models}>
+          <p className="jy-models-empty jy-muted" role="status">{COPY.headroomNull}</p>
+        </Panel>
+      </div>
+    );
+  }
+  const loaded = page as LoadedPage;
+  const kpis = kpisOf(loaded, loaded.headroom);
   return (
     <div className="jy-page jy-models-page">
       {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
-      <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
-      {page.perfEmpty && (
-        <div className="jy-banner" role="status">
-          <Sym kind="warn" />
-          <div className="jy-banner__body"><span>{COPY.perfEmpty}</span></div>
-        </div>
-      )}
-      <Panel label={COPY.kpiLabel}>
+      <StateBanners page={loaded} />
+      <section className="jy-models-kpis-wrap" aria-label={COPY.kpiLabel}>
         <dl className="jy-kpis jy-models-kpis">
           {kpis.map((kpi) => (
             <div key={kpi.key}>
               <dt>{kpi.title}</dt>
               <dd className="jy-kpi-figure">{kpi.value}</dd>
               <dd className="jy-caption">
-                {kpi.model && <><button type="button" className="jy-link jy-models-linkbtn" onClick={() => open(kpi.model!)}>{kpi.model}</button>{kpi.more ? ` ${kpi.more}` : ""}：</>}
-                {kpi.sub}
+                {kpi.lead && (kpi.lead.kind === "model"
+                  ? <>{COPY.kpi.worstPrefix}<button type="button" className="jy-link jy-models-linkbtn" onClick={() => open(kpi.lead!.id)}>{kpi.lead.name}</button>{kpi.more ? ` ${kpi.more}` : ""} </>
+                  : <><button type="button" className="jy-link jy-models-linkbtn" onClick={() => toUpstream(kpi.lead!.id)}>{kpi.lead.name}</button>{kpi.more ? ` ${kpi.more}` : ""}</>)}
+                {kpi.sub}{kpi.subAfter}
+                {kpi.extra && <>。碰到 <b>{kpi.extra}</b></>}
               </dd>
             </div>
           ))}
         </dl>
-      </Panel>
-      <ModelsTable page={page} sort={sort} onSort={onSort} onOpen={open} />
-      <More label={how.title}>
-        <ul className="jy-models-how">
-          <li><b>{how.successTitle}</b>{how.success(nums.minRequests)}</li>
-          <li><b>{how.blindTitle}</b>{how.blind}</li>
-          <li><b>{how.lostTitle}</b>{how.lost(nums.failPct)}</li>
-          <li><b>{how.otherTitle}</b>{how.other(nums.soonDays, nums.ratio, nums.minPrev)}</li>
-          <li><b>{how.supplyTitle}</b>{how.supply}</li>
-          <li><b>{how.smallTitle}</b>{how.small(nums.minShare)}</li>
-        </ul>
-      </More>
-      <p className="jy-models-foot"><Link className="jy-link" href={MY_LINK}>{COPY.toMy}</Link></p>
-      <ModelDrawer name={model} page={page} onClose={close} />
+        <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
+      </section>
+      <div className="jy-models-grid">
+        <ModelsTable page={loaded} onOpen={open} />
+        <UpstreamCards page={loaded} onOpenModel={open} />
+      </div>
+      <ModelDrawer name={model} page={loaded} onClose={close} />
     </div>
   );
 }

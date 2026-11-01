@@ -1,81 +1,122 @@
 /* 模型供需：只放本页独有的细节，布局和组件样式都在 jy.css */
 .jy-models-note { margin: 0; text-align: right; }
+.jy-models-kpis { grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .jy-models-kpis dd.jy-caption { margin: 0; }
+.jy-models-kpis-wrap { display: flex; flex-direction: column; gap: 6px; }
 .jy-models-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
 .jy-models-linkbtn:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
+.jy-hspin { flex: none; width: 14px; height: 14px; margin-top: 3px; border: 2px solid var(--jy-ink-3); border-top-color: transparent; border-radius: 50%; animation: jy-spin .9s linear infinite; }
 
-/* ─── 表 ─── */
-.jy-models-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; }
-.jy-models-name .jy-models-linkbtn { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jy-models-week { font-weight: 600; font-variant-numeric: tabular-nums; }
-/* 货源、主要上游那几格一行放得下就不折行 */
-.jy-models-nowrap { white-space: nowrap; }
-/* 「新」：灰框白底小标，不填色 */
-.jy-models-new {
-  display: inline-block; flex: none; padding: 0 5px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r1);
-  background: var(--jy-sheet); color: var(--jy-ink-2); font-size: 11px; line-height: 16px; font-weight: 400; white-space: nowrap;
-}
-.jy-models-tags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
-.jy-models-search { width: 220px; }
+/* ─── 主表 ─── */
+.jy-models-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.jy-models-search { width: 150px; }
 .jy-models-empty { margin: 0; padding: 32px 16px; text-align: center; }
+.jy-headroom-scroll { overflow: auto; border-top: 1px solid var(--jy-rule); }
+table.jy-models-headroom { table-layout: fixed; }
+table.jy-models-headroom th { vertical-align: bottom; z-index: 1; }
+table.jy-models-headroom td { vertical-align: top; overflow: hidden; }
+table.jy-models-headroom tbody tr.is-clickable { cursor: pointer; }
+.jy-hth { white-space: nowrap; }
+/* 单位写在表头第二行，格子里只写数；墨·次色，不用更淡的灰（对比度要过 4.5:1） */
+.jy-hunit { display: block; font-weight: 400; font-size: 11px; line-height: 16px; color: var(--jy-ink-2); }
+.jy-hnowrap { white-space: nowrap; font-size: 13px; }
+.jy-hkeyusers { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 13px; }
+.jy-hmargin { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.jy-hmargin-text { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.jy-hmargin-text.is-short { color: var(--jy-crit-ink); font-weight: 600; }
+.jy-hmargin-text.is-thin { color: var(--jy-ink); }
+.jy-hmargin-text.is-ok, .jy-hmargin-text.is-muted { color: var(--jy-ink-2); font-size: 13px; }
+.jy-hmargin-text .jy-sym { width: 11px; height: 11px; }
+/* 余量条（子弹图）：轨道、灰色填充（要）、竖线（能给）、红色超出段（缺口） */
+.jy-hbar { position: relative; display: block; width: 100%; max-width: 120px; height: 6px; border-radius: 3px; background: var(--jy-sunken); }
+.jy-hbar i { position: absolute; top: 0; bottom: 0; display: block; }
+.jy-hbar .fill { left: 0; border-radius: 3px 0 0 3px; background: var(--jy-ink-3); }
+.jy-hbar .over { background: var(--jy-crit); }
+.jy-hbar .line { top: -2px; bottom: -2px; width: 0; border-left: 2px solid var(--jy-ink); }
+.jy-hbar .line.is-dashed { border-left: 2px dashed var(--jy-ink); }
+.jy-models-restrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--jy-ink-2); }
+.jy-models-restrow > span { flex: 1; min-width: 0; }
+.jy-models-rest { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
+.jy-models-rest:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
+.jy-models-howmore { margin-top: 6px; }
+.jy-models-howbox { max-height: 260px; overflow: auto; }
+.jy-models-panel .jy-panel-foot { display: flex; flex-direction: column; gap: 4px; padding: 10px 16px; border-top: 1px solid var(--jy-rule); margin-top: 0; }
+/* 被自动停用的原因：一行放不下就截短，鼠标放上去（title）看全文 */
+.jy-models-reason { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-models-subcards .jy-models-reason { max-width: 100%; }
 /* 表里的跑道格靠左放（只在这一页的表，别的表的「约 N 天」照旧右对齐） */
 .jy-models-panel table.jy-data .jy-cell-runway, .jy-models-drawer table.jy-data .jy-cell-runway { justify-content: flex-start; }
 .jy-models-panel table.jy-data .jy-cell-runway .v, .jy-models-drawer table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 
-.jy-models-restrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.jy-models-rest { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
-.jy-models-rest:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
-/* 被自动停用的原因：一行放不下就截短，鼠标放上去（title）看全文 */
-.jy-models-reason { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jy-models-subcards .jy-models-reason { max-width: 100%; }
+/* ─── 按上游看 ─── */
+.jy-hcards { list-style: none; margin: 0; padding: 0; }
+.jy-hcard { padding: 12px 16px; border-top: 1px solid var(--jy-rule-soft); outline: none; }
+.jy-hcard:first-child { border-top: 1px solid var(--jy-rule); }
+.jy-hcard:focus-visible { box-shadow: inset var(--jy-focus-ring); }
+.jy-hcard .r1 { display: flex; align-items: center; gap: 8px; }
+.jy-hcard .r1 b { font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+.jy-hcard-runway { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 13px; }
+.jy-hcard .jy-mini-track { width: 48px; }
+.jy-hcard .r2 { margin-top: 6px; font-size: 13px; }
+.jy-hcard .r3 { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.jy-hcard .r3 .jy-hbar { width: 80px; }
+.jy-hcard .r4 { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; }
+.jy-hcard .r5 { margin-top: 4px; }
+.jy-hcard .r6 { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; }
+.jy-hreason { display: inline-flex; align-items: center; gap: 4px; }
+.jy-hreason i, .jy-hlegend i { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.jy-hfull { display: inline-flex; align-items: center; gap: 6px; color: var(--jy-crit-ink); font-size: 12px; }
+.jy-hfull .jy-sym { width: 10px; height: 10px; }
+
+/* 手机：一个模型一张卡片，四行 */
+.jy-models-cards { list-style: none; margin: 0; padding: 0; }
+.jy-models-card {
+  display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 12px 16px; border: 0; border-top: 1px solid var(--jy-rule-soft);
+  background: var(--jy-sheet); font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.jy-models-card:focus-visible { outline: none; box-shadow: inset var(--jy-focus-ring); }
+.jy-models-card .r1 { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.jy-models-cardname { min-width: 0; overflow-wrap: anywhere; }
+.jy-models-card .r2 { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.jy-models-card .r2 .jy-hbar { width: 80px; flex: none; }
+.jy-models-card .r3, .jy-models-card .r4 { display: block; }
+
+/* ─── 怎么算的 ─── */
+.jy-models-how { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-models-how b { font-weight: 600; color: var(--jy-ink); }
+
+/* ─── 抽屉 ─── */
+.jy-models-drawer .ant-drawer-title { flex: 1; min-width: 0; }
+.jy-models-drawer-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.jy-models-drawer-title strong { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.jy-hshort { display: inline-flex; align-items: center; gap: 6px; color: var(--jy-crit-ink); font-size: 13px; font-weight: 600; }
+.jy-hshort .jy-sym { width: 11px; height: 11px; }
+.jy-hshort-figure { color: var(--jy-crit-ink); }
+.jy-models-drawer .ant-drawer-body { display: flex; flex-direction: column; gap: 20px; padding-top: 16px; }
+.jy-models-drawer-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: row; }
+.jy-models-drawer-kpis .jy-kpi-figure { font-size: 18px; line-height: 26px; }
+.jy-models-chart .jy-chart-sub { margin-top: 0; display: flex; align-items: center; gap: 12px; }
+.jy-models-chart .jy-chart-sub .spacer { flex: 1; }
+.jy-hlegend { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--jy-ink-2); }
+.jy-hlegend li { display: inline-flex; align-items: center; gap: 6px; }
+.jy-models-conclusion { margin: 10px 0 0; font-size: 13px; line-height: 20px; color: var(--jy-ink); }
+/* 图里：上限线（测到的实线、没测到的虚线）、高峰框 */
+.jy-hlimit { stroke: var(--jy-ink); stroke-width: 1.5; }
+.jy-hlimit.is-dashed { stroke-dasharray: 5 4; }
+.jy-hlimit-label { fill: var(--jy-ink); font-size: 11px; }
+.jy-hpeak { fill: none; stroke: var(--jy-ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+.jy-hpeak-label { fill: var(--jy-ink-2); font-size: 11px; }
 /* 抽屉里渠道和上游那张表：固定列宽，再长的停用原因也只占一行（省略号），不撑宽「状态」列、不挤掉别的列 */
 .jy-models-drawer table.jy-models-channels { table-layout: fixed; }
 .jy-models-drawer table.jy-models-channels th { white-space: normal; }
 .jy-models-drawer table.jy-models-channels th, .jy-models-drawer table.jy-models-channels td { padding-left: 8px; padding-right: 8px; overflow: hidden; }
 .jy-models-drawer table.jy-models-channels .jy-cell-two { max-width: 100%; }
 .jy-models-drawer table.jy-models-channels .jy-models-reason { max-width: 100%; }
-
-/* 电脑：整页正好一屏——页高 = 视口 − 顶栏 − 内容区上下边距；主表那块占满剩下的高度，在框里自己滚，表头固定。
-   视口太矮时（表不到 220px）退回整页滚。手机照旧整页滚（下面 max-width: 767px 不设高度） */
-@media (min-width: 768px) {
-  .jy-models-page { height: calc(100vh - var(--jy-topbar-h) - 48px); min-height: 520px; gap: 12px; }
-  .jy-models-page > .jy-models-panel { flex: 1 1 0; min-height: 220px; }
-  .jy-models-panel > .jy-panel-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
-  .jy-models-panel .jy-table-scroll { flex: 1 1 0; min-height: 0; max-height: none; border: 0; border-radius: 0; }
-  /* 段标题行也是 th：别吸在顶上盖住表头 */
-  .jy-models-panel table.jy-data tbody tr.jy-data-group th { position: static; }
-  .jy-models-panel > .jy-panel-foot { padding: 8px 24px; border-top: 1px solid var(--jy-rule-soft); }
-}
-
-/* 手机：一个模型一张卡片，三行；段标题在卡片上面 */
-.jy-models-cards { list-style: none; margin: 0; padding: 0; }
-.jy-models-seg { padding: 6px 16px; background: var(--jy-sunken); font-size: 12px; line-height: 18px; font-weight: 500; color: var(--jy-ink-2); border-top: 1px solid var(--jy-rule-soft); }
-.jy-models-card {
-  display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 12px 16px; border: 0; border-top: 1px solid var(--jy-rule-soft);
-  background: var(--jy-sheet); font: inherit; color: inherit; text-align: left; cursor: pointer;
-}
-.jy-models-card:focus-visible { outline: none; box-shadow: inset var(--jy-focus-ring); }
-.jy-models-card .r1, .jy-models-card .r3 { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
-.jy-models-card .r1 .jy-models-name { flex: 1 1 auto; flex-wrap: wrap; }
-.jy-models-card .r2 { display: block; }
-.jy-models-card .jy-mini-track { width: 72px; }
-
-/* ─── 怎么判断的 ─── */
-.jy-models-how { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
-.jy-models-how b { font-weight: 600; color: var(--jy-ink); }
-.jy-models-foot { margin: 0; }
-
-/* ─── 抽屉 ─── */
-.jy-models-drawer .ant-drawer-title { flex: 1; min-width: 0; }
-.jy-models-drawer-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.jy-models-drawer-title strong { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
-.jy-models-drawer .ant-drawer-body { display: flex; flex-direction: column; gap: 20px; padding-top: 16px; }
-.jy-models-drawer-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: row; }
-.jy-models-drawer-kpis .jy-kpi-figure { font-size: 18px; line-height: 26px; }
-.jy-models-chart .jy-chart-sub { margin-top: 0; }
-/* 成功率线上 95% 的判断线：状态红的虚线，旁边有字，不只靠颜色 */
-.jy-models-limit { stroke: var(--jy-crit); stroke-width: 1; stroke-dasharray: 4 3; }
-.jy-models-limit-label { fill: var(--jy-crit-ink); font-size: 11px; }
+/* 找货帮手那张表：同样固定列宽，名字和各格一行放不下就截短，不被挤成一个字一行 */
+.jy-models-drawer table.jy-models-finder { table-layout: fixed; }
+.jy-models-drawer table.jy-models-finder th { white-space: normal; }
+.jy-models-drawer table.jy-models-finder th, .jy-models-drawer table.jy-models-finder td { padding-left: 8px; padding-right: 8px; }
+.jy-models-drawer table.jy-models-finder td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jy-models-off td, .jy-models-subcards .jy-models-off { color: var(--jy-ink-3); }
 /* 手机：抽屉里渠道、找货帮手的卡片，三行 */
 .jy-models-subcards { list-style: none; margin: 0; padding: 0; border: 1px solid var(--jy-rule-soft); border-radius: var(--jy-r2); }
@@ -86,15 +127,31 @@
 .jy-models-subcards .r2 { display: block; }
 .jy-models-finder-note { margin: 8px 0 0; }
 .jy-models-users { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.jy-models-users .line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.jy-models-users .line { display: flex; align-items: baseline; gap: 8px; }
 .jy-models-users .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--jy-ink); }
 .jy-models-users .name.jy-link { color: var(--jy-cobalt); }
-.jy-models-users b { flex: none; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--jy-ink); }
+.jy-models-users b { margin-left: auto; flex: none; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--jy-ink); }
 .jy-models-users .bar { display: block; height: 6px; margin-top: 4px; border-radius: 3px; background: var(--jy-sunken); overflow: hidden; }
-.jy-models-users .bar i { display: block; height: 100%; border-radius: 3px; background: var(--jy-s1); }
-.jy-models-users .bar i.is-gray { background: var(--jy-ink-3); }
+.jy-models-users .bar i { display: block; height: 100%; border-radius: 3px; background: #EB6834; }
+.jy-models-users-others { margin: 10px 0 0; }
+
+/* 电脑：整页正好一屏——页高 = 视口 − 顶栏 − 内容区上下边距；左 9 列右 3 列，两块各自在框里滚、表头固定。
+   视口太矮时（块不到 220px）退回整页滚。手机照旧整页滚（下面 max-width: 767px 不设高度） */
+@media (min-width: 768px) {
+  .jy-models-page { height: calc(100vh - var(--jy-topbar-h) - 48px); min-height: 520px; gap: 12px; }
+  .jy-models-grid { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 9fr) minmax(0, 3fr); gap: 16px; }
+  .jy-models-grid > .jy-panel { min-height: 220px; height: 100%; overflow: hidden; }
+  .jy-models-panel > .jy-headroom-scroll { flex: 1 1 0; min-height: 0; }
+  .jy-models-upstreams > .jy-hcards { flex: 1 1 0; min-height: 0; overflow: auto; }
+  .jy-models-upstreams > .jy-panel-foot { padding: 10px 16px; border-top: 1px solid var(--jy-rule); margin-top: 0; }
+  .jy-models-howbox { max-height: 30vh; }
+  /* 段内的表头第二行、卡片最后一行不被切 */
+}
 
 @media (max-width: 767px) {
+  .jy-models-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-models-kpis > div:nth-child(3) { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
+  .jy-models-grid { display: flex; flex-direction: column; gap: 16px; }
   .jy-models-search { width: 100%; }
   .jy-models-note { text-align: left; }
   .jy-models-drawer-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
