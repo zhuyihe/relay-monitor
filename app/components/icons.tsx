@@ -12,6 +12,14 @@ const PATHS: Record<string, React.ReactNode> = {
       <rect x="9" y="9" width="5" height="5" rx="1" />
     </>
   ),
+  models: (
+    <>
+      <rect x="2" y="2" width="5" height="5" rx="1" />
+      <rect x="9" y="2" width="5" height="5" rx="1" />
+      <rect x="2" y="9" width="5" height="5" rx="1" />
+      <path d="M11.5 9.2v4.6M9.2 11.5h4.6" />
+    </>
+  ),
   stations: (
     <>
       <rect x="2" y="2.5" width="12" height="4.5" rx="1" />

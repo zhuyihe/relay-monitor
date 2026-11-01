@@ -226,6 +226,7 @@ export default function StationsPage() {
   const openChannelsOf = (stationId: string | null) => {
     const target = stations.find((item: any) => String(item.id) === stationId && !item.archivedAt && !item.isOwn);
     if (target) setChannelsOf({ id: target.id, name: stationDisplayName(target), address: hostOf(target.baseUrl) });
+    return !!target;
   };
   const [binding, setBinding] = useState(false);
   // 打开抽屉、小窗口或某一行的「更多」菜单时，列表先不重排（免得点错行），关掉以后再按新顺序排
@@ -322,7 +323,7 @@ export default function StationsPage() {
     setParams({ edit: null, focus: null });
   }, [editParam, loaded, loadingMeta]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // /stations?action=channels&stationId=<id>（运营总览的「去上游资源」）：数据到齐后打开这个上游的渠道抽屉，然后把参数从地址栏去掉
+  // /stations?action=channels&stationId=<id>（运营总览的「去上游资源」）：数据到齐后打开这个上游的渠道抽屉，然后把参数从地址栏去掉；带 &bind=1 时连「绑定渠道」小窗口一起打开
   const actionParam = params.get("action");
   // 「去换 Key」：打开这个上游的渠道抽屉，直接弹出这个渠道的「换 Key」小窗口
   // 地址怎么读只有 lib/client.ts 的 readWorkflowDestination 一处（channelId 读成 channelIds:[id]）
@@ -340,8 +341,13 @@ export default function StationsPage() {
   }, [pendingSwap, channelOptions.options]);
   useEffect(() => {
     if ((actionParam !== "channels" && actionParam !== "swap-key") || !loaded) return;
-    if (actionParam === "swap-key") openSwapKey(window.location.search); else openChannelsOf(params.get("stationId"));
-    setParams({ action: null, stationId: null, channelId: null });
+    if (actionParam === "swap-key") openSwapKey(window.location.search);
+    else {
+      const opened = openChannelsOf(params.get("stationId"));
+      // 模型供需页的「去绑定渠道」：&bind=1 再把这个上游的「绑定渠道」小窗口也打开（上游找不到时不开，免得小窗口留着等下一次抽屉）
+      if (opened && params.get("bind") === "1") setBinding(true);
+    }
+    setParams({ action: null, stationId: null, channelId: null, bind: null });
   }, [actionParam, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefreshAll = async () => {

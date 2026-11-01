@@ -1,6 +1,6 @@
 "use client";
 // 自营业务页共用：范围与标签常量、金额换算、环比显示、可排序表格。
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { ADMIN_UNMARKED, EMPTY, RANGE_TEXT, TOKEN_NOTE as TOKEN_SCOPE, formatDeltaPct, formatMoney, formatUnitPrice, formatZonedRange } from "../../../lib/format";
 import { rateSnapshotOf } from "../../../lib/profit";
@@ -162,6 +162,7 @@ export function DataTable<R>({
   onRowClick,
   controlledSort,
   onSortChange,
+  rowGroup,
 }: {
   rows: R[];
   cols: Col<R>[];
@@ -179,6 +180,8 @@ export function DataTable<R>({
   // 排序交给调用方（服务端排好了再给）：传这两个，表头只显示当前排法、点了通知调用方，rows 原样显示
   controlledSort?: SortState;
   onSortChange?: (next: SortState) => void;
+  // 表分几段（模型供需：有缺口的、没缺口的）：按显示的次序，这一行的段标题和上一行不同时，前面插一行段标题；不分段返回 null
+  rowGroup?: (r: R) => ReactNode;
 }) {
   const [ownSort, setSort] = useState<SortState | null>(defaultSort || null);
   const controlled = controlledSort !== undefined && onSortChange !== undefined;
@@ -244,15 +247,26 @@ export function DataTable<R>({
         </thead>
         <tbody>
           {sorted.length ? (
-            sorted.map((r, i) => (
-              <tr key={rowKey(r, i)} className={onRowClick ? "is-clickable" : undefined} onClick={onRowClick ? () => onRowClick(r) : undefined}>
-                {cols.map((c) => (
-                  <td key={c.key} className={c.num ? "r" : undefined}>
-                    {c.render(r)}
-                  </td>
-                ))}
-              </tr>
-            ))
+            sorted.map((r, i) => {
+              const group = rowGroup ? rowGroup(r) : null;
+              const heading = group != null && (i === 0 || rowGroup!(sorted[i - 1]) !== group);
+              return (
+                <Fragment key={rowKey(r, i)}>
+                  {heading && (
+                    <tr className="jy-data-group">
+                      <th scope="colgroup" colSpan={cols.length}>{group}</th>
+                    </tr>
+                  )}
+                  <tr className={onRowClick ? "is-clickable" : undefined} onClick={onRowClick ? () => onRowClick(r) : undefined}>
+                    {cols.map((c) => (
+                      <td key={c.key} className={c.num ? "r" : undefined}>
+                        {c.render(r)}
+                      </td>
+                    ))}
+                  </tr>
+                </Fragment>
+              );
+            })
           ) : (
             <tr>
               <td className="jy-empty-row" colSpan={cols.length}>

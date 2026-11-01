@@ -1,0 +1,103 @@
+// 模型供需页上的字（design 模型供需 v1 §2–§5、§9）。「怎么判断的」里的数字读 lib/models-view.js 的 MODELS_VIEW，不另写一遍。
+// 「用户」都是自营站点（用户自己的 New API）上的用户；渠道状态：启用 / 已停用（手动）/ 被自动停用（New API 自己停的，多半是上游出了问题）。
+import { MODELS_VIEW } from "../../../lib/models-view.js";
+
+export type GapTag = "out" | "soon" | "fail" | "single" | "rising";
+export type ChannelState = "on" | "off" | "auto";
+
+export const COPY = Object.freeze({
+  // 没设置自营站点
+  setupDesc: "模型供需会看你的站上哪些模型缺货、每天少收多少、去哪找货。",
+  setupFigure: "设置完成后，这里会列出每个模型近 7 天的消费、成功率和货源，缺货的会标出来。",
+  unreadable: "读不到模型数据",
+  readNote: (asOf: string) => `打开这一页时读，10 分钟内不重读 · 数据截至 ${asOf}`,
+  // 四个数
+  kpiLabel: "模型供需概览",
+  kpi: Object.freeze({
+    missing: "缺货的模型", single: "只有一家货源", soon: "快断货", rising: "在猛涨",
+    count: (n: number) => `${n} 个`,
+    missingSub: (money: string) => `估计每天少收约 ${money}`,
+    missingNone: "没有缺货的模型",
+    singleSub: (pct: string) => `合起来占全站消费 ${pct}`,
+    singleNone: "没有只靠一家供货的模型",
+    soonSub: (days: string) => `主要上游余额只够${days}`,
+    soonNone: "没有快断货的模型",
+    risingSub: (ratio: string) => `近 7 天是前 7 天的 ${ratio} 倍`,
+    risingNone: "没有在猛涨的模型",
+    more: (n: number) => `等 ${n} 个`,
+  }),
+  // 主表
+  tableTitle: "每个模型的供需",
+  search: "搜索模型",
+  newTag: "新",
+  cols: Object.freeze({ model: "模型", week: "近 7 天消费", success: "成功率（近 24 小时）", supply: "货源", main: "主要上游还能撑", gap: "缺口" }),
+  segGap: (n: number) => `有缺口的 ${n} 个`,
+  segNone: (n: number) => `没缺口的 ${n} 个`,
+  vsPrev: (delta: string) => `比前 7 天 ${delta}`,
+  vsNone: "前 7 天没有消费",
+  rate: (rate: number) => `${rate.toFixed(1)}%`,
+  successNone: "没有开着的渠道",
+  successFew: "请求太少",
+  successUnread: "读不到",
+  supply: (upstreams: number, open: number) => `${upstreams} 个上游 · ${open} 个渠道开着`,
+  supplyStopped: (n: number) => `另有 ${n} 个被停用`,
+  mainNone: "—",
+  mainDays: (text: string) => text,
+  empty: "近 30 天没有哪个模型有消费。",
+  noMatch: "没有找到这个模型",
+  tags: Object.freeze({ out: "断货", soon: "快断货", fail: "卖不出去", single: "只有一家", rising: "在猛涨" } as Record<GapTag, string>),
+  tagTips: Object.freeze({
+    out: "这个模型一个开着的渠道都没有", soon: "主要上游余额不够几天", fail: "近 24 小时成功率低", single: "开着的渠道全来自同一个上游", rising: "近 7 天比前 7 天涨得多",
+  } as Record<GapTag, string>),
+  // 手机卡片
+  cardVs: (vs: string, success: string) => `${vs} · ${success}`,
+  cardSupply: (supply: string, main: string) => `${supply} · ${main}`,
+  rowOpen: (name: string) => `打开 ${name} 的详情`,
+  // 怎么判断的
+  how: Object.freeze({
+    title: "怎么判断的",
+    successTitle: "成功率从哪来：",
+    success: (minRequests: number) => `自营站点 New API 自己记的每个模型每小时的请求数和成功数（性能统计），近 ${MODELS_VIEW.SUCCESS_HOURS} 小时算一次。重试里失败的那几次也算在内。近 ${MODELS_VIEW.SUCCESS_HOURS} 小时请求不到 ${minRequests} 次的不判，写「请求太少」。`,
+    blindTitle: "测不到的一种失败：",
+    blind: "分组里压根没有可用渠道时，请求在最开始就被拒了，New API 不记这一次。所以这种情况看成功率看不出来；能看到的是「这个模型一个开着的渠道都没有」，标「断货」。",
+    lostTitle: "少收多少是估计的：",
+    lost: (failPct: number) => `卖不出去的，按「近 7 天日均消费 × 失败的比例」估，也就是假设失败的请求和成功的一样值钱；断货的，按断货前 7 天的日均估。只用来比谁缺得多，不是准数。四个数里那一格写的是「估计每天少收约」。成功率低于 ${failPct}% 才算卖不出去。`,
+    otherTitle: "其余几个标签：",
+    other: (soonDays: number, ratio: number, minPrev: string) => `只有一家 = 开着的渠道全来自同一个上游（有开着的渠道没绑上游的不标，不知道它的货从哪来）；快断货 = 流量占比最大的上游余额不够 ${soonDays} 天；在猛涨 = 近 7 天是前 7 天的 ${ratio} 倍以上，前 7 天不到约 ${minPrev} 的不判。`,
+  }),
+  toMy: "赚多少去自营业务「模型与渠道」看 →",
+  // 抽屉
+  drawer: Object.freeze({
+    notFound: "这个模型近 30 天没有消费了，关掉再看。",
+    failed: "读不到这个模型的详情",
+    kpiWeek: "近 7 天消费", kpiVs: "比前 7 天", kpiSuccess: "成功率（近 24 小时）", kpiSupply: "货源",
+    dayTitle: "每天卖多少", daySub: (time: string) => `近 30 天，今天只到 ${time}，浅色`,
+    costLabel: "消费", today: "今天",
+    successTitle: "成功率", successSub: "近 30 天，每天一个点",
+    successLimit: (pct: number) => `${pct}% 以下标「卖不出去」`,
+    successLow: (day: string, rate: string) => `${day} ${rate}`,
+    successUnread: "读不到成功率",
+    successNone: "这段时间没有请求记录",
+    channelsTitle: "渠道和上游", channelsSub: "这个模型现在走哪些渠道",
+    channelCols: Object.freeze({ channel: "渠道", state: "状态", priority: "优先级", share: "近 7 天流量占比", upstream: "上游", runway: "上游还能撑" }),
+    channelState: Object.freeze({ on: "启用", off: "已停用", auto: "被自动停用" } as Record<ChannelState, string>),
+    channelLine: (priority: number, share: string, upstream: string) => `优先级 ${priority} · 近 7 天占 ${share} · ${upstream}`,
+    finderLine: (price: string, vs: string) => `${price} · ${vs}`,
+    channelNone: "没有渠道配了这个模型。",
+    unbound: "没绑上游",
+    finderTitle: "找货帮手", finderSub: "已经加了的上游里，谁也卖这个模型：按价格从低到高",
+    finderCols: Object.freeze({ upstream: "上游", price: "价格（倍率）", vs: "和现在用的比", runway: "余额够用", supply: "在不在供" }),
+    ratio: (n: number) => `${n.toFixed(2)} 倍`,
+    perCall: (money: string) => `每次 ${money}`,
+    unreadablePrice: "读不到价格",
+    cheaper: (pct: string) => `便宜 ${pct}`, pricier: (pct: string) => `贵 ${pct}`, same: "差不多", mainNow: "现在主要用的",
+    supplying: "已经在供", notSupplying: "还没在供",
+    goBind: "去绑定渠道",
+    finderNone: "已经加了的上游里，没有别的上游卖这个模型。",
+    finderNote: "价格读的是各上游自己公开的价目（1 小时内不重读），这个模型在那个上游的倍率 × 你在那边的分组倍率。只有 New API 上游读得到；Sub2API 上游写「读不到价格」。没加进来的上游不在这里。",
+    usersTitle: "主要是谁在用", usersSub: "近 7 天，占这个模型的消费",
+    usersOthers: (n: number) => `其他 ${n} 个人`,
+    usersUnread: "读不到谁在用",
+    usersNone: "近 7 天没有人用这个模型。",
+  }),
+});

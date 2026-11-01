@@ -21,9 +21,6 @@
 .jy-users-spark .dot { fill: var(--jy-s1); }
 .jy-users-spark.is-gray .line { stroke: var(--jy-ink-3); }
 .jy-users-spark.is-gray .dot { fill: var(--jy-ink-3); }
-.jy-users-bar { fill: var(--jy-s1); }
-.jy-users-bar.is-light { opacity: .45; }
-.jy-users-bar.is-hover { filter: brightness(1.12); }
 
 /* ─── 用户表 ─── */
 .jy-users-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; }
@@ -43,7 +40,6 @@
 .jy-users-bigcheck input { width: 16px; height: 16px; margin: 0; accent-color: var(--jy-cobalt); cursor: pointer; }
 .jy-users-search { width: 220px; }
 .jy-panel-body--flush > .jy-table-scroll { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; }
-table.jy-data tbody tr.is-clickable { cursor: pointer; }
 table.jy-data .jy-cell-runway { justify-content: flex-start; }
 table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 .jy-users-empty { margin: 0; padding: 32px 16px; text-align: center; }
@@ -108,10 +104,6 @@ table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
   .jy-users-kpis > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
 
-/* 用户表：一格两行（上面是要比的数或名字，下面是说明或跑道） */
-.jy-cell-two { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
-.jy-cell-two--r { align-items: flex-end; }
-.jy-cell-two .jy-caption { margin: 0; }
 .jy-users-balance { font-variant-numeric: tabular-nums; }
 .jy-users-group { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--jy-ink-2); }
 .jy-users-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-top: 1px solid var(--jy-rule-soft); }

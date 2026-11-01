@@ -167,7 +167,7 @@ export function FreshBars({
               <g className="grid">{ticks.map((t) => <line key={t} x1={Lp} x2={w - Rp} y1={y(t)} y2={y(t)} />)}</g>
               {ticks.map((t) => <text key={t} className="tick-label" x={Lp - 6} y={y(t) + 4} textAnchor="end">{t}</text>)}
               {counts.map((v, i) => (v != null && v > 0 ? (
-                <path key={days[i].day} className={`jy-users-bar${i === last ? " is-light" : ""}${hover === i ? " is-hover" : ""}`} d={barPath(Lp + slot * (i + 0.5) - bw / 2, Math.min(y(v), y(0) - 1), y(0), bw, 4, true)} />
+                <path key={days[i].day} className={`jy-chart-bar${i === last ? " is-light" : ""}${hover === i ? " is-hover" : ""}`} d={barPath(Lp + slot * (i + 0.5) - bw / 2, Math.min(y(v), y(0) - 1), y(0), bw, 4, true)} />
               ) : null))}
               {idx.map((i) => <text key={i} className="tick-label" x={clamp(Lp + slot * (i + 0.5), Lp, w - Rp)} y={height - 8} textAnchor={i === n - 1 ? "end" : "middle"}>{formatDayKey(days[i].day, tz, asOf).replace(/^\d+年/, "")}</text>)}
             </svg>
@@ -255,7 +255,7 @@ export function Bars({
               const v = values[i];
               const cx = Lp + slot * (i + 0.5) - bw / 2;
               const topY = y(v);
-              return v > 0 ? <path key={item.key} className={`jy-users-bar${light && i === n - 1 ? " is-light" : ""}${hover === i ? " is-hover" : ""}`} d={barPath(cx, Math.min(topY, y(0) - 1), y(0), bw, 4, true)} /> : null;
+              return v > 0 ? <path key={item.key} className={`jy-chart-bar${light && i === n - 1 ? " is-light" : ""}${hover === i ? " is-hover" : ""}`} d={barPath(cx, Math.min(topY, y(0) - 1), y(0), bw, 4, true)} /> : null;
             })}
             {idx.map((i) => <text key={i} className="tick-label" x={clamp(Lp + slot * (i + 0.5), Lp, w - Rp)} y={height - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"}>{tickLabel(items[i].key, i)}</text>)}
           </svg>
