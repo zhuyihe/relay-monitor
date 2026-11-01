@@ -9956,3 +9956,142 @@ test("给用户站减负：自营 /api/status 30 分钟内跨轮只读一次（�
   for (let minute = 0; minute < 6; minute += 1) { now += 60000; await round(); }
   assert.ok(ownCalls("/api/log/stat") > statsBefore, "有新消费，最晚 5 分钟内各渠道重读");
 });
+
+// ---- PR C2：「今天」的逐渠道收入改读整站消费日志的小时桶 ----
+// 一个带全套筛选的假站点日志（type、起止、渠道、用户名、令牌名、翻页）：/api/log/ 和 /api/log/stat 都从同一份日志算
+function ownSiteLogs(logs, calls = []) {
+  const filtered = (url) => {
+    const q = (name) => url.searchParams.get(name);
+    const start = Number(q("start_timestamp") || 0), end = Number(q("end_timestamp") || 0) || Infinity;
+    return logs.filter((log) => (q("type") == null || Number(q("type")) === log.type) && log.created_at >= start && log.created_at <= end
+      && (q("channel") == null || String(log.channel) === q("channel")) && (q("username") == null || log.username === q("username"))
+      && (q("token_name") == null || log.token_name === q("token_name")))
+      .sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+  };
+  return (url) => {
+    calls.push(url.pathname === "/api/log/stat" ? `/api/log/stat@${url.searchParams.get("start_timestamp")}` : `${url.pathname}?p=${url.searchParams.get("p")}`);
+    const matched = filtered(url);
+    if (url.pathname === "/api/log/stat") return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: matched.reduce((sum, log) => sum + log.quota, 0) } }) };
+    const size = Math.min(100, Number(url.searchParams.get("page_size") || 10)), page = Math.max(1, Number(url.searchParams.get("p") || 1));
+    return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: matched.length, items: matched.slice((page - 1) * size, page * size) } }) };
+  };
+}
+// 今天（上海 10-09，0 点是 10-08 16:00Z）0–10 点每小时每个渠道的日志：普通用户 alice、管理员 root 自用、两种名字的渠道测试（alice 名下的算渠道测试，root 名下的算管理员自用）、一条没绑的渠道
+function todayLogs(now) {
+  const logs = [], dayStartSec = Math.floor(Date.parse("2026-10-08T16:00:00Z") / 1000);
+  let id = 1;
+  const add = (hour, minute, channel, username, token_name, token_id, quota) => logs.push({ id: id++, type: 2, created_at: dayStartSec + hour * 3600 + minute * 60, channel, username, token_name, token_id, quota, model_name: "m", group: "g", other: "{}" });
+  for (let hour = 0; hour <= 10; hour += 1) for (const channel of [1, 2, 3, 4, 9]) {
+    for (let k = 0; k < 3; k += 1) add(hour, 5 + k * 7, channel, "alice", "k1", 11, 1000 + hour * 7 + channel * 13 + k);
+    add(hour, 30, channel, "root", "admin-key", 21, 500 + hour * 3 + channel);
+    add(hour, 33, channel, "alice", hour % 2 ? "模型测试" : "Model test", 0, 200 + hour + channel);
+    add(hour, 36, channel, "root", "模型测试", 0, 100 + hour);
+    add(hour, 38, channel, "alice", "k2", 12, 0); // 额度 0 的日志
+  }
+  assert.ok(Math.max(...logs.map((log) => log.created_at)) * 1000 < now - 15 * 60000, "最后一条日志离现在超过 15 分钟（桶读到的位置比现在晚几分钟）");
+  return logs;
+}
+async function todayWorld(t, { expectedCost, now }) {
+  const ownLogStore = new MemoryOwnLogStore();
+  const f = await completedDayFixture(t, { clock: () => now(), channelsByRule: { rr_live: [1, 4], rr_two: [2], rr_three: [3] }, moduleOptions: { ownStatusCacheMs: 0, ownLogStore, ownLogIngest: true } });
+  f.rt.store.settings = { expectedCost };
+  f.rt.store.updateSettings = async (patch) => Object.assign(f.rt.store.settings, patch);
+  const logs = todayLogs(now()), calls = [], site = ownSiteLogs(logs, calls);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && (url.pathname === "/api/log/" || url.pathname === "/api/log/stat")) return site(url);
+    return prev(input, init);
+  });
+  const own = f.stations.find((station) => station.isOwn);
+  own.resoldAdminKeys = [{ username: "root", tokenName: "admin-key" }]; // root 的 admin-key 标成转售：照样算收入、不当管理员自用减掉（新旧两种算法都要认）
+  return { ...f, ownLogStore, own, calls, logs };
+}
+const catchUpIngest = async (world) => {
+  for (let i = 0; i < 300; i += 1) { resetOwnRequestBudget(); const r = await world.module.ingestOwnLog(world.own); if (r.skipped === "caught-up") return; }
+  throw new Error("整站日志没追平");
+};
+const todayChannels = async (world) => (await world.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results.map((row) => ({ ruleId: row.rule?.id ?? row.ruleId, channels: row.downstream.channels.map((c) => [c.channelId, c.billingState, c.quotaUnits, c.amountUsd]).sort((a, b) => a[0] - b[0]), amountUsd: row.downstream.amountUsd }));
+
+test("PR C2 今天的逐渠道收入：读整站消费日志的小时桶和逐渠道 stat 减管理员自用、渠道测试的结果一字不差（每个渠道的净额度、其中管理员自用、金额），并且不再发 stat 和管理员日志请求", async (t) => {
+  let nowMs = Date.parse("2026-10-09T03:00:00Z");
+  // 原来的算法：「算应付成本」关着，没有桶，逐渠道 stat
+  const old = await todayWorld(t, { expectedCost: false, now: () => nowMs });
+  const oldRows = await todayChannels(old);
+  assert.ok(old.calls.some((call) => call.startsWith("/api/log/stat@")), "原来的算法发了逐渠道 stat");
+  assert.ok(oldRows.every((row) => row.channels.every((c) => c[1] === "complete" && c[2] > 0)), "每个渠道都有净额度");
+  // 新的算法：开着，整站日志追平，读桶
+  const fresh = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(fresh);
+  fresh.calls.length = 0;
+  const freshRows = await todayChannels(fresh);
+  assert.deepEqual(freshRows, oldRows, "新旧两种算法每个渠道的净额度、管理员自用、金额一字不差");
+  assert.deepEqual(fresh.calls.filter((call) => call.startsWith("/api/log/stat@")), [], "今天不再发逐渠道 stat");
+  assert.deepEqual(fresh.calls, [], "管理员日志、探测也都不发：今天的数全从桶来");
+  // 每个渠道每个小时都相等：原来的算法读每个小时窗口（自定义窗口、强制现读），和桶里这个小时的净额度比
+  const hours = Array.from({ length: 11 }, (_, h) => Date.parse("2026-10-08T16:00:00Z") + h * 3600000);
+  for (const startMs of hours) {
+    const window = { preset: "custom", timezone: "Asia/Shanghai", startMs, endMs: startMs + 3600000 };
+    const viaStat = (await old.module.queryRules({ ...window, ruleIds: ["rr_live", "rr_two", "rr_three"] }, { mode: "evaluate", origin: "manual", force: true })).results;
+    const buckets = await fresh.ownLogStore.listBuckets("own", startMs, startMs + 3600000);
+    for (const row of viaStat) for (const channel of row.downstream.channels) {
+      const mine = buckets.filter((bucket) => bucket.channelId === channel.channelId);
+      const quota = mine.reduce((sum, bucket) => sum + bucket.quota, 0), excluded = mine.reduce((sum, bucket) => sum + bucket.adminQuota + bucket.testQuota, 0);
+      assert.equal(channel.quotaUnits, quota - excluded, `渠道 ${channel.channelId} ${new Date(startMs).toISOString()} 这个小时的净额度`);
+      assert.ok(excluded > 0 || startMs < 0, "每个小时每个渠道都有要减的（管理员自用 + 渠道测试），不是空比");
+    }
+  }
+});
+
+test("PR C2 退回逐渠道 stat 的情况：整站日志落后超过 15 分钟、页面「刷新」强制重读、「算应付成本」关着；昨天和结账不读桶；桶新鲜时探测也不发", async (t) => {
+  let nowMs = Date.parse("2026-10-09T03:00:00Z");
+  const world = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(world);
+  const dayStartSec = Math.floor(Date.parse("2026-10-08T16:00:00Z") / 1000);
+  const stats = () => world.calls.filter((call) => call.startsWith("/api/log/stat@") && Number(call.split("@")[1]) >= dayStartSec).length; // 今天的 stat（结账读昨天的不算）
+  // 桶新鲜：今天一个 stat 都不发；轮询那一轮探测（/api/log/ 取 1 条）也不发
+  world.calls.length = 0;
+  const first = await todayChannels(world);
+  await world.module.refreshDue(nowMs);
+  assert.equal(stats(), 0);
+  assert.deepEqual(world.calls.filter((call) => call.startsWith("/api/log/?")), [], "桶新鲜：整站「有没有新消费」的探测也不发");
+  assert.ok(world.calls.some((call) => call.startsWith("/api/log/stat@") && Number(call.split("@")[1]) < dayStartSec), "结账读昨天照旧逐渠道 stat（桶不管结账）");
+  // 页面「刷新」强制重读：照旧逐渠道 stat（用户明确要现读的数）
+  world.calls.length = 0;
+  const forced = (await world.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "manual", force: true })).results;
+  assert.ok(stats() > 0, "强制重读发了逐渠道 stat");
+  assert.deepEqual(forced.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), first.map((row) => row.channels.map((c) => c[2])), "两种读法的数一样");
+  // 整站日志落后（游标比现在早 20 分钟）：退回逐渠道 stat，不拿旧的桶当今天
+  nowMs += 20 * 60000;
+  world.calls.length = 0;
+  await world.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  assert.ok(stats() > 0, "整站日志落后超过 15 分钟：退回逐渠道 stat");
+  // 「算应付成本」关着：没有桶，逐渠道 stat
+  nowMs -= 20 * 60000;
+  world.rt.store.settings.expectedCost = false;
+  world.module.invalidateSources?.();
+  world.calls.length = 0;
+  (world.rt._reconciliationResultCache || new Map()).clear();
+  await world.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page", force: true });
+  assert.ok(stats() > 0, "关着：逐渠道 stat");
+});
+
+test("PR C2 桶不全时不读桶：关着「算应付成本」那几天跳过的缺口压在今天的窗口里、桶没覆盖到今天 0 点，都退回逐渠道 stat", async (t) => {
+  const nowMs = Date.parse("2026-10-09T03:00:00Z");
+  const gap = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(gap);
+  const cursor = await gap.ownLogStore.getCursor("own");
+  // 跳过的缺口压在今天 0 点之后
+  gap.ownLogStore.cursors.get("own").disabledFromMs = Date.parse("2026-10-08T20:00:00Z");
+  gap.ownLogStore.cursors.get("own").disabledToMs = Date.parse("2026-10-08T22:00:00Z");
+  gap.calls.length = 0;
+  await todayChannels(gap);
+  assert.ok(gap.calls.some((call) => call.startsWith("/api/log/stat@")), "缺口压在今天里：逐渠道 stat");
+  const late = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(late);
+  late.ownLogStore.cursors.get("own").coveredFromMs = Date.parse("2026-10-08T18:00:00Z"); // 只覆盖到今天 2 点以后
+  late.calls.length = 0;
+  await todayChannels(late);
+  assert.ok(late.calls.some((call) => call.startsWith("/api/log/stat@")), "没覆盖到今天 0 点：逐渠道 stat");
+  assert.ok(cursor.coveredToMs > 0);
+});
