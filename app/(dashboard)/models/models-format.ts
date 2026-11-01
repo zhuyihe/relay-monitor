@@ -54,7 +54,7 @@ export const supplyText = (row: ModelRow) => COPY.supply(row.supply.upstreams, r
 export type Kpi = { key: "missing" | "single" | "soon" | "rising"; title: string; value: string; sub: string; model: string | null; more: string | null };
 export function kpisOf(page: ModelsPage): Kpi[] {
   const { missing, single, soon, rising } = page.summary, rate = page.rate;
-  const more = (count: number) => (count > 1 ? COPY.kpi.more(count - 1) : null);
+  const more = (count: number) => (count > 1 ? COPY.kpi.more(count) : null);
   return [
     { key: "missing", title: COPY.kpi.missing, value: COPY.kpi.count(missing.count), sub: missing.count ? COPY.kpi.missingSub(money(missing.lostPerDay, rate)) : COPY.kpi.missingNone, model: null, more: null },
     { key: "single", title: COPY.kpi.single, value: COPY.kpi.count(single.count), sub: single.count && single.share != null ? COPY.kpi.singleSub(formatPct(single.share, 0)) : COPY.kpi.singleNone, model: null, more: null },
