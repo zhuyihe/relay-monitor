@@ -6,18 +6,19 @@
 //   - 窗口大小自适应：第一页就知道这个窗口有多少条，超过 PAGES_PER_WINDOW 页就对半切（/api/log/ 每页都要 COUNT 一次，窗口小 COUNT 才便宜，翻页也不深）；
 //     很稀的窗口翻倍，上限 1 小时；下限 5 秒（每秒几十条的站点也能一个窗口一个窗口往前走，审核 #123 中-2）；
 //   - 每轮最多 MAX_PAGES_PER_ROUND 页、MAX_ROUND_MS 毫秒；落后超过 BEHIND_MS 时每轮放宽到 MAX_PAGES_BEHIND 页（180 秒 45 个、限流的 12.5%），追平回到 6 页；
-//     每发一个请求之前都看一眼时间和断路器，到了就停，这个窗口不写，下一轮从窗口起点重来（审核 #123 中-3）；
+//     每发一个请求之前都看一眼时间和断路器，到了就停；每页暂存去重编号和桶，下轮从下一页继续（审核 #123 中-3）；
 //   - 第一次跑只从昨天 0 点（业务时区）起，不往前补更早的；
 //   - 停机、站点读不到、令牌失效造成的掉队，不管多久都照常按保底慢慢追，不跳、不清桶（总指挥 10-26 定第三轮）；
 //     只在「算应付成本」关→开这一下，进度比昨天 0 点还旧时，才挪到昨天 0 点（关着的日子本来就不读，不补那段缺口），
 //     跳过的缺口记在 own_log_cursor 的 disabled_from_ms/disabled_to_ms，结账时那几天给 EXPECTED_COST_DISABLED；
-//   - 每个窗口读完才写库（桶加进去、进度挪到窗口终点，一个事务），读到一半出错整个窗口不写；
+//   - 每个窗口读完才正式入桶（桶、进度、删除暂存同一个事务）；中途出错不发布半个窗口，下轮接着读；
 //   - 落后超过 LAG_WARN_MS 每小时打一行日志（V1-a 没页面，先不进需处理）。
 // 桶里顺手记下管理员自用额度、不在管理员名下的渠道测试额度（和 R1 同一个规矩，server/own-helpers.js 的管理员名单），V1 只用来和 R1 对账打日志。
 // 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；默认开，系统设置页上能关（server/reconciliation.js）。
 // 关→开判断：server/reconciliation.js 轮询时记 settings.expectedCostWasOff（settings 里的内部标记，不进设置页），只在关变开那一轮把
 // justTurnedOn 传给 ingestOnce。
-import { OWN_LOG_SLOT_MS, accumulateBuckets } from "../lib/own-log-bucket.js";
+import { createHash } from "node:crypto";
+import { OWN_LOG_SLOT_MS, accumulateBuckets, bucketKeyOf } from "../lib/own-log-bucket.js";
 import { ingestAllowance, noteIngestUsage, ownRequestState } from "../lib/own-request-budget.js";
 import { queryOwnLogWindow } from "../lib/providers.js";
 import { businessTimeZone, dayStartInTz, dayKeyInTz, shiftedDayStartInTz } from "../lib/business-time.js";
@@ -84,54 +85,96 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
     const maxPages = behind > INGEST.BEHIND_MS ? INGEST.MAX_PAGES_BEHIND : INGEST.MAX_PAGES_PER_ROUND;
     let budget = Math.min(allowance.allowed, maxPages), pages = 0, windows = 0;
     const deadline = at + INGEST.MAX_ROUND_MS;
-    // 每个请求之前：时间到了、或者别的读取把断路器打开了，就停（这个窗口不写）
     const mayRequest = () => budget > 0 && now() < deadline && !ownRequestState(base, now()).broken;
     let coveredTo = cursor.coveredToMs;
     let windowMs = windowSizes.get(own.id) ?? INGEST.WINDOW_START_MS;
-    while (coveredTo < horizon && mayRequest()) {
-      const fromMs = coveredTo, toMs = Math.max(fromMs + 1000, wholeSecond(Math.min(fromMs + windowMs, horizon)));
-      let first;
-      try { first = await queryOwnLogWindow(own, { startMs: fromMs, endMs: toMs, page: 1 }); }
-      catch (error) { log("own-log-ingest", own.id, "read failed", error?.code || error?.message); return { pages, windows, coveredToMs: coveredTo, error: error?.code || "read", skipChecked: true }; }
-      budget -= 1; pages += 1;
-      const total = first.total ?? (first.items.length < INGEST.PAGE_SIZE ? first.items.length : null);
-      const needPages = total == null ? INGEST.PAGES_PER_WINDOW + 1 : Math.ceil(total / INGEST.PAGE_SIZE);
-      // 窗口太满：对半切（整秒），这一页白读了但下一个窗口小一半（最小 5 秒，到了下限只能硬读）
-      if (needPages > INGEST.PAGES_PER_WINDOW && toMs - fromMs > INGEST.WINDOW_MIN_MS) {
-        windowMs = Math.max(INGEST.WINDOW_MIN_MS, wholeSecond((toMs - fromMs) / 2));
-        windowSizes.set(own.id, windowMs);
-        continue;
+    // 暂存只含编号和聚合值，不留用户名、Key 名、请求内容。管理员/转售归类改变时拒绝混用两种口径。
+    const classificationKey = createHash("sha256").update(JSON.stringify({
+      admins: [...adminSet].sort(), resold: resoldKeys.map((key) => [key.username, key.tokenName]).sort(),
+    })).digest("hex");
+    const result = (extra = {}) => ({ pages, windows, coveredToMs: coveredTo, skipChecked: true, ...extra });
+    const invalid = (code) => Object.assign(new Error(code), { code });
+    try {
+      let pending = await store.getPending(own.id);
+      while (coveredTo < horizon) {
+        if (pending && pending.fromMs !== coveredTo) {
+          // 回滚到旧版本时它可能推进 cursor，却不认识暂存表。只清旧暂存，不退回/跳过正式进度。
+          await store.discardPending(own.id, { fromMs: pending.fromMs, expectedCoveredToMs: coveredTo, expectedRevision: pending.revision });
+          return result({ error: "pending-window-mismatch" });
+        }
+        if (pending && pending.toMs > horizon) return result({ error: "pending-window-mismatch" });
+        if (pending && pending.classificationKey !== classificationKey) {
+          await store.discardPending(own.id, { fromMs: coveredTo, expectedRevision: pending.revision });
+          return result({ error: "pending-classification-changed" });
+        }
+        // 最后一页已经落暂存、正式入桶前进程退出：直接提交，不必重读接口。
+        if (pending?.complete) {
+          const applied = await store.applyWindow(own.id, { fromMs: pending.fromMs, toMs: pending.toMs,
+            buckets: pending.buckets, pendingRevision: pending.revision }, now());
+          if (!applied) return result({ error: "cursor-moved" });
+          coveredTo = pending.toMs; windows += 1;
+          if (pending.seenIds.length < INGEST.PAGE_SIZE / 2 && pending.toMs - pending.fromMs >= windowMs)
+            windowMs = Math.min(INGEST.WINDOW_MAX_MS, windowMs * 2);
+          windowSizes.set(own.id, windowMs);
+          pending = null;
+          continue;
+        }
+        if (!mayRequest()) break;
+        const fromMs = pending?.fromMs ?? coveredTo;
+        const toMs = pending?.toMs ?? Math.max(fromMs + 1000, wholeSecond(Math.min(fromMs + windowMs, horizon)));
+        const page = pending?.nextPage ?? 1;
+        let response;
+        // 失败的请求也占额度；finally 保证提前返回和数据库写失败时同样记账。
+        budget -= 1; pages += 1;
+        try { response = await queryOwnLogWindow(own, { startMs: fromMs, endMs: toMs, page }); }
+        catch (error) { log("own-log-ingest", own.id, "read failed", error?.code || "read"); return result({ error: error?.code || "read" }); }
+        const { items } = response;
+        const total = response.total;
+        const needPages = total == null ? (items.length < INGEST.PAGE_SIZE ? 1 : INGEST.PAGES_PER_WINDOW + 1) : Math.ceil(total / INGEST.PAGE_SIZE);
+        // 只在窗口尚未暂存时缩小；接受第一页后窗口固定，页数再多也分轮读完。
+        if (!pending && needPages > INGEST.PAGES_PER_WINDOW && toMs - fromMs > INGEST.WINDOW_MIN_MS) {
+          windowMs = Math.max(INGEST.WINDOW_MIN_MS, wholeSecond((toMs - fromMs) / 2));
+          windowSizes.set(own.id, windowMs);
+          continue;
+        }
+        if (pending && total !== pending.total) {
+          // 历史窗口有迟到/删除的日志，offset 已可能移动。只丢未发布的暂存，下轮原地重读，绝不跳过历史。
+          await store.discardPending(own.id, { fromMs: coveredTo, expectedRevision: pending.revision });
+          return result({ error: "pending-total-changed" });
+        }
+        const seen = new Set(pending?.seenIds || []);
+        const fresh = [];
+        for (const row of items) {
+          const id = Number(row?.id), second = Number(row?.created_at);
+          if (!Number.isSafeInteger(id) || id <= 0 || Number(row?.type) !== 2 || !Number.isSafeInteger(second)
+            || second < Math.ceil(fromMs / 1000) || second >= Math.floor(toMs / 1000)) throw invalid("invalid-log-row");
+          if (seen.has(id)) throw invalid("pending-page-overlap");
+          seen.add(id); fresh.push(row);
+        }
+        if (items.length && !fresh.length) throw invalid("pending-page-not-advancing");
+        if (total != null && (seen.size > total || (items.length < INGEST.PAGE_SIZE && seen.size !== total)))
+          throw invalid("pending-count-mismatch");
+        const complete = total == null ? items.length < INGEST.PAGE_SIZE : seen.size === total;
+        // 已翻完 total 指定的页数还缺编号，不能靠空页把漏掉的记录当作已采完。
+        if (total != null && !complete && page >= Math.ceil(total / INGEST.PAGE_SIZE)) throw invalid("pending-count-mismatch");
+        const buckets = new Map((pending?.buckets || []).map((bucket) => [bucketKeyOf(bucket), bucket]));
+        accumulateBuckets(fresh, { adminSet, resoldKeys }, buckets);
+        const saved = await store.savePending(own.id, { fromMs, toMs, nextPage: page + 1, total,
+          seenIds: [...seen], buckets: [...buckets.values()], complete, classificationKey },
+          { expectedRevision: pending?.revision ?? null }, now());
+        if (!saved) return result({ error: "cursor-moved" });
+        pending = saved;
       }
-      // 剩的额度翻不完这个窗口：保底时额度很小（可能一直是 2），原地切半窗口接着试，不然会卡在「下一轮从头读」原地打转（总指挥 10-26 定）；
-      // 到了最小窗口还翻不完就只能等下一轮（硬读会超预算）
-      if (needPages - 1 > budget) {
-        if (toMs - fromMs > INGEST.WINDOW_MIN_MS) { windowMs = Math.max(INGEST.WINDOW_MIN_MS, wholeSecond((toMs - fromMs) / 2)); windowSizes.set(own.id, windowMs); continue; }
-        windowSizes.set(own.id, windowMs); break;
+      return result();
+    } catch (error) {
+      if (["pending-total-changed", "invalid-log-row", "pending-page-not-advancing", "pending-page-overlap", "pending-count-mismatch"].includes(error?.code)) {
+        log("own-log-ingest", own.id, "validation failed", error.code);
+        return result({ error: error.code });
       }
-      const seen = new Set(), rows = [];
-      const take = (items) => { for (const row of items) { const id = Number(row?.id); if (Number.isFinite(id)) { if (seen.has(id)) continue; seen.add(id); } rows.push(row); } };
-      take(first.items);
-      let page = 2, more = first.items.length >= INGEST.PAGE_SIZE && (total == null || rows.length < total);
-      let failed = null;
-      while (more && mayRequest()) {
-        let next;
-        try { next = await queryOwnLogWindow(own, { startMs: fromMs, endMs: toMs, page }); } catch (error) { failed = error; break; }
-        budget -= 1; pages += 1; page += 1;
-        take(next.items);
-        more = next.items.length >= INGEST.PAGE_SIZE && (total == null ? page <= INGEST.PAGES_PER_WINDOW + 1 : rows.length < total);
-      }
-      if (failed) { log("own-log-ingest", own.id, "read failed", failed?.code || failed?.message); return { pages, windows, coveredToMs: coveredTo, error: failed?.code || "read", skipChecked: true }; }
-      if (more) { windowSizes.set(own.id, windowMs); break; } // 额度、时间用完或断路了还没翻完：这个窗口不写，下一轮从头读
-      const buckets = accumulateBuckets(rows, { adminSet, resoldKeys });
-      const applied = await store.applyWindow(own.id, { fromMs, toMs, buckets: buckets.values() }, now());
-      if (!applied) return { pages, windows, coveredToMs: coveredTo, error: "cursor-moved", skipChecked: true }; // 别的进程先写了：下一轮按库里的进度来
-      coveredTo = toMs; windows += 1;
-      // 很稀：窗口翻倍（上限 1 小时）
-      if (rows.length < INGEST.PAGE_SIZE / 2 && toMs - fromMs >= windowMs) windowMs = Math.min(INGEST.WINDOW_MAX_MS, windowMs * 2);
-      windowSizes.set(own.id, windowMs);
+      throw error;
+    } finally {
+      noteIngestUsage(base, pages, now());
     }
-    noteIngestUsage(base, pages, now());
-    return { pages, windows, coveredToMs: coveredTo, skipChecked: true };
   }
 
   // 每小时清 35 天前的桶：一批 2000 行，删到不满一批为止（最多 20 批，表再大也不会一直涨）

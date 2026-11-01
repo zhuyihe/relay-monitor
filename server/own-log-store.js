@@ -3,6 +3,7 @@
 // own_log_buckets：按（站点、小时、渠道、模型、上游模型、分组、缓存口径）加起来的数。
 // 读一个窗口 = 一个事务：核对进度正好停在这个窗口的起点，数加进桶，进度挪到窗口终点；进度对不上（别的进程先写了）就不写，返回 false。
 // 这样重启接着读、两个进程同时读都不会把同一段日志加两次。
+import { randomUUID } from "node:crypto";
 export const OWN_LOG_BUCKET_COLUMNS = Object.freeze(["requests", "prompt_tokens", "completion_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_1h_tokens", "quota", "admin_quota", "test_quota"]);
 const FIELD_OF_COLUMN = Object.freeze({ requests: "requests", prompt_tokens: "promptTokens", completion_tokens: "completionTokens", cache_read_tokens: "cacheReadTokens",
   cache_write_tokens: "cacheWriteTokens", cache_write_1h_tokens: "cacheWrite1hTokens", quota: "quota", admin_quota: "adminQuota", test_quota: "testQuota" });
@@ -16,6 +17,12 @@ export const bucketFromRow = (row) => ({ slotMs: Number(row.slot_ms), channelId:
 
 const cursorFromRow = (row) => row ? { stationId: row.station_id, coveredFromMs: Number(row.covered_from_ms), coveredToMs: Number(row.covered_to_ms), updatedAtMs: Number(row.updated_at_ms),
   disabledFromMs: row.disabled_from_ms == null ? null : Number(row.disabled_from_ms), disabledToMs: row.disabled_to_ms == null ? null : Number(row.disabled_to_ms) } : null;
+
+const pendingFromRow = (row) => {
+  if (!row) return null;
+  const state = typeof row.state_json === "string" ? JSON.parse(row.state_json) : row.state_json;
+  return { ...state, fromMs: Number(row.from_ms), toMs: Number(row.to_ms), nextPage: Number(row.next_page), revision: row.revision };
+};
 
 // 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）时：进度和桶一起清掉，不然会从旧进度接着读新站点、两个站的数混在一个桶里
 export async function forgetOwnLog(rt, stationId) {
@@ -37,24 +44,95 @@ export class OwnLogStore {
     return this.getCursor(stationId);
   }
 
+  // 暂存只含日志 id 和已归类的桶；尚未读完整的窗口不影响报表覆盖范围。
+  async getPending(stationId) {
+    const [[row]] = await this.pool.query("SELECT from_ms, to_ms, next_page, revision, state_json FROM own_log_pending WHERE station_id = ?", [stationId]);
+    return pendingFromRow(row);
+  }
+
+  // 锁住同一条 cursor，让保存暂存、提交窗口、跳过和删除相互串行。
+  // 独立随机 revision 防止旧 worker 覆盖新状态（包括清除后又创建同一窗口的 ABA）。
+  async savePending(stationId, pending, { expectedRevision = null } = {}, now = Date.now()) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [[cursor]] = await conn.query("SELECT covered_to_ms FROM own_log_cursor WHERE station_id = ? FOR UPDATE", [stationId]);
+      const [[prior]] = await conn.query("SELECT from_ms, to_ms, next_page, revision, state_json FROM own_log_pending WHERE station_id = ?", [stationId]);
+      if (!cursor || Number(cursor.covered_to_ms) !== pending.fromMs
+        || (prior?.revision ?? null) !== expectedRevision
+        || (prior && (Number(prior.from_ms) !== pending.fromMs || Number(prior.to_ms) !== pending.toMs))) {
+        await conn.rollback(); return false;
+      }
+      const saved = { ...pending, revision: randomUUID() };
+      const stateJson = JSON.stringify(saved);
+      await conn.query(`INSERT INTO own_log_pending (station_id, from_ms, to_ms, next_page, revision, state_json, updated_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE from_ms = VALUES(from_ms), to_ms = VALUES(to_ms),
+        next_page = VALUES(next_page), revision = VALUES(revision), state_json = VALUES(state_json), updated_at_ms = VALUES(updated_at_ms)`,
+      [stationId, saved.fromMs, saved.toMs, saved.nextPage, saved.revision, stateJson, now]);
+      await conn.commit();
+      return JSON.parse(stateJson);
+    } catch (error) {
+      await conn.rollback().catch(() => {});
+      throw error;
+    } finally { conn.release(); }
+  }
+
+  // 来源总数或归类口径改变时只废弃未提交窗口，下一轮从同一覆盖起点重读。
+  // 仍按 revision 做 CAS，不能让旧 worker 删掉别人刚读到的新一页。
+  async discardPending(stationId, { expectedRevision, fromMs, expectedCoveredToMs = fromMs }) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [[cursor]] = await conn.query("SELECT covered_to_ms FROM own_log_cursor WHERE station_id = ? FOR UPDATE", [stationId]);
+      const [[pending]] = await conn.query("SELECT from_ms, revision FROM own_log_pending WHERE station_id = ?", [stationId]);
+      if (!cursor || Number(cursor.covered_to_ms) !== expectedCoveredToMs || !pending
+        || Number(pending.from_ms) !== fromMs || pending.revision !== expectedRevision) {
+        await conn.rollback(); return false;
+      }
+      await conn.query("DELETE FROM own_log_pending WHERE station_id = ?", [stationId]);
+      await conn.commit();
+      return true;
+    } catch (error) {
+      await conn.rollback().catch(() => {});
+      throw error;
+    } finally { conn.release(); }
+  }
+
   // 「算应付成本」关→开，进度比昨天 0 点还旧：把进度挪到 toMs，中间这段（原来的 covered_to_ms 到 toMs）记成跳过的缺口，
   // 不删桶（已经读进来的留着，补算用得上；总指挥 10-26 定第三轮）。已经有一段没补上的缺口（第二次关→开，中间那段「开着」的
   // 日子还没来得及补算）：两段缺口并成一段记（偏保守——中间那段原本读全了的日子也会被算成缺口，但不会漏；只记一段，
   // 不改表结构记多段；审核 R2 #125 第三轮 中-E）
   async skipCursor(stationId, toMs, now = Date.now()) {
-    await this.pool.query(
-      "UPDATE own_log_cursor SET disabled_from_ms = COALESCE(disabled_from_ms, covered_to_ms), disabled_to_ms = ?, covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?",
-      [toMs, toMs, now, stationId]);
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query("SELECT covered_to_ms FROM own_log_cursor WHERE station_id = ? FOR UPDATE", [stationId]);
+      await conn.query(
+        "UPDATE own_log_cursor SET disabled_from_ms = COALESCE(disabled_from_ms, covered_to_ms), disabled_to_ms = ?, covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?",
+        [toMs, toMs, now, stationId]);
+      await conn.query("DELETE FROM own_log_pending WHERE station_id = ?", [stationId]);
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback().catch(() => {});
+      throw error;
+    } finally { conn.release(); }
     return this.getCursor(stationId);
   }
 
   // 读完一个窗口 [fromMs, toMs)：进度正好在 fromMs 才写。返回 true / false（进度不对没写）
-  async applyWindow(stationId, { fromMs, toMs, buckets }, now = Date.now()) {
+  async applyWindow(stationId, { fromMs, toMs, buckets, pendingRevision }, now = Date.now()) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
       const [[row]] = await conn.query("SELECT covered_to_ms FROM own_log_cursor WHERE station_id = ? FOR UPDATE", [stationId]);
       if (!row || Number(row.covered_to_ms) !== fromMs) { await conn.rollback(); return false; }
+      if (pendingRevision !== undefined) {
+        const [[pendingRow]] = await conn.query("SELECT from_ms, to_ms, next_page, revision, state_json FROM own_log_pending WHERE station_id = ?", [stationId]);
+        const pending = pendingFromRow(pendingRow);
+        if (!pending || pending.revision !== pendingRevision || pending.fromMs !== fromMs || pending.toMs !== toMs || pending.complete !== true) {
+          await conn.rollback(); return false;
+        }
+      }
       const rows = [...buckets].map((bucket) => bucketRowOf(stationId, bucket));
       // 一条语句最多 200 个桶；加起来写（ON DUPLICATE KEY UPDATE col = col + VALUES(col)）
       for (let at = 0; at < rows.length; at += 200) {
@@ -66,6 +144,7 @@ export class OwnLogStore {
           part.flatMap((item) => columns.map((column) => item[column])));
       }
       await conn.query("UPDATE own_log_cursor SET covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?", [toMs, now, stationId]);
+      await conn.query("DELETE FROM own_log_pending WHERE station_id = ?", [stationId]);
       await conn.commit();
       return true;
     } catch (error) {
@@ -87,7 +166,17 @@ export class OwnLogStore {
   }
 
   async deleteStation(stationId) {
-    await this.pool.query("DELETE FROM own_log_buckets WHERE station_id = ?", [stationId]);
-    await this.pool.query("DELETE FROM own_log_cursor WHERE station_id = ?", [stationId]);
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query("SELECT covered_to_ms FROM own_log_cursor WHERE station_id = ? FOR UPDATE", [stationId]);
+      await conn.query("DELETE FROM own_log_pending WHERE station_id = ?", [stationId]);
+      await conn.query("DELETE FROM own_log_buckets WHERE station_id = ?", [stationId]);
+      await conn.query("DELETE FROM own_log_cursor WHERE station_id = ?", [stationId]);
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback().catch(() => {});
+      throw error;
+    } finally { conn.release(); }
   }
 }

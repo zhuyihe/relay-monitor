@@ -72,5 +72,126 @@ export function defineOwnLogStoreContract({ name, create, cleanup = async () => 
         assert.equal((await store.listBuckets(station, 0, 99999999)).length, 0);
       }
     });
+
+    await t.test("暂存窗口跨实例读取；返回值不共享引用；旧 revision 不能覆盖新页", async () => {
+      const station = id("pending");
+      const pending = { fromMs: 1000, toMs: 6000, nextPage: 2, total: 2176, seenIds: [1, 2], buckets: [bucket()], complete: false, classificationKey: "test-classification" };
+      assert.equal(await store.getPending(station), null);
+      assert.equal(await store.savePending(station, pending), false, "没有 cursor 不写暂存");
+      await store.startCursor(station, 1000);
+      const saved = await store.savePending(station, pending);
+      assert.ok(saved.revision);
+      const savedRevision = saved.revision;
+      saved.seenIds.push(999); pending.buckets[0].quota = 999;
+      const loaded = await store.getPending(station);
+      assert.deepEqual(loaded.seenIds, [1, 2]);
+      assert.equal(loaded.buckets[0].quota, 100);
+      loaded.seenIds.push(998);
+      assert.deepEqual((await store.getPending(station)).seenIds, [1, 2]);
+      assert.equal(await store.savePending(station, { ...loaded, nextPage: 3 }), false, "已有暂存不能当作首次保存");
+      const next = await store.savePending(station, { ...loaded, nextPage: 3 }, { expectedRevision: savedRevision });
+      assert.ok(next.revision && next.revision !== savedRevision);
+      assert.equal(await store.savePending(station, { ...loaded, nextPage: 4 }, { expectedRevision: savedRevision }), false, "旧 worker 不能覆盖新进度");
+      assert.equal(await store.savePending(station, { ...next, fromMs: 2000 }, { expectedRevision: next.revision }), false, "cursor 必须正好停在窗口起点");
+      assert.equal(await store.savePending(station, { ...next, toMs: 9000 }, { expectedRevision: next.revision }), false, "续读期间不能更换窗口终点");
+      assert.equal((await store.getCursor(station)).coveredToMs, 1000, "暂存不是已完成覆盖");
+      assert.equal((await store.listBuckets(station, 0, 99999999)).length, 0, "半个窗口不能影响报表");
+    });
+
+    await t.test("完成窗口必须核对 revision、边界及 complete；提交后暂存和桶/进度原子切换", async () => {
+      const station = id("commit");
+      await store.startCursor(station, 1000);
+      const initial = await store.savePending(station, { fromMs: 1000, toMs: 6000, nextPage: 2, total: 2, seenIds: [1], buckets: [bucket()], complete: false });
+      const apply = (extra = {}) => store.applyWindow(station, { fromMs: 1000, toMs: 6000, buckets: [bucket()], pendingRevision: initial.revision, ...extra });
+      assert.equal(await apply(), false, "未完成不能推进覆盖");
+      const done = await store.savePending(station, { ...initial, nextPage: 3, seenIds: [1, 2], complete: true }, { expectedRevision: initial.revision });
+      assert.equal(await apply(), false, "旧 revision 不能提交");
+      assert.equal(await apply({ pendingRevision: done.revision, toMs: 7000 }), false, "终点必须一致");
+      if (store.failNextApply !== undefined) {
+        store.failNextApply = true;
+        await assert.rejects(apply({ pendingRevision: done.revision }));
+        assert.equal((await store.getPending(station)).revision, done.revision, "失败时保留已经读完的暂存，恢复后不用重读");
+        assert.equal((await store.getCursor(station)).coveredToMs, 1000);
+        assert.equal((await store.listBuckets(station, 0, 99999999)).length, 0);
+      }
+      assert.equal(await apply({ pendingRevision: done.revision }), true);
+      assert.equal(await store.getPending(station), null);
+      assert.equal((await store.getCursor(station)).coveredToMs, 6000);
+      assert.equal((await store.listBuckets(station, 0, 99999999))[0].quota, 100);
+      assert.equal(await apply({ pendingRevision: done.revision }), false, "已提交窗口不能重复计数");
+    });
+
+    await t.test("跳过、普通窗口提交和删除都清暂存；旧 worker 不能把它写回来", async () => {
+      for (const operation of ["skip", "apply", "delete"]) {
+        const station = id(operation);
+        await store.startCursor(station, 1000);
+        const pending = await store.savePending(station, { fromMs: 1000, toMs: 6000, nextPage: 2, seenIds: [1], buckets: [], complete: false });
+        if (operation === "skip") await store.skipCursor(station, 9000);
+        else if (operation === "apply") await store.applyWindow(station, { fromMs: 1000, toMs: 6000, buckets: [] });
+        else await store.deleteStation(station);
+        assert.equal(await store.getPending(station), null);
+        assert.equal(await store.savePending(station, { ...pending, nextPage: 3 }, { expectedRevision: pending.revision }), false);
+        if (operation === "delete") {
+          await store.startCursor(station, 1000);
+          const replacement = await store.savePending(station, { ...pending, nextPage: 2 });
+          assert.notEqual(replacement.revision, pending.revision, "重建同一站点同一窗口也是新 revision");
+          assert.equal(await store.savePending(station, { ...pending, nextPage: 4 }, { expectedRevision: pending.revision }), false, "防 ABA");
+        }
+      }
+    });
+
+    await t.test("并发保存同一个 revision 只允许一个成功；并发提交只计一次", async () => {
+      const station = id("race");
+      await store.startCursor(station, 1000);
+      const initial = await store.savePending(station, { fromMs: 1000, toMs: 6000, nextPage: 2, seenIds: [1], buckets: [bucket()], complete: false });
+      const candidates = await Promise.all([3, 4].map((nextPage) => store.savePending(station, { ...initial, nextPage, complete: true }, { expectedRevision: initial.revision })));
+      assert.equal(candidates.filter(Boolean).length, 1);
+      const done = candidates.find(Boolean);
+      const results = await Promise.all([1, 2].map(() => store.applyWindow(station, { fromMs: 1000, toMs: 6000, buckets: done.buckets, pendingRevision: done.revision })));
+      assert.deepEqual(results.sort(), [false, true]);
+      assert.equal((await store.listBuckets(station, 0, 99999999))[0].quota, 100);
+    });
+
+    await t.test("废弃暂存只丢未提交内容；保留 cursor 和桶，旧 revision 不能删掉新暂存", async () => {
+      const station = id("discard");
+      await store.startCursor(station, 1000);
+      await store.applyWindow(station, { fromMs: 1000, toMs: 2000, buckets: [bucket()] });
+      const initial = await store.savePending(station, { fromMs: 2000, toMs: 7000, nextPage: 2, seenIds: [1], buckets: [bucket()], complete: false });
+      const beforeCursor = await store.getCursor(station), beforeBuckets = await store.listBuckets(station, 0, 99999999);
+      assert.equal(await store.discardPending(station, { fromMs: 1000, expectedRevision: initial.revision }), false, "覆盖起点必须匹配");
+      const next = await store.savePending(station, { ...initial, nextPage: 3 }, { expectedRevision: initial.revision });
+      assert.equal(await store.discardPending(station, { fromMs: 2000, expectedRevision: initial.revision }), false, "旧 revision 不能删除新一页");
+      assert.equal((await store.getPending(station)).revision, next.revision);
+      assert.equal(await store.discardPending(station, { fromMs: 2000, expectedRevision: next.revision }), true);
+      assert.equal(await store.getPending(station), null);
+      assert.deepEqual(await store.getCursor(station), beforeCursor, "废弃后仍从原覆盖起点重读");
+      assert.deepEqual(await store.listBuckets(station, 0, 99999999), beforeBuckets, "已经完成的桶不变");
+      assert.equal(await store.discardPending(station, { fromMs: 2000, expectedRevision: next.revision }), false, "暂存已经清掉不算成功");
+      const replacement = await store.savePending(station, { ...initial, nextPage: 2 });
+      assert.ok(replacement);
+      assert.equal(await store.discardPending(station, { fromMs: 2000, expectedRevision: next.revision }), false, "重读后旧 revision 仍不能误删");
+      assert.equal((await store.getPending(station)).revision, replacement.revision);
+      assert.equal(await store.discardPending(id("missing"), { fromMs: 2000, expectedRevision: replacement.revision }), false);
+    });
+
+    await t.test("旧版本推进 cursor 留下 stale 暂存：按已观测覆盖位置 CAS 清理，绝不回退覆盖或改桶", async () => {
+      const station = id("stale");
+      await store.startCursor(station, 1000);
+      await store.applyWindow(station, { fromMs: 1000, toMs: 2000, buckets: [bucket()] });
+      const pending = await store.savePending(station, { fromMs: 2000, toMs: 7000, nextPage: 2, seenIds: [1], buckets: [bucket()], complete: false });
+      // 模拟回滚后的旧版本：它不知道暂存表，只推进已有 cursor。
+      if (store.pool) await store.pool.query("UPDATE own_log_cursor SET covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?", [7000, 99, station]);
+      else Object.assign(store.cursors.get(station), { coveredToMs: 7000, updatedAtMs: 99 });
+      const beforeCursor = await store.getCursor(station), beforeBuckets = await store.listBuckets(station, 0, 99999999);
+      assert.equal(await store.discardPending(station, { fromMs: pending.fromMs, expectedRevision: pending.revision }), false, "默认仍要求 cursor 在原窗口起点");
+      assert.equal(await store.discardPending(station, { fromMs: pending.fromMs, expectedRevision: pending.revision, expectedCoveredToMs: 6000 }), false, "旧观测位置不能清理");
+      assert.equal(await store.discardPending(station, { fromMs: 3000, expectedRevision: pending.revision, expectedCoveredToMs: 7000 }), false, "仍须核对被删除暂存的起点");
+      assert.equal(await store.discardPending(station, { fromMs: pending.fromMs, expectedRevision: "stale-revision", expectedCoveredToMs: 7000 }), false, "仍须核对 revision");
+      assert.equal((await store.getPending(station)).revision, pending.revision);
+      assert.equal(await store.discardPending(station, { fromMs: pending.fromMs, expectedRevision: pending.revision, expectedCoveredToMs: 7000 }), true);
+      assert.equal(await store.getPending(station), null);
+      assert.deepEqual(await store.getCursor(station), beforeCursor);
+      assert.deepEqual(await store.listBuckets(station, 0, 99999999), beforeBuckets);
+    });
   });
 }

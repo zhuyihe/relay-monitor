@@ -79,7 +79,7 @@ test("第一次跑从昨天 0 点起，落后超过 1 小时每轮最多 15 页�
   assert.ok(total <= windows + Math.ceil(expected.length / 100) + rounds, `翻页数：${total} 页、${windows} 个窗口、${rounds} 轮`);
 });
 
-test("窗口太满（超过 3 页）就对半切，最小 5 秒；稀的窗口翻倍到 1 小时；一个窗口这轮翻不完就不写、下一轮从头读", async (t) => {
+test("窗口太满（超过 3 页）就对半切，最小 5 秒；稀的窗口翻倍到 1 小时；一个窗口这轮翻不完不发布、下一轮续读", async (t) => {
   resetOwnRequestBudget();
   // 第一个小时密（每秒 1 条 = 3600 条），之后每 10 分钟 1 条
   const logs = []; let id = 1;
@@ -104,7 +104,7 @@ test("窗口太满（超过 3 页）就对半切，最小 5 秒；稀的窗口�
   assert.equal(ingest.windowSizes.get("own"), INGEST.WINDOW_MAX_MS, "稀的日子窗口回到 1 小时");
 });
 
-test("额度和断路：别的读取已经用掉大半额度就这轮不读；碰到 429 断路、这轮停下、窗口不写；读失败的窗口下一轮从头读", async (t) => {
+test("额度和断路：别的读取已经用掉大半额度就这轮不读；碰到 429 断路、这轮停下、窗口不写；读失败的窗口下一轮接着读", async (t) => {
   resetOwnRequestBudget();
   const logs = []; let id = 1;
   for (let at = YESTERDAY_START; at < NOW; at += 600000) logs.push(row(id++, at));
@@ -167,7 +167,7 @@ test("很忙的站点（每秒 12 条）追得上：窗口缩到几十秒，每�
   for (; rounds < 40; rounds += 1) {
     resetOwnRequestBudget();
     const result = await ingest.ingestOnce(own);
-    console.log("DEBUG", rounds, JSON.stringify(result), ingest.windowSizes.get("own"));
+
     if (result.skipped === "caught-up") break;
     assert.ok(result.pages <= INGEST.MAX_PAGES_BEHIND, `每轮最多 15 页：${result.pages}`);
     const cursor = await store.getCursor("own");
@@ -202,8 +202,8 @@ test("每个请求之前都看时间和断路器：站点慢（20 秒到了）�
   clockPerRequest = 0; breakAt = 4; resetOwnRequestBudget(); // 第 4 个请求 = 这一轮的第 2 页
   const broken = await ingest.ingestOnce(own);
   assert.equal(requests.filter((r) => r.path === "/api/log/").length, 4, "第 2 个请求时别的读取碰到 429、断路器开了：第 3 页不发");
-  assert.equal(broken.windows, 0);
-  assert.equal((await store.getCursor("own")).coveredToMs, YESTERDAY_START);
+  assert.ok(broken.windows >= 1, "下一轮从已暂存的第 3 页续读，完整窗口才正式入桶");
+  assert.ok((await store.getCursor("own")).coveredToMs > YESTERDAY_START);
 });
 
 test("站点不给 total：一页一页翻到不满一页为止；这轮额度翻不完就不写（审核 #123 低-7）", async (t) => {
