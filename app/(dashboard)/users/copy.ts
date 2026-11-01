@@ -2,12 +2,12 @@
 // 状态名「快用完」「余额用完」是上游已有的档位名（lib/format.js BALANCE_STATE_TEXT），「在下滑」「已流失」「新消费」是新的。
 import { BALANCE_STATE_TEXT } from "../../../lib/format.js";
 
-export type UsersTab = "overview" | "users" | "churn" | "demand";
+export type UsersTab = "overview" | "users" | "churn";
 export type UserStatus = "empty" | "soon" | "down" | "churned" | "new";
 
 export const COPY = Object.freeze({
   tabsLabel: "用户运营视图",
-  tabs: Object.freeze({ overview: "概览", users: "用户", churn: "流失", demand: "需求" }),
+  tabs: Object.freeze({ overview: "概览", users: "用户", churn: "流失" }),
   comingSoon: "即将上线",
   // 没设置自营站点
   setupDesc: "用户运营会看自营站点上用户的消费、余额，谁在涨、谁在掉、谁快用完了。",

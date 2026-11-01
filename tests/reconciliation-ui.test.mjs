@@ -2906,6 +2906,11 @@ test("用户运营·手机：用户表是一人一张卡片，筛选三行、没
   const cards = page.locator(".jy-users-card");
   await cards.first().waitFor();
   assert.equal(await cards.count(), 50);
+  // 手机上筛选三行：范围一整行；勾选框在左、分组下拉在右同一行；状态一整行
+  const box = (locator) => locator.evaluate((node) => { const rect = node.getBoundingClientRect(); return { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width) }; });
+  const [scope, big, group, status] = [await box(usersGroup(page, USERS_COPY.users.scopeLabel)), await box(page.locator(".jy-users-bigcheck")), await box(page.locator(".jy-users-group")), await box(usersGroup(page, USERS_COPY.users.filterLabel))];
+  assert.ok(scope.top < big.top && Math.abs(big.top - group.top) < 24 && big.left < group.left && Math.max(big.top, group.top) < status.top, JSON.stringify({ scope, big, group, status }));
+  assert.deepEqual(await page.getByRole("tab").allInnerTexts().then((list) => list.map((text) => text.replace(/\s+/g, " ").trim())), ["概览", "用户", "流失即将上线"], "页签只有三个，流失这一批还没上线时灰着");
   assert.match(await cards.first().innerText(), /u001[\s\S]*vip · 最近使用/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-users-375.png`, fullPage: false }); }

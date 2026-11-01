@@ -43,7 +43,7 @@ export type UserDetail = {
   user: UsersRow | null; rate: number; ready: UsersPage["ready"]; backfill: UsersPage["backfill"]; models: DetailModels;
 };
 
-export const TABS: readonly UsersTab[] = ["overview", "users", "churn", "demand"];
+export const TABS: readonly UsersTab[] = ["overview", "users", "churn"];
 export const OPEN_TABS: readonly UsersTab[] = ["overview", "users"];
 export const ONLY_VALUES = ["all", "soon", "down", "new", "churned"] as const;
 export const ONLY_LABEL: Record<Only, string> = { all: COPY.users.filterAll, soon: COPY.status.soon, down: COPY.status.down, new: COPY.status.new, churned: COPY.status.churned };
