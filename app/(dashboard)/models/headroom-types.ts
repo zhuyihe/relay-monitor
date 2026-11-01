@@ -145,6 +145,7 @@ export type UpstreamRef = { upstreamId: string; name: string | null };
 export type LostReco =
   | { kind: "topup"; upstreamId: string | null; name: string | null; hoursLeft: number | null }
   | { kind: "rateLimit"; upstreamId: string | null; name: string | null; accountLimited: boolean; addKeys: { n: number; perKey: number } | null; moveTo: UpstreamRef | null }
+  // moveTo（rateLimit、fault）：这个模型还有开着的渠道在供、不是失败最多的那家、余额撑得到今晚高峰结束（读不到余额的不排除）、没有用满上限（full）、近 7 天被挡最少的；都不合格是 null，页面只给另外那半句
   | { kind: "fault"; upstreamId: string | null; name: string | null; moveTo: UpstreamRef | null }
   | { kind: "openChannel" } | { kind: "none" };
 export type LostRow = {
@@ -176,5 +177,6 @@ export type LostView = {
   };
   rows: LostRow[];    // 主表：近 24 小时有缺货失败的模型，少收的钱从多到少排
   quietCount: number; // 另外几个模型近 24 小时没有缺货失败（没有错误日志时是 0；断货的模型在 rows 里，不算在这里）
+  smallCount: number; // 另外几个模型量很小（近 7 天日均消费不到全站日均的千分之一），有缺货失败也不列进主表（用户嫌太吵）；页面写「另外 N 个模型量很小，没列」
   quiet: { name: string; weekUsd: number }[]; // 这些模型，近 7 天消费从高到低，最多 200 个（点开「另外 N 个」用）
 };
