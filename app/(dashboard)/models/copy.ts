@@ -73,6 +73,7 @@ export const COPY = Object.freeze({
     openChannel: "这个模型没有开着的渠道，去开一个",
   }),
   quietNote: (count: number) => `另外 ${count} 个模型近 24 小时没有缺货失败`,
+  smallNote: (count: number) => `另外 ${count} 个模型量很小，没列`,
   restShow: (count: number) => `显示其余 ${count} 个模型`,
   restHide: (count: number) => `收起其余 ${count} 个模型`,
   noMatch: "没有找到这个模型",

@@ -439,14 +439,14 @@ function modelsFixture({ mode = "ok", headroomNull = false } = {}) {
   const zero = { rate_limit: 0, upstream: 0, auth_quota: 0 };
   const ku = (...names) => ({ count: names.length, top: names.map((name, i) => ({ userId: 41 + i, name, blocked: 100 - i })) });
   const up = (id, name) => ({ upstreamId: id, name });
-  const row = (name, week, extra) => ({ name, weekUsd: week / 7, lost24: 0, lostMoney24: 0, mainCause: null, mainUpstream: null, upstreamCount: 1, peakFailHours: null, tomorrowLost: 0, reco: { kind: "none" }, keyUsers: { count: 0, top: [] }, ...extra });
+  const row = (name, week, extra) => ({ name, weekUsd: week / 7, lost24: 0, lostMoney24: 0, mainCause: null, mainUpstream: null, upstreamCount: 1, estimated: false, outSince: null, peakFailHours: null, tomorrowLost: 0, reco: { kind: "none" }, keyUsers: { count: 0, top: [] }, ...extra });
   const rows = mode !== "ok" ? [] : [
     row("claude-sonnet-4.6", 711.79, { lost24: 186, lostMoney24: 17 / 7, mainCause: "rate_limit", mainUpstream: up("main", "主力上游"), upstreamCount: 2, peakFailHours: { hours: [21, 22, 23] }, tomorrowLost: 203, reco: { kind: "rateLimit", upstreamId: "main", name: "主力上游", accountLimited: false, addKeys: { n: 2, perKey: 3000 }, moveTo: up("c", "上游丙") }, keyUsers: ku("orange-lab", "wu-team") }),
     row("gemini-2.5-pro", 203.19, { lost24: 120, lostMoney24: 3, mainCause: "auth_quota", mainUpstream: up("main", "主力上游"), peakFailHours: { hours: [20, 21] }, tomorrowLost: 125, reco: { kind: "topup", upstreamId: "main", name: "主力上游", hoursLeft: 5 } }),
     row("claude-haiku-4.5", 52.54, { lost24: 40, lostMoney24: 1, mainCause: "upstream", mainUpstream: up("backup", "备用上游"), peakFailHours: { hours: [23, 0] }, tomorrowLost: 0.2, reco: { kind: "fault", upstreamId: "backup", name: "备用上游", moveTo: up("c", "上游丙") } }),
     row("gpt-5", 340.14, { lost24: 74, lostMoney24: 2, mainCause: "rate_limit", mainUpstream: up("main", "主力上游"), peakFailHours: null, tomorrowLost: 70, reco: { kind: "rateLimit", upstreamId: "main", name: "主力上游", accountLimited: true, addKeys: null, moveTo: null } }),
     // 断货的模型：一个开着的渠道都没有，断货前每天还在卖——没有失败次数，少收是按天估的
-    row("glm-4.6", 12.79, { lost24: null, estimated: true, outSince: Date.parse("2026-10-30T08:00:00+08:00"), lostMoney24: 12 / 7, mainCause: "no_channel", mainUpstream: null, tomorrowLost: 12, reco: { kind: "openChannel" } }),
+    row("glm-4.6", 12.79, { lost24: null, estimated: true, outSince: "2026-10-30", lostMoney24: 12 / 7, mainCause: "no_channel", mainUpstream: null, tomorrowLost: 12, reco: { kind: "openChannel" } }),
   ];
   const upstreams = [
     { upstreamId: "main", name: "主力上游", hoursLeft: 5, limit: q("measured", 9000), peakUsed: 9000, room: 0, full: true, accountLimited: false, blocked24: null, lost24: { rate_limit: 1452, upstream: 0, auth_quota: 120 }, models: { count: 12, names: ["claude-sonnet-4.6", "gemini-2.5-pro", "claude-haiku-4.5"] }, actions: ["topup", "addKey"] },
@@ -458,11 +458,11 @@ function modelsFixture({ mode = "ok", headroomNull = false } = {}) {
   const lost = {
     status, noErrorLogReason: mode === "nolog" ? "switchOff" : mode === "norecords" ? "noRecords" : null,
     kpis: {
-      tomorrow: off ? null : mode === "nofail" ? { count: 0, lost: 0 } : { count: 5, lost: 1300 },
-      last24: off ? null : mode === "nofail" ? { lost: 0, lostUsd: 0, keyUsers: 0 } : { lost: 420, lostUsd: 50 / 7, keyUsers: 4 },
+      tomorrow: off ? null : mode === "nofail" ? { count: 0, lost: 0, outOfStockCount: 0, top: null } : { count: 5, lost: 1300, outOfStockCount: 1, top: { name: "claude-sonnet-4.6", lost: 203 } },
+      last24: off ? null : mode === "nofail" ? { lost: 0, lostUsd: 0, keyUsers: 0, outOfStockCount: 0 } : { lost: 420, lostUsd: 50 / 7, keyUsers: 4, outOfStockCount: 1 },
       topup: { count: 1, first: { upstreamId: "main", name: "主力上游", hoursLeft: 5 } },
     },
-    rows, quietCount: mode === "ok" ? 2 : 0, quiet: mode === "ok" ? [{ name: "deepseek-v3", weekUsd: 110.13 / 7 }, { name: "gpt-5-mini", weekUsd: 81.58 / 7 }] : [],
+    rows, quietCount: mode === "ok" ? 2 : 0, smallCount: mode === "ok" ? 3 : 0, quiet: mode === "ok" ? [{ name: "deepseek-v3", weekUsd: 110.13 / 7 }, { name: "gpt-5-mini", weekUsd: 81.58 / 7 }] : [],
   };
   const headroom = { state: "ok", noErrorLogReason: null, errorLog: { coveredDays: 9, needDays: 7, daysLeft: 0 }, consumeLog: true, peak: null, kpis: {}, rows: [], upstreams: upstreams.map((item) => (off ? { ...item, lost24: null } : item)), numbers: {}, links: { own: "https://own.example", upstreams: { main: { baseUrl: "https://main.example", type: "newapi" }, backup: { baseUrl: "https://backup.example", type: "newapi" }, c: { baseUrl: "https://c.example", type: "sub2api" } } }, lost };
   const data = { asOf: MODELS_NOW, tz: MODELS_TZ, rate: 7, critDays: 3, headroom: headroomNull ? null : headroom };
@@ -545,6 +545,7 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   assert.deepEqual(glm.slice(1).map((cell) => cell.split("\n")), [["断货中", "10月30日起"], ["估计每天 ¥12"], ["没渠道"], ["—"], ["—"], ["仍断货"], ["这个模型没有开着的渠道，去开一个"]]);
   // 收起的其余模型
   await page.getByText(MODELS_COPY.quietNote(2), { exact: true }).waitFor();
+  await page.getByText(MODELS_COPY.smallNote(3), { exact: true }).waitFor();
   // 一屏：1440×900 整页不出滚动条；左右两块占满剩下的高度，左 9 右 3
   const fits = () => page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight);
   assert.equal(await fits(), true, "1440×900 整页不出滚动条");

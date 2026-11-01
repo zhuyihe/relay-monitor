@@ -44,11 +44,12 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
   const { headroom, rate } = page, { lost } = headroom;
   const needle = text.trim().toLowerCase();
   const failing: Shown[] = lost.rows.map((row) => ({ row, name: row.name, weekUsd: row.weekUsd }));
-  const quiet: Shown[] = (lost.quiet ?? []).map((item) => ({ row: null, name: item.name, weekUsd: item.weekUsd }));
+  const quiet: Shown[] = lost.quiet.map((item) => ({ row: null, name: item.name, weekUsd: item.weekUsd }));
   const restCount = Math.max(lost.quietCount, quiet.length);
   const all = needle || showRest ? [...failing, ...quiet] : failing;
   const shown = needle ? all.filter((item) => item.name.toLowerCase().includes(needle)) : all;
-  const hasTable = lost.status === "ok" && (failing.length > 0 || restCount > 0);
+  // 没开错误日志时 rows 里只有断货的模型（不靠错误日志认得）：那句话写在上面，下面照样列它们
+  const hasTable = (lost.status === "ok" && (failing.length > 0 || restCount > 0)) || (lost.status === "noErrorLog" && failing.length > 0);
 
   const name = (item: Shown) => (
     <span className="jy-cell-two">
@@ -57,11 +58,17 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
     </span>
   );
   const dash = <span className="jy-muted">{COPY.dash}</span>;
-  const foot = hasTable && restCount > 0 && !needle ? (
-    <div className="jy-models-restrow">
-      <span>{COPY.quietNote(restCount)}</span>
-      {quiet.length > 0 && <button type="button" className="jy-link jy-models-rest" aria-expanded={showRest} onClick={() => setShowRest(!showRest)}>{showRest ? COPY.restHide(restCount) : COPY.restShow(restCount)}</button>}
-    </div>
+  const showFoot = hasTable && !needle && (restCount > 0 || lost.smallCount > 0);
+  const foot = showFoot ? (
+    <>
+      {restCount > 0 && (
+        <div className="jy-models-restrow">
+          <span>{COPY.quietNote(restCount)}</span>
+          {quiet.length > 0 && <button type="button" className="jy-link jy-models-rest" aria-expanded={showRest} onClick={() => setShowRest(!showRest)}>{showRest ? COPY.restHide(restCount) : COPY.restShow(restCount)}</button>}
+        </div>
+      )}
+      {lost.smallCount > 0 && <div className="jy-models-restrow"><span>{COPY.smallNote(lost.smallCount)}</span></div>}
+    </>
   ) : undefined;
   const cols = COPY.cols;
 
@@ -75,7 +82,9 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
       foot={foot}
     >
       {!hasTable ? <NoneNote page={page} />
-        : phone ? (
+        : <>
+        {lost.status === "noErrorLog" && <NoneNote page={page} />}
+        {phone ? (
           shown.length ? (
             <ul className="jy-models-cards">
               {shown.map((item) => {
@@ -124,6 +133,7 @@ export function ModelsTable({ page, onOpen }: { page: LoadedPage; onOpen: (name:
             </table>
           </div>
         )}
+        </>}
     </Panel>
   );
 }

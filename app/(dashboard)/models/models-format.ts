@@ -1,6 +1,6 @@
 // 模型供需页的类型和把接口的数拼成页面上的字（字在 copy.ts；算数在 lib/models-lost.js、lib/models-headroom.js，页面不重算，只拼字）。钱都按自营站点的汇率换成显示的币种。
 // 页面只读 headroom.lost（近 24 小时缺货失败）和 headroom.upstreams；老的 state / kpis / rows 不读。
-import { EMPTY, formatDays, formatMoney, formatPct, formatZonedDate, formatZonedTime } from "../../../lib/format.js";
+import { EMPTY, formatDayKey, formatDays, formatMoney, formatPct } from "../../../lib/format.js";
 import type { Level } from "../../components/status";
 import { COPY } from "./copy";
 import type { ChannelState } from "./copy";
@@ -8,13 +8,12 @@ import type { DetailChannelHeadroom, HeadroomDetail, HeadroomPage, LostByReason,
 
 export type { ChannelState, LostCause, LostReco, LostRow };
 
-// 等 PR E-A 把这几个字段写进类型以后，下面几个带 & 的可以去掉
-// 断货的模型（一个开着的渠道都没有，断货前每天还在卖）：lost24 是 null，少收、明天预计是估计值（estimated），outSince 是从哪一刻起断货（毫秒，不知道是 null）
-export type LostRowView = Omit<LostRow, "lost24"> & { lost24: number | null; estimated?: boolean; outSince?: number | null; upstreamCount?: number };
+// 断货的模型（一个开着的渠道都没有，断货前每天还在卖）：lost24 是 null，少收、明天预计是估计值，outSince 是断货起点那一天（YYYY-MM-DD，不知道是 null）
+export type LostRowView = LostRow;
 export const isOut = (row: { lost24: number | null }) => row.lost24 === null;
-export type LostViewData = Omit<LostView, "rows"> & { rows: LostRowView[]; quiet?: { name: string; weekUsd: number }[] };
-export type UpstreamView = UpstreamHeadroom & { lost24?: LostByReason | null };
-export type ChannelView = DetailChannelHeadroom & { lost24?: number; mainCause?: LostCause | null };
+export type LostViewData = LostView;
+export type UpstreamView = UpstreamHeadroom;
+export type ChannelView = DetailChannelHeadroom;
 
 export type Runway = { days: number | null; noSpend: boolean; level: Level; text: string; failed: boolean; fixed?: boolean };
 // headroom 是 null：这一次没算出来（数据量太大、没有数据库、读库出错），页面写一句话
@@ -76,11 +75,8 @@ export function upstreamCell(row: LostRowView): string {
 }
 // 明天预计：「约 200 次」；不到 1 次写「不缺」；断货的写「仍断货」
 export const tomorrowText = (n: number, out = false) => (out ? COPY.outTomorrow : n < 0.5 ? COPY.tomorrowNone : COPY.tomorrowTimes(approx(n)));
-// 断货从哪天起：今天断的写「今天 14:00 起」，更早写「10月30日起」；不知道不写
-export function outSinceText(ts: number | null | undefined, tz: string, now: number): string | null {
-  if (ts == null) return null;
-  return formatZonedDate(ts, tz, now) === formatZonedDate(now, tz, now) ? `今天 ${formatZonedTime(ts, tz)} 起` : `${formatZonedDate(ts, tz, now)}起`;
-}
+// 断货从哪天起：「10月30日起」；接口只给到哪一天（YYYY-MM-DD），不知道不写
+export const outSinceText = (day: string | null | undefined, tz: string, now: number): string | null => (day ? `${formatDayKey(day, tz, now)}起` : null);
 
 // 建议：一句话，不加理由行。X 是出问题的上游，Y 是能把量挪过去的上游
 export function recoText(reco: LostReco): string {
@@ -110,20 +106,19 @@ export function kpisOf(page: LoadedPage): Kpi[] {
   const { lost } = page.headroom, K = COPY.kpi, rate = page.rate;
   const off = lost.status === "noErrorLog";
   const t = lost.kpis.tomorrow, l = lost.kpis.last24;
-  // 最缺的从有失败的里挑（断货的没有失败次数）；断货的模型数
-  const worst = [...lost.rows].filter((row) => !isOut(row)).sort((a, b) => b.tomorrowLost - a.tomorrowLost)[0];
-  const outCount = lost.rows.filter(isOut).length;
+  // 最缺的、断货的个数都由接口给（最缺的不算断货的）
+  const worst = t?.top ?? null;
   const tomorrow: Kpi = off || !t
     ? { key: "tomorrow", title: K.tomorrow, value: K.dash, sub: "" }
     : t.count > 0 && worst
       ? { key: "tomorrow", title: K.tomorrow, value: K.models(t.count), sub: "", before: K.tomorrowBefore(approx(t.lost)), lead: { kind: "model", id: worst.name, name: worst.name } }
-      : t.count > 0 && outCount > 0
-        ? { key: "tomorrow", title: K.tomorrow, value: K.models(t.count), sub: K.tomorrowAllOut(outCount) }
+      : t.count > 0 && t.outOfStockCount > 0
+        ? { key: "tomorrow", title: K.tomorrow, value: K.models(t.count), sub: K.tomorrowAllOut(t.outOfStockCount) }
         : { key: "tomorrow", title: K.tomorrow, value: K.models(0), sub: K.tomorrowNone };
   const last24: Kpi = off || !l
     ? { key: "last24", title: K.last24, value: K.dash, sub: "" }
-    : l.lost > 0 || outCount > 0
-      ? { key: "last24", title: K.last24, value: K.times(l.lost), sub: K.last24Lost(yuan(l.lostUsd, rate)), users: l.keyUsers > 0 ? l.keyUsers : null, tail: outCount > 0 ? K.outModels(outCount) : undefined }
+    : l.lost > 0 || l.outOfStockCount > 0
+      ? { key: "last24", title: K.last24, value: K.times(l.lost), sub: K.last24Lost(yuan(l.lostUsd, rate)), users: l.keyUsers > 0 ? l.keyUsers : null, tail: l.outOfStockCount > 0 ? K.outModels(l.outOfStockCount) : undefined }
       : { key: "last24", title: K.last24, value: K.times(0), sub: K.last24None };
   const u = lost.kpis.topup;
   const topup: Kpi = u.count > 0 && u.first
