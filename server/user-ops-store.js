@@ -1,12 +1,12 @@
 // 用户运营的存储（第一步：数据和后台）。四张表，都按站点分开，不加外键：
 //   user_balance_points：每个用户的余额快照（站点、用户 id、时刻、美元）。变了才写，没变每天补一条；留 14 天（7 天窗口 + 余量）
 //   user_usage_hours：每个用户按小时的用量（站点、用户名、小时起点、quota、请求数）。每 10 分钟读最近 3 小时、按小时覆盖写；回补 60 天；留 65 天
-//   user_ops_progress：每个站点一行：回补读到哪儿了、快照和用量最近一次读成的时刻
-//   user_ops_alert：每个用户提醒到哪一级了、什么时候提醒的、上次的余额（重启以后不会重复推送）
+//   user_ops_progress：每个站点一行：回补读到哪儿了、快照和用量最近一次读成的时刻、上一条用户提醒推出去的时刻（30 分钟内新触发的合成一条）
+//   user_ops_alert：每个用户提醒到哪一级了、什么时候提醒的、上次的余额、第一次判成快用完的时刻（要持续 30 分钟才推；重启以后接着算）
 // 内存实现（server/test-support/user-ops-memory-store.js）和这个跑同一组契约用例。
 const PROGRESS_FIELDS = Object.freeze({
   backfillCursorMs: "backfill_cursor_ms", backfillTargetMs: "backfill_target_ms", backfillStartedMs: "backfill_started_ms",
-  usageSyncedMs: "usage_synced_ms", balanceSyncedMs: "balance_synced_ms",
+  usageSyncedMs: "usage_synced_ms", balanceSyncedMs: "balance_synced_ms", alertPushedMs: "alert_pushed_ms",
 });
 const num = (value) => (value == null ? null : Number(value));
 const progressFromRow = (row) => (row ? Object.fromEntries([["stationId", row.station_id], ...Object.entries(PROGRESS_FIELDS).map(([field, column]) => [field, num(row[column])])]) : null);
@@ -93,15 +93,15 @@ export class UserOpsStore {
   }
 
   async getAlertStates(stationId) {
-    const [rows] = await this.pool.query("SELECT user_id, level, notified_at_ms, last_balance_usd FROM user_ops_alert WHERE station_id = ?", [stationId]);
-    return new Map(rows.map((row) => [Number(row.user_id), { level: Number(row.level), notifiedAt: num(row.notified_at_ms), lastBalanceUsd: num(row.last_balance_usd) }]));
+    const [rows] = await this.pool.query("SELECT user_id, level, notified_at_ms, last_balance_usd, soon_since_ms FROM user_ops_alert WHERE station_id = ?", [stationId]);
+    return new Map(rows.map((row) => [Number(row.user_id), { level: Number(row.level), notifiedAt: num(row.notified_at_ms), lastBalanceUsd: num(row.last_balance_usd), soonSince: num(row.soon_since_ms) }]));
   }
 
   async saveAlertState(stationId, userId, state, now = Date.now()) {
     await this.pool.query(
-      `INSERT INTO user_ops_alert (station_id, user_id, level, notified_at_ms, last_balance_usd, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE level = VALUES(level), notified_at_ms = VALUES(notified_at_ms), last_balance_usd = VALUES(last_balance_usd), updated_at_ms = VALUES(updated_at_ms)`,
-      [stationId, Number(userId), state.level, num(state.notifiedAt), num(state.lastBalanceUsd), now]);
+      `INSERT INTO user_ops_alert (station_id, user_id, level, notified_at_ms, last_balance_usd, soon_since_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE level = VALUES(level), notified_at_ms = VALUES(notified_at_ms), last_balance_usd = VALUES(last_balance_usd), soon_since_ms = VALUES(soon_since_ms), updated_at_ms = VALUES(updated_at_ms)`,
+      [stationId, Number(userId), state.level, num(state.notifiedAt), num(state.lastBalanceUsd), num(state.soonSince), now]);
   }
 
   // 清早的数据，一批一批删；返回删了多少行

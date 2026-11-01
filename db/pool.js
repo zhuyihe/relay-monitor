@@ -414,6 +414,10 @@ export async function ensureSchema(pool) {
     updated_at_ms BIGINT NOT NULL,
     PRIMARY KEY (station_id, user_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 用户提醒防刷屏（用户运营）：快用完要持续 30 分钟才推，所以每个用户记「第一次判成快用完的时刻」；
+  // 30 分钟内新触发的合成一条，所以每个站点记「上一条用户提醒推出去的时刻」
+  await addColumnIfMissing(pool, "user_ops_alert", "soon_since_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "user_ops_progress", "alert_pushed_ms", "BIGINT NULL");
   // 搬旧账失败不挡启动：记日志、不写完成标记，下次启动重试。
   try { await backfillReconciliationLedger(pool); } catch (err) { console.error("  结账账本迁移旧账失败，下次启动重试:", err?.message); }
 }

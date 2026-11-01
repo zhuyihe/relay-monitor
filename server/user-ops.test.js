@@ -209,7 +209,10 @@ test("数据过期不推送：用户列表和用量超过 30 分钟没读成，�
   assert.equal(f.ops.getView().fresh, false);
   f.site.soft = false;
   await f.step();
-  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent.length, 0, "数据恢复了，但中间看不见的这段不能算「持续」：重新计 30 分钟");
+  assert.ok([...(await f.store.getAlertStates("own1")).values()].every((state) => state.soonSince == null || state.soonSince >= f.clock.now - 10 * 60000), "第一次判成快用完的时刻在数据过期时清掉了");
+  for (let n = 0; n < 3; n += 1) await f.step();
+  assert.equal(f.sent.length, 1, "恢复以后持续满 30 分钟才推");
 });
 
 test("回补没完成之前不推送：回补读不成，到了 24 小时也不推；补完以后再推", async (t) => {
@@ -370,18 +373,146 @@ test("「发到」各管各的：同一轮既有余额用完又有快用完，�
   assert.equal(f.ops.getView().users.get(1).state, "empty");
 });
 
-test("某一种的通知方式没送到：只退回这一种的提醒状态（下一轮再试），另一种照常记已发", async (t) => {
-  const sent = [];
-  const send = async (list, title, body) => (list[0]?.id === "c1" ? [{ ok: false }] : (sent.push({ title, body }), [{ ok: true }]));
+test("一条都没送到：退回级别和提醒时刻（第一次判成快用完的时刻留着），下一轮再试；合成一条发到两个「发到」的并集，只要有一个通知方式收到就算送到", async (t) => {
+  const calls = [];
+  let down = true;
+  const send = async (list, title, body) => { calls.push({ ids: list.map((channel) => channel.id), title, body }); return list.map(() => ({ ok: !down })); };
   const f = makeSite(t, bigPair(), { channels: twoChannels, send, rules: perEvent });
   await f.stepsTo(20);
-  f.site.users[0].balance = 0;
-  await f.stepsTo(28);
-  assert.equal(sent.length, 1, "快用完推出去了，只推一次");
-  assert.match(sent[0].body, /big2/);
-  const states = await f.store.getAlertStates("own1");
-  assert.equal(states.get(1)?.level ?? 0, 0, "余额用完一直没送到，就一直没记已发");
-  assert.ok(states.get(2).level >= 1, "快用完记了已发");
+  f.site.users[0].balance = 0; // big1 余额用完，big2 快用完
+  for (let n = 0; n < 400 && !calls.length; n += 1) await f.step();
+  assert.equal(calls[0].title, "【重点用户余额用完】big1", "余额用完当轮就推，不等");
+  assert.deepEqual(calls[0].ids, ["c1"], "只有余额用完时发到它选的");
+  let states = await f.store.getAlertStates("own1");
+  assert.equal(states.get(1)?.level ?? 0, 0, "没送到：退回");
+  assert.equal(await f.store.getProgress("own1").then((progress) => progress.alertPushedMs ?? null), null, "没送到：不算推过");
+  assert.ok(states.get(2).soonSince != null, "big2 第一次判成快用完的时刻留着");
+  await f.step(); await f.step();
+  down = false; // 通知方式好了
+  await f.step(); // 离 big2 第一次快用完满 30 分钟：和 big1 的余额用完合成一条
+  const merged = calls.at(-1);
+  assert.equal(merged.title, "【重点用户余额用完】big1 等 2 位");
+  assert.deepEqual(merged.ids.sort(), ["c1", "c2"], "合成一条：两个「发到」的并集");
+  states = await f.store.getAlertStates("own1");
+  assert.deepEqual([states.get(1).level, states.get(2).level], [2, 1]);
+  assert.ok((await f.store.getProgress("own1")).alertPushedMs != null);
+});
+
+// ===== 防刷屏：快用完要持续 30 分钟才推；30 分钟内新触发的合成一条；余额用完不等 =====
+// 一群大户：A（id 1）余额少，一开始就快用完；B、C、D 钱多，用例里再把余额拨低；十位中等用户垫底。提醒线 3 天
+const calmUsers = () => [
+  { id: 1, username: "alice", balance: 300, burn: 5 },
+  { id: 2, username: "bob", balance: 5000, burn: 5 },
+  { id: 3, username: "carol", balance: 5000, burn: 5 },
+  { id: 4, username: "dave", balance: 5000, burn: 5 },
+  ...Array.from({ length: 10 }, (_, index) => ({ id: 10 + index, username: `mid${index}`, balance: 5000, burn: 2 })),
+];
+// 数据凑够 24 小时、alice 第一次判成快用完的那一轮（r0）；返回这一轮的时刻
+async function toFirstSoon(f) {
+  for (let n = 0; n < 400 && f.ops.getView()?.users.get(1)?.state !== "soon"; n += 1) await f.step();
+  assert.equal(f.ops.getView()?.users.get(1)?.state, "soon", "alice 应该判成快用完");
+  return f.clock.now;
+}
+const titles = (f) => f.sent.map((item) => item.title);
+
+test("防刷屏：一阵突发，20 分钟后就不是快用完了：不推，第一次判成快用完的时刻清掉，下次重新计", async (t) => {
+  const f = makeSite(t, calmUsers(), { rules: { renotifyHours: 0 } });
+  const t0 = await toFirstSoon(f);
+  assert.equal(f.sent.length, 0, "第一轮判成快用完：先记时刻，不推");
+  assert.equal((await f.store.getAlertStates("own1")).get(1).soonSince, t0);
+  await f.step(); await f.step(); // r1、r2：20 分钟
+  assert.equal(f.sent.length, 0);
+  f.rules.userEtaDays = 0.0001; // 速度降下来、不再算快用完（提醒线拉到很小，等价于这一轮不是快用完）
+  await f.step();
+  assert.equal((await f.store.getAlertStates("own1")).get(1).soonSince, null, "有一轮不是快用完，时刻清掉");
+  f.rules.userEtaDays = 3;
+  for (let n = 0; n < 3; n += 1) await f.step();
+  assert.equal(f.sent.length, 0, "又是快用完：从头计，还没满 30 分钟");
+  await f.step();
+  assert.equal(f.sent.length, 1, "重新持续满 30 分钟才推");
+});
+
+test("防刷屏：一直是快用完，第一次判成快用完之后满 30 分钟的那一轮推一次，之后不重复", async (t) => {
+  const f = makeSite(t, calmUsers(), { rules: { renotifyHours: 0 } });
+  const t0 = await toFirstSoon(f);
+  for (let n = 1; n <= 2; n += 1) { await f.step(); assert.equal(f.sent.length, 0, `第 ${n * 10} 分钟`); }
+  await f.step();
+  assert.equal(f.clock.now - t0, 30 * 60000);
+  assert.equal(f.sent.length, 1, "第 30 分钟推一次");
+  assert.match(f.sent[0].title, /^【重点用户快用完】alice 可用约 /);
+  assert.match(f.sent[0].body, /用户：alice /);
+  for (let n = 0; n < 6; n += 1) await f.step();
+  assert.equal(f.sent.length, 1, "同一档不重复");
+});
+
+test("防刷屏：余额用完不等，当轮就推；快用完还没满 30 分钟的不带", async (t) => {
+  const f = makeSite(t, calmUsers(), { rules: { renotifyHours: 0 } });
+  await toFirstSoon(f); // alice 快用完（刚记时刻）
+  f.site.users[1].balance = 0; // bob 余额用完
+  await f.step();
+  assert.deepEqual(titles(f), ["【重点用户余额用完】bob"], "余额用完当轮就推，只有 bob：alice 才快用完 10 分钟，不带");
+});
+
+test("防刷屏：推完 10 分钟内又有两人触发，先攒着，满 30 分钟合成一条推（重启以后也一样）", async (t) => {
+  const f = makeSite(t, calmUsers(), { rules: { renotifyHours: 0 } });
+  await toFirstSoon(f); // r0：alice 快用完
+  await f.step();       // r1
+  f.site.users[1].balance = 60; // bob 在 r2 前后触发快用完（第一次判成快用完是 r2）
+  await f.step();       // r2
+  f.site.users[2].balance = 60; // carol 在 r3 触发
+  await f.step();       // r3：alice 满 30 分钟，推（上一条用户提醒是这一刻）
+  assert.equal(f.sent.length, 1);
+  assert.match(f.sent[0].body, /用户：alice /);
+  assert.ok(!f.sent[0].body.includes("bob") && !f.sent[0].body.includes("carol"));
+  await f.step();       // r4：bob 满 30 分钟的是 r5，这里都还不到
+  await f.step();       // r5：bob 满 30 分钟，但上一条推出去才 20 分钟：攒着
+  assert.equal(f.sent.length, 1, "上一条推出去不满 30 分钟：攒着不推");
+  f.ops = f.newOps();   // 重启：攒着的状态（第一次快用完的时刻、上一条推出去的时刻）都在库里
+  await f.step();       // r6：carol 也满了，上一条推出去 30 分钟：合成一条
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.sent[1].title, "【重点用户快用完】bob 等 2 位", "bob、carol 合成一条");
+  assert.match(f.sent[1].body, /用户：bob /);
+  assert.match(f.sent[1].body, /用户：carol /);
+  await f.step(); await f.step();
+  assert.equal(f.sent.length, 2, "之后不重复");
+});
+
+test("防刷屏：余额用完插队时，带上已经满足 30 分钟、攒着的快用完，合成同一条", async (t) => {
+  const f = makeSite(t, calmUsers(), { rules: { renotifyHours: 0 } });
+  await toFirstSoon(f); // r0
+  await f.step();       // r1
+  f.site.users[1].balance = 60;
+  await f.step();       // r2：bob 开始
+  f.site.users[2].balance = 60;
+  await f.step();       // r3：alice 推（第一条）；carol 开始
+  await f.step();       // r4
+  assert.equal(f.sent.length, 1);
+  f.site.users[3].balance = 0; // dave 余额用完
+  await f.step();       // r5：bob 已满 30 分钟（攒着），carol 才 20 分钟；dave 插队，带上 bob，不带 carol
+  assert.equal(f.sent.length, 2, titles(f).join("\n"));
+  assert.equal(f.sent[1].title, "【重点用户余额用完】dave 等 2 位");
+  const lines = f.sent[1].body.split("\n").filter((line) => line.startsWith("用户："));
+  assert.match(lines[0], /^用户：dave /, "余额用完的排在前面");
+  assert.match(lines[1], /^用户：bob /);
+  assert.equal(lines.length, 2, "carol 才满 20 分钟，不带");
+  await f.step(); await f.step(); // r6：carol 满 30 分钟，但上一条（r5）才推出去 10 分钟：攒着；r7 同
+  assert.equal(f.sent.length, 2, "carol 攒着");
+  await f.step(); // r8：上一条推出去满 30 分钟：carol 自己推
+  assert.equal(f.sent.length, 3);
+  assert.match(f.sent[2].title, /^【重点用户快用完】carol /);
+});
+
+test("防刷屏：重启以后接着算——第一次判成快用完的时刻在库里，重启不重新计，也不提前推", async (t) => {
+  const f = makeSite(t, calmUsers(), { rules: { renotifyHours: 0 } });
+  const t0 = await toFirstSoon(f);
+  await f.step();
+  f.ops = f.newOps(); // 重启
+  await f.step(); // t0 + 20
+  assert.equal(f.sent.length, 0);
+  assert.equal((await f.store.getAlertStates("own1")).get(1).soonSince, t0, "时刻没变");
+  f.ops = f.newOps();
+  await f.step(); // t0 + 30：满了，推
+  assert.equal(f.sent.length, 1);
 });
 
 test("告警中心那句「现在是 N 个重点用户」的名单：近 7 天补到以后才有，按每天花得多的排；没补到是 ready: false、名单空；没设置自营站点是 unset", async (t) => {
