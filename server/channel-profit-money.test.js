@@ -322,7 +322,6 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const page = await f.rt.reconciliation.profitPage({ preset: "since" });
     assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [expected, expectedIncome], "收入、上游成本和整段现读一样");
     assert.equal(page.range.preset, "since");
-    assert.equal(page.unaccountedUpstreamCostUsd, null, "这个范围下不显示「没算进利润的上游成本」（只读得到现读那一截，和别处对不上）");
     if (upstreamType === "newapi") {
       const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.host === "up.test" && url.pathname === "/api/log/self/stat")
         .map((url) => Number(url.searchParams.get("start_timestamp")) * 1000);
@@ -2156,7 +2155,7 @@ for (const count of [15, 20]) {
     await f.at("2026-10-30T10:10:00");
     const channelReads = () => f.requests.filter((item) => item === "own.test/api/channel/").length;
     const before = channelReads(), fromIndex = f.requests.length;
-    const refreshed = await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual", accountUsage: "refresh" });
+    const refreshed = await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual" });
     const reads = channelReads() - before;
     if (process.env.SHOW_COUNTS) console.log(`REFRESH-CHANNEL-READS ${count} ${reads} 自营站点共 ${f.requests.slice(fromIndex).filter((item) => item.startsWith("own.test")).length} 个 ${JSON.stringify(f.requests.slice(fromIndex).filter((item) => item.startsWith("own.test")).reduce((m, x) => ((m[x] = (m[x] || 0) + 1), m), {}))}`);
     assert.equal(reads, 1, "渠道列表一次刷新只读 1 次");

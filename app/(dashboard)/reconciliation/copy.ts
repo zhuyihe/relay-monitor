@@ -195,8 +195,6 @@ export const COPY = Object.freeze({
   }),
   // 页顶的提示条、表下面那一行（设计稿 §6、用语规范 §8.1、§5.4）
   notice: Object.freeze({
-    unaccounted: (usd: string) => `另有 ${usd} 上游成本没算进利润`,
-    seeUpstreams: "查看各上游",
     unlinked: (n: number) => `还有 ${n} 个渠道没绑定上游，没算进来。`,
     notCounted: (n: number) => `有 ${n} 天还没固定，没算进来`,
     // 这种接法这一版还不算利润：只提示，没有按钮（用语规范 §5.6）；最多点三个名，再多写「等 N 个渠道」

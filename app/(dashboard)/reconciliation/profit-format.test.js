@@ -47,7 +47,7 @@ function page(overrides = {}) {
     gap: { days: { first: D("10-25"), last: D("10-25"), count: 1, contiguous: true }, expectedCostUsd: 57.6, actualCostUsd: 58.31, usd: 0.71, overUsd: 1.2, underUsd: 0.5, withinUsd: 0.01, rowCount: 3 },
     latestSettledGap: null, counts: { channels: 7, countedChannels: 6, mismatchedChannels: 2, attentionChannels: 1, uncomputable: { UPSTREAM_PRICE_UNSUPPORTED: 1, MODEL_PRICE_MISSING: 1 }, mismatchedDays: { over: 1, under: 1 } },
     gapThreshold: { usd: 0.05, rate: 0.02 }, rows: [row()], asOf: new Date(NOW).toISOString(), tz: TZ, displayCurrency: "USD", fixedCostUsd: 2.33, netProfitUsd: 36.86,
-    ownIncomeUnavailable: null, unaccountedUpstreamCostUsd: 4.2, unlinkedChannelCount: 2, rateUnset: [{ id: "up", name: "拼车团队" }], fixedOffProfitStations: [], ...overrides,
+    ownIncomeUnavailable: null, unlinkedChannelCount: 2, rateUnset: [{ id: "up", name: "拼车团队" }], fixedOffProfitStations: [], ...overrides,
   };
 }
 const todayPage = (overrides = {}) => page({ range: { preset: "today", startMs: dayStartInTz(D("10-26"), TZ), endMs: NOW, timezone: TZ }, dayCounts: { fixed: 0, reading: 0, today: 1 },
@@ -85,12 +85,12 @@ test("表下面那一行：没算进利润的上游成本、还没算利润的�
   const hrefs = { upstreams: "/stations", settings: "/settings" };
   const notes = footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 2 * 3600000 });
   assert.deepEqual(notes.map((n) => [n.key, n.text, n.link?.text]), [
-    ["unaccounted", "另有 $4.20 上游成本没算进利润", "查看各上游"], ["unlinked", "还有 2 个渠道没绑定上游，没算进来。", "去上游资源"], ["rate", RATE_UNSET_USD, undefined],
+    ["unlinked", "还有 2 个渠道没绑定上游，没算进来。", "去上游资源"], ["rate", RATE_UNSET_USD, undefined],
     ["lagging", "自营站点的收费记录读得慢，只读到 12:30，这以后的应付成本还没算。", "去设置"],
   ]);
   assert.equal(footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 10 * 60000 }).some((n) => n.key === "lagging"), false);
   assert.equal(footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 10 * 60000, behindMs: 2 * 3600000 }).some((n) => n.key === "lagging"), true);
-  assert.deepEqual(footerNotes(page({ unaccountedUpstreamCostUsd: null, unlinkedChannelCount: 0, rateUnset: [] }), ctx, hrefs, null), []);
+  assert.deepEqual(footerNotes(page({ unlinkedChannelCount: 0, rateUnset: [] }), ctx, hrefs, null), []);
 });
 
 test("计算明细里的几句：单价每百万 Token，管理员自用扣没扣，倍率变没变", () => {

@@ -18,7 +18,7 @@ import { Panel } from "../../components/panel";
 import { RangePicker } from "../../components/range-picker";
 import { useShellPage } from "../../components/shell-context";
 import { useUrlParams } from "../../components/use-url-state";
-import { fmtMoney, pageMoney, rowMoney } from "../reconciliation/profit-format";
+import { fmtMoney, rowMoney } from "../reconciliation/profit-format";
 import { COPY } from "./copy";
 import { DailyCostPanel } from "./daily-cost-chart";
 import { addDays, validDay } from "./derive";
@@ -143,7 +143,7 @@ export default function AnalyticsPage() {
     );
   }
 
-  if (!profit.rows.length && !profit.unaccountedUpstreamCostUsd) {
+  if (!profit.rows.length) {
     return (
       <div className="jy-page">
         <Panel title={COPY.panel.mix} extra={toDaily}>
@@ -196,8 +196,6 @@ function MixPanel({ profit, extra }: { profit: ProfitPageResponse; extra?: React
     byUpstream.set(id, entry);
   }
   const items: HBarItem[] = [...byUpstream.entries()].map(([id, entry]) => ({ key: id, name: entry.name, value: r2(entry.value) }));
-  const unaccounted = pageMoney(profit, currency).unaccounted;
-  if (unaccounted) items.push({ key: "unaccounted", name: COPY.unaccounted, value: r2(unaccounted) });
   const total = items.reduce((sum, item) => sum + (item.value ?? 0), 0);
   return (
     <Panel title={COPY.panel.mix} caption={COPY.mixCaption} extra={extra}>

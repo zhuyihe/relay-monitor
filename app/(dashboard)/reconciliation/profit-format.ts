@@ -49,7 +49,7 @@ export function rowMoney(row: ProfitRow, currency: ReconciliationCurrency) {
 // 整页的数在显示币种下：按美元直接用接口的 pageTotals；按人民币时各行按各自的汇率换算再加（接口只给美元）
 export function pageMoney(page: ProfitPageResponse, currency: ReconciliationCurrency) {
   const counted = page.rows.filter((row) => row.counted);
-  if (currency !== "CNY") return { income: page.pageTotals.incomeUsd, actual: page.pageTotals.actualCostUsd, gross: page.pageTotals.grossProfitUsd, fixedCost: page.fixedCostUsd, fixedExact: true, net: page.netProfitUsd, unaccounted: page.unaccountedUpstreamCostUsd, approx: false };
+  if (currency !== "CNY") return { income: page.pageTotals.incomeUsd, actual: page.pageTotals.actualCostUsd, gross: page.pageTotals.grossProfitUsd, fixedCost: page.fixedCostUsd, fixedExact: true, net: page.netProfitUsd, approx: false };
   const moneys = counted.map((row) => rowMoney(row, currency));
   const income = counted.length ? sum(moneys.map((item) => item.income ?? 0)) : null, actual = counted.length ? sum(moneys.map((item) => item.actual ?? 0)) : null;
   const gross = income != null && actual != null ? income - actual : null;
@@ -57,8 +57,8 @@ export function pageMoney(page: ProfitPageResponse, currency: ReconciliationCurr
   const ownRate = page.rows.find((row) => finite(row.rates?.income))?.rates.income ?? null;
   // 显示人民币：直接用接口给的人民币原值；显示美元：用各上游自己的汇率折好的美元数（不经自营站点的汇率）
   const fixedCost = page.fixedCostCny !== undefined ? page.fixedCostCny : toDisplay(page.fixedCostUsd, ownRate, currency);
-  // 固定成本、没算进利润的上游成本是按自营站点的汇率换回来的，写的时候带「≈」（用语规范 §7）
-  return { income, actual, gross, fixedCost, fixedExact: page.fixedCostCny !== undefined, net: gross != null && fixedCost != null ? gross - fixedCost : null, unaccounted: toDisplay(page.unaccountedUpstreamCostUsd, ownRate, currency), approx: true };
+  // 固定成本是按自营站点的汇率换回来的，写的时候带「≈」（用语规范 §7）
+  return { income, actual, gross, fixedCost, fixedExact: page.fixedCostCny !== undefined, net: gross != null && fixedCost != null ? gross - fixedCost : null, approx: true };
 }
 
 // ---- 范围 ----
@@ -325,7 +325,6 @@ export const OWN_LOG_LAG_MS = 3600000;
 // ownLog：GET /api/settings 的 ownLog（{ coveredToMs, behindMs? }），没有自营站点、没有进度时是 null
 export function footerNotes(page: ProfitPageResponse, ctx: Ctx, hrefs: { upstreams: string; settings: string }, ownLog: { coveredToMs?: number | null; behindMs?: number | null } | null = null): FooterNote[] {
   const money = pageMoney(page, ctx.currency), notes: FooterNote[] = [];
-  if (money.unaccounted != null && money.unaccounted > 0) notes.push({ key: "unaccounted", text: COPY.notice.unaccounted(money.approx ? COPY.metric.approx(fmtMoney(money.unaccounted, ctx.currency)) : fmtMoney(money.unaccounted, ctx.currency)), link: { text: COPY.notice.seeUpstreams, href: hrefs.upstreams } });
   if (page.unlinkedChannelCount > 0) notes.push({ key: "unlinked", text: COPY.notice.unlinked(page.unlinkedChannelCount), link: { text: COPY.table.goUpstreams, href: hrefs.upstreams } });
   if (page.notCountedDays?.count) notes.push({ key: "notCounted", text: COPY.notice.notCounted(page.notCountedDays.count) });
   const unsupported = (page.unsupportedChannels || []).filter((channel) => channel.reason === "KEY_IN_OTHER_UPSTREAM" && channel.upstreamNames.length)

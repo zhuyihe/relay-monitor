@@ -157,7 +157,7 @@ function profitPage(rows, o = {}) {
     latestSettledGap: preset === "today" && latestRows.length ? { day: PROFIT_YESTERDAY, usd: sum(latestRows, (row) => row.latestSettledGap.usd), mismatchedRowCount: latestRows.filter((row) => ["over", "under"].includes(row.latestSettledGap.state)).length } : null,
     counts: { channels: channelCount(rows), countedChannels: channelCount(counted), mismatchedChannels: channelCount(rows.filter((row) => ["over", "under"].includes(preset === "today" ? row.latestSettledGap?.state : row.gap.state))), attentionChannels: channelCount(rows.filter((row) => row.attention)), uncomputable, mismatchedDays: { over: judged.filter((row) => row.gap.state === "over").length, under: judged.filter((row) => row.gap.state === "under").length } },
     gapThreshold: { usd: 0.05, rate: 0.02 }, rows, asOf: o.asOf || PROFIT_AS_OF, tz: PROFIT_TZ, displayCurrency: "USD", fixedCostUsd: o.fixedCostUsd ?? 0.5, netProfitUsd: incomeUsd == null ? null : incomeUsd - actualCostUsd - (o.fixedCostUsd ?? 0.5),
-    ownIncomeUnavailable: o.ownIncomeUnavailable || null, unaccountedUpstreamCostUsd: o.unaccounted ?? null, unlinkedChannelCount: o.unlinked ?? 0, rateUnset: o.rateUnset || [], fixedOffProfitStations: [],
+    ownIncomeUnavailable: o.ownIncomeUnavailable || null, unlinkedChannelCount: o.unlinked ?? 0, rateUnset: o.rateUnset || [], fixedOffProfitStations: [],
   };
 }
 function profitDetail(o = {}) {
@@ -304,9 +304,9 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
   await rowOf(unread.page, "Rule A").getByText("$1.00", { exact: true }).waitFor(); assert.equal(await rowOf(unread.page, "Rule A").locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 3); // 收入读不到：收入、毛利、毛利率三格「—」
 });
 
-test("表下面一行：没算进利润的上游成本、还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
-  const { page } = await openDailyPage(t, { pageOptions: { unaccounted: 3.1, unlinked: 2, rateUnset: [{ id: "upstream-1", name: "Fixture upstream" }] }, ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 2 * 3600000, behindMs: 2 * 3600000 } });
-  const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unaccounted("$3.10") }).waitFor(); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); await notes.getByText(RATE_UNSET_USD, { exact: true }).waitFor();
+test("表下面一行：还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
+  const { page } = await openDailyPage(t, { pageOptions: { unlinked: 2, rateUnset: [{ id: "upstream-1", name: "Fixture upstream" }] }, ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 2 * 3600000, behindMs: 2 * 3600000 } });
+  const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); await notes.getByText(RATE_UNSET_USD, { exact: true }).waitFor();
   await notes.locator("span", { hasText: /自营站点的收费记录读得慢，只读到 (10月9日 )?9:00，这以后的应付成本还没算。/ }).waitFor(); assert.equal(await notes.getByRole("link", { name: PROFIT_COPY.notice.goSettings, exact: true }).getAttribute("href"), "/settings");
   const fresh = await openDailyPage(t, { ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 60000, behindMs: 60000 } }); await rowOf(fresh.page, "Rule A").waitFor(); assert.equal(await fresh.page.locator(".jy-profit-notes").count(), 0);
 });
@@ -796,14 +796,13 @@ test("成本估算：只有「上游成本构成」和「每天的上游成本�
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
-    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows), unaccountedUpstreamCostUsd: 0.5,
+    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows),
       dailyCost: [{ day: "2026-10-07", actualCostUsd: 2 }, { day: PROFIT_TODAY, actualCostUsd: 1 }] });
     throw new Error("unexpected cost fixture API: " + path);
   }, undefined, false, null, "/analytics");
   await page.getByRole("region", { name: ANALYTICS_COPY.panel.mix, exact: true }).waitFor();
   await page.getByRole("region", { name: ANALYTICS_COPY.panel.daily, exact: true }).waitFor();
   assert.equal(await page.getByRole("region").filter({ hasText: ANALYTICS_COPY.panel.heat }).count(), 0, "花费时段已删");
-  await page.getByText(ANALYTICS_COPY.unaccounted, { exact: false }).first().waitFor();
   await page.getByText(ANALYTICS_COPY.todayLegend, { exact: false }).first().waitFor();
   await page.getByRole("link", { name: "每日利润", exact: true }).first().waitFor();
   assert.equal(await page.getByRole("button", { name: "近 90 天", exact: true }).count(), 0, "没有近 90 天");

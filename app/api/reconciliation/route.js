@@ -17,7 +17,7 @@ export const GET = withAuth(async (request, rt) => {
       preset,
       startMs: sp.get("startMs"),
       endMs: sp.get("endMs"),
-    }, { mode: "evaluate", force: sp.get("force") === "true", origin: "page", accountUsage: true }));
+    }, { mode: "evaluate", force: sp.get("force") === "true", origin: "page" }));
   }
   catch (error) {
     const failure = reconciliationErrorResponse(error);

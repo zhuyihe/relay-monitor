@@ -54,7 +54,6 @@ export const COPY = Object.freeze({
   dailyEmpty: "这段时间没有上游成本。",
   todayLegend: "今天（还会变）",
   mixUnread: "读不到每日利润，这里先不显示。",
-  unaccounted: "没算进利润的上游成本",
   mixUnit: "成本",
   total: "合计",
   mixEmpty: "这段时间没有上游成本。",

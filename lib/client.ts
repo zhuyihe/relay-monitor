@@ -168,7 +168,7 @@ export type ProfitPageResponse = {
   counts: { channels: number; countedChannels: number; mismatchedChannels: number; attentionChannels: number; uncomputable: Record<string, number>; mismatchedDays: { over: number; under: number } };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
   asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
-  ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number; notCountedDays?: { count: number }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
+  ownIncomeUnavailable: { code: string } | null; unlinkedChannelCount: number; notCountedDays?: { count: number }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
   // 每天的实付成本合计（成本估算「每天的上游成本」用）：美元原值和按各行汇率折的人民币
   dailyCost?: { day: string; actualCostUsd: number; actualCostCny?: number }[];
