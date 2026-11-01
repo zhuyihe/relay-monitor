@@ -87,6 +87,8 @@ const ENGLISH_ALLOWED_IN = Object.freeze({
   // 装渠道 Key 读取服务的「怎么装」收起区（K2a，ui-copy-spec.md §3.7 附录）：环境变量名、命令、配置项名和部署文档路径不翻译
   // 设置里「读取错误日志」下面那句提示：自营站点的环境变量 ERROR_LOG_ENABLED=true 原样写、不翻译（用户在站点那边要找这个名字）
   "app/(dashboard)/settings/copy.ts": /ERROR_LOG_ENABLED=true/g,
+  // 模型供需页没开错误日志的提示条：同一个环境变量名原样写（用户在自营站点那边要找这个名字）
+  "app/(dashboard)/models/copy.ts": /ERROR_LOG_ENABLED=true/g,
   "app/(dashboard)/stations/station-drawer.tsx": /docker compose|relay-key-agent|RELAY_KEY_AGENT_SECRET|openssl rand -base64 32|deploy\/README\.md|HTTPS/g,
 });
 const leftoverEnglish = (file, text) =>
