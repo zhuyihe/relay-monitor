@@ -1172,7 +1172,7 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   const at = (name) => order.findIndex((x) => x && x.startsWith(name));
   assert.ok(at(NOTIFICATIONS_COPY.channels) >= 0 && at(NOTIFICATIONS_COPY.channels) < at(NOTIFICATIONS_COPY.rules) && at(NOTIFICATIONS_COPY.rules) < at(NOTIFICATIONS_COPY.report), order.join(" / "));
 
-  // 系统设置：左边刷新与数据、历史数据保留，右边账户安全、关于
+  // 系统设置：左边刷新与数据、历史数据保留，右边账号安全、关于
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(new URL("/settings", page.url()).href);
   const sRegion = (name) => page.getByRole("region", { name, exact: true });
@@ -1245,7 +1245,7 @@ test("告警中心提醒节奏在新布局下照常自动保存：展开改数�
   assert.ok(Math.abs(r.x - c.x) < 1 && c.y > r.y, "单栏");
 });
 
-test("系统设置：首次登录必须先改密码时只有账户安全一块、不分栏；上次自动清理没完成时历史概况直接展开、上面那一句不写", async (t) => {
+test("系统设置：首次登录必须先改密码时只有账号安全一块、不分栏；上次自动清理没完成时历史概况直接展开、上面那一句不写", async (t) => {
   let isDefaultPassword = true, cleanupFailed = false;
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
@@ -1271,7 +1271,7 @@ test("系统设置：首次登录必须先改密码时只有账户安全一块�
   await ret.getByText(new RegExp(SETTINGS_COPY.cleanupFailed)).first().waitFor();
 });
 
-test("登录页按码说：用户名或密码不对时标红输入框，试太多次时不标红，别的报错按控制台自己的说法写「登录失败：原因。」", async (t) => {
+test("登录页按码说：账号或密码不对时标红输入框，试太多次时不标红，别的报错按控制台自己的说法写「登录失败：原因。」", async (t) => {
   const answers = [
     (route) => failJSON(route, 401, { error: errorText({ code: "LOGIN_FAILED" }), code: "LOGIN_FAILED" }),
     (route) => failJSON(route, 429, { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" }),

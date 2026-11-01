@@ -72,7 +72,7 @@ test("登录：用户名或密码不对时 401 带 LOGIN_FAILED，试太多次�
   assert.equal(ok.status, 200);
   assert.deepEqual(await ok.json(), { ok: true, username: "admin", isDefaultPassword: false });
   assert.deepEqual(okRt.sessions.calls, [["reserve", "1.2.3.4"], ["release", "1.2.3.4"]]);
-  assert.equal(errorText({ code: "LOGIN_FAILED" }), "用户名或密码不对");
+  assert.equal(errorText({ code: "LOGIN_FAILED" }), "账号或密码不对");
   assert.equal(errorText({ code: "LOGIN_RATE_LIMITED" }), "试了太多次，请 5 分钟后再试");
 });
 
