@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createUserOps, forgetUserOps } from "./user-ops.js";
 import { bigUsersSummary, userDetail, usersPage, usersResponse } from "./user-ops-page.js";
+import { churnResponse } from "./user-ops-churn.js";
 import { MemoryUserOpsStore } from "./test-support/user-ops-memory-store.js";
 import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
 
@@ -43,6 +44,10 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
         }
       }
       return reply(rows);
+    }
+    if (url.pathname === "/api/data/flow") {
+      if (site.flowFail) return { status: 500, text: async () => "{}" };
+      return reply(site.flow || []);
     }
     if (url.pathname === "/api/data/") {
       // 一个用户按模型分（/api/data/?username=）：6 个模型，占比 40/25/15/10/6/4
@@ -774,4 +779,74 @@ test("整页：已流失——前 30 天花过钱、近 7 天一分没花；只�
   assert.deepEqual([row("gone").status, row("longgone").status], ["churned", null]);
   const counts = usersResponse(page, new URLSearchParams("scope=all")).list.counts;
   assert.equal(counts.only.churned, 1);
+});
+
+// ===== v8 流失页签（server/user-ops-churn.js）=====
+const flowRow = (username, model, usd, extra = {}) => ({ username, use_group: "default", model_name: model, channel_id: 1, channel_name: "渠道一", token_used: 10, count: 2, quota: Math.round(usd * QUOTA_PER_UNIT), ...extra });
+// 一位用户（drop）在今天（业务时区 11-02）0 点以后一分钱没花，之前一直每小时 5 美元；别人照常
+const churnUsers = () => [...crowd().filter((user) => user.id !== 2), { id: 2, username: "drop", balance: 5000, burn: 5, until: Date.parse("2026-11-01T15:59:59Z") }];
+const churnPage = (f, query = "") => churnResponse(f.rt, f.ops, f.store, new URLSearchParams(query), { now: f.clock.now });
+
+test("流失页：今天明显少了——读库里过去 7 天同一时段的小时用量；过去几天的小时数按天记在内存里，同一轮再来只读今天的", async (t) => {
+  const f = makeSite(t, churnUsers());
+  assert.equal((await churnPage(f)).starting, true, "后台还没读到过数");
+  await f.stepsTo(10.5); // 业务时区 06:30：昨天已经结束 6 小时，可以按天记下来
+  const first = f.store.calls.usageRowsRead;
+  const page = await churnPage(f);
+  const readFirst = f.store.calls.usageRowsRead - first;
+  assert.equal(page.ready.today, true);
+  const drop = page.list.rows.find((row) => row.username === "drop");
+  assert.ok(drop, JSON.stringify(page.list.rows.map((row) => [row.username, row.status])));
+  assert.deepEqual([drop.status, Math.round(drop.before), drop.after, Math.round(drop.loss)], ["todayLow", 30, 0, 120], "平时 0 点到 6 点 $30 → 今天 $0；一天少花 5 × 24 = 120");
+  assert.equal(page.list.rows.some((row) => row.username === "big1"), false, "照常花的不在表里");
+  const second = f.store.calls.usageRowsRead;
+  await churnPage(f);
+  assert.ok(f.store.calls.usageRowsRead - second <= 100, `同一轮再来只读今天（6 个小时 × 12 位用户）（${f.store.calls.usageRowsRead - second} 行），第一次读了 ${readFirst} 行`);
+  assert.ok(readFirst > 7 * 24 * 10, "第一次读了过去 7 天的小时行");
+  assert.deepEqual(page.summary.down.count, 0);
+});
+
+test("流失页：每位用户主要用的模型来自 /api/data/flow 一个请求，缓存 10 分钟；额度紧时不读、写 BUSY；读失败也不拦页面", async (t) => {
+  const f = makeSite(t, churnUsers());
+  f.site.flow = [flowRow("drop", "gpt-4o", 100), flowRow("drop", "claude", 30), flowRow("drop", "claude", 30, { channel_id: 2, channel_name: "渠道二" }), flowRow("big1", "gpt-4o", 5)];
+  for (let run = 0; run < 32; run += 1) await f.step();
+  const count = () => f.site.requests.filter((item) => item === "/api/data/flow").length;
+  const before = count();
+  const page = await churnPage(f);
+  assert.equal(page.modelsError, null);
+  assert.equal(page.list.rows.find((row) => row.username === "drop").model, "gpt-4o", "近 30 天花得最多：gpt-4o 100 比 claude 60 多（两个渠道的 claude 加起来）");
+  assert.equal(count() - before, 1);
+  await churnPage(f);
+  assert.equal(count() - before, 1, "10 分钟内再来：用缓存，不再读");
+  await f.step(); // 10 分钟以后
+  await churnPage(f);
+  assert.equal(count() - before, 2);
+  // 额度紧：不发请求
+  const g = makeSite(t, churnUsers());
+  g.site.flow = [flowRow("drop", "gpt-4o", 100)];
+  for (let run = 0; run < 32; run += 1) await g.step();
+  for (let n = 0; n < 220; n += 1) noteOwnRequest("https://own.test/api/x", { status: 200, now: g.clock.now });
+  const flowBefore = g.site.requests.filter((item) => item === "/api/data/flow").length;
+  const busy = await churnPage(g);
+  assert.equal(busy.modelsError, "BUSY");
+  assert.equal(busy.list.rows.find((row) => row.username === "drop").model, null, "主要用的模型写「—」，别的照常");
+  assert.equal(g.site.requests.filter((item) => item === "/api/data/flow").length, flowBefore, "一个请求都没发");
+  // 读失败
+  const h = makeSite(t, churnUsers());
+  h.site.flowFail = true;
+  for (let run = 0; run < 32; run += 1) await h.step();
+  const failed = await churnPage(h);
+  assert.ok(failed.modelsError);
+  assert.equal(failed.list.rows.find((row) => row.username === "drop").status, "todayLow");
+});
+
+test("流失页：没读到过数是 starting，没设置自营站点是 unset；过去 7 个整天没补全时今天明显少了不判（ready.today 是 false），别的照常", async (t) => {
+  const f = makeSite(t, churnUsers());
+  for (let run = 0; run < 3; run += 1) await f.step();
+  const page = await churnPage(f);
+  assert.deepEqual([page.ready.today, page.ready.churn, page.ready.down], [false, false, false]);
+  assert.equal(page.list.counts.only.todayLow, null, "个数写「—」，不是 0");
+  assert.deepEqual(page.summary.retention, null);
+  const none = { store: { list: () => [], settings: {}, rules: {}, channels: [] } };
+  assert.equal((await churnResponse(none, f.ops, f.store, new URLSearchParams())).unset, true);
 });

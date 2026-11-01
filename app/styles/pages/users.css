@@ -122,3 +122,10 @@ table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 .jy-users-drawer-meta > div { display: inline-flex; gap: 8px; }
 .jy-users-drawer-meta dt { color: var(--jy-ink-2); }
 .jy-users-drawer-meta dd { margin: 0; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
+
+/* 流失页签：四个数、主表下面的说明、「怎么判断的」 */
+.jy-churn-kpis dd.jy-caption { margin: 0; }
+.jy-churn-note { margin: 0; padding: 8px 16px 0; }
+.jy-churn-how { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-users-model { display: inline-block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.jy-users-card .jy-users-model { max-width: 140px; }

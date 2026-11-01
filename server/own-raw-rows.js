@@ -18,7 +18,8 @@ export const OWN_ROW_READERS = Object.freeze({
 });
 
 // kind：model | user | flow；返回读到的行（调用方不要改它：同一份会给几个调用方）
-export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 120000, now = Date.now(), readers = OWN_ROW_READERS } = {}) {
+// beforeRead：真的要发请求之前问一下（额度紧、断路时抛错就不发）；命中缓存、跟着别人那一次读的不问
+export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 120000, now = Date.now(), readers = OWN_ROW_READERS, beforeRead = null } = {}) {
   const read = readers[kind];
   if (!read) throw new Error(`unknown own rows kind: ${kind}`);
   const cache = (rt._ownRawRows ||= new Map());
@@ -28,7 +29,7 @@ export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 12000
   if (hit?.rows && now - hit.at < ttlMs) return hit.rows;
   if (hit?.promise) return hit.promise;
   const startedAt = now;
-  const promise = Promise.resolve().then(() => read(own, startMs, endMs)).then((rows) => {
+  const promise = Promise.resolve().then(() => { beforeRead?.(); return read(own, startMs, endMs); }).then((rows) => {
     if (cache.get(key)?.promise === promise) {
       const entry = { at: startedAt, rows };
       cache.set(key, entry);

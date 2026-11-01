@@ -19,6 +19,7 @@ const { COPY } = await import("./copy.ts");
 const {
   backfillEta, backfillLine, balanceWarmLine, bigLabel, bigTipText, deltaText, freshNote, lastUsedText, listQueryString, money, overviewKpis, overviewSentence,
   parseGroups, parseOnly, parsePageNo, parseScope, parseSort, parseTab, prevSeriesOf, runwayText, seriesOf, sparkValues, BIG_LINK, SOON_LINK,
+  CHURN_FILTERS, changeText, churnKpis, churnQueryString, lossText, parseChurnOnly, returnedParts,
 } = await import("./users-format.ts");
 const { EMPTY } = await import("../../../lib/format.js");
 const { dayStartInTz } = await import("../../../lib/business-time.js");
@@ -211,7 +212,7 @@ test("新消费用户图旁边那行小字：近 30 天共几个、前 30 天几
 
 test("地址栏：不认识的页签回到概览，不认识的筛选、范围、排法回到默认；分组可以多个", () => {
   assert.equal(parseTab("users"), "users");
-  assert.equal(parseTab("churn"), "overview", "流失、需求还不能点，地址里写了也回到概览");
+  assert.equal(parseTab("demand"), "overview", "需求还不能点，地址里写了也回到概览");
   assert.equal(parseTab(null), "overview");
   assert.equal(parseOnly("soon"), "soon");
   assert.equal(parseOnly("churned"), "churned");
@@ -232,4 +233,76 @@ test("用户表的查询串：默认值不写，和接口、地址栏同一套�
   assert.equal(listQueryString(base), "");
   assert.equal(listQueryString({ ...base, scope: "all", big: true, only: "soon", groups: ["vip", "default"], sort: "user", dir: "asc", page: 2, q: " ali " }), "scope=all&big=1&only=soon&group=vip%2Cdefault&sort=user&dir=asc&page=2&q=ali");
   assert.equal(listQueryString({ ...base, sort: "week", dir: "asc" }), "sort=week&dir=asc", "近 7 天消费从低到高也要写出来");
+});
+
+// ---- 流失页签 ----
+const churnPage = (over = {}) => ({
+  asOf: NOW, syncedMs: NOW, tz: TZ, rate: 1, ownStationId: "own1", fresh: true, backfill: { done: true, core: true, days: 90, total: 90 },
+  ready: { down: true, churn: true, today: true, retention: true, retentionPrev: true, available: 89 },
+  summary: {
+    down: { count: 2, loss: 52.26 }, newChurn: { count: 2, monthly: 312.19 },
+    retention: { cohort: 15, kept: 13, rate: 13 / 15, prev: { cohort: 12, kept: 11, rate: 11 / 12 } },
+    returned: { count: 1, top: [{ id: 7, username: "nova", spend: 48.2 }] },
+  },
+  modelsError: null, list: { rows: [], total: 0, page: 1, pages: 1, pageSize: 50, totals: { count: 0, loss: 0 }, counts: { big: 0, only: { all: 0, todayLow: 0, down: 0, churned: 0, returned: 0 } } }, ...over,
+});
+
+test("流失的四个数：在下滑几个、一天少收多少；本周新流失几个、以前每月花多少；月留存比上一期；回流几个", () => {
+  const kpis = churnKpis(churnPage());
+  assert.deepEqual(kpis.map((kpi) => kpi.title), ["在下滑", "本周新流失", "月留存", "回流"]);
+  assert.deepEqual(kpis.map((kpi) => kpi.value), ["2 个", "2 个", "87%", "1 个"]);
+  assert.deepEqual(kpis.map((kpi) => kpi.sub), ["一天少收 ¥52.26", "他们以前每月花 ¥312.19", "上一期 92%，低 5 个百分点", ""], "回流那一格的下面一句由页面摆成名字链接");
+  assert.equal(kpis[2].titleHint, COPY.churn.kpiRetentionHint);
+});
+
+test("月留存下面一句：比上一期高、低、一样；没有上一期写「上个 30 天花钱的 N 个里，M 个还在花」；没有人花钱、还没补到写原话", () => {
+  const withRetention = (retention) => churnKpis(churnPage({ summary: { ...churnPage().summary, retention } }))[2];
+  assert.equal(withRetention({ cohort: 10, kept: 9, rate: 0.9, prev: { cohort: 10, kept: 8, rate: 0.8 } }).sub, "上一期 80%，高 10 个百分点");
+  assert.equal(withRetention({ cohort: 10, kept: 8, rate: 0.8, prev: { cohort: 10, kept: 8, rate: 0.8 } }).sub, "上一期 80%，和这一期一样");
+  assert.equal(withRetention({ cohort: 15, kept: 13, rate: 13 / 15, prev: null }).sub, "上个 30 天花钱的 15 个里，13 个还在花");
+  assert.deepEqual([withRetention({ cohort: 0, kept: 0, rate: null, prev: null }).value, withRetention({ cohort: 0, kept: 0, rate: null, prev: null }).sub], [EMPTY, COPY.churn.retentionNone]);
+  assert.deepEqual([withRetention(null).value, withRetention(null).sub], [EMPTY, COPY.churn.afterFill]);
+  assert.equal(withRetention({ cohort: 10, kept: 9, rate: 0.9, prev: { cohort: 0, kept: 0, rate: null } }).sub, "上个 30 天花钱的 10 个里，9 个还在花", "上一期没有人花钱：当没有上一期");
+});
+
+test("四个数：还判不了的（补数据没补到）写「—」「补满后再算」；没有的写原话", () => {
+  const filling = churnKpis(churnPage({ ready: { down: false, churn: false, today: false, retention: false, retentionPrev: false, available: 3 }, summary: { ...churnPage().summary, retention: null } }));
+  assert.deepEqual(filling.map((kpi) => kpi.value), [EMPTY, EMPTY, EMPTY, EMPTY]);
+  assert.deepEqual(filling.map((kpi) => kpi.sub), [COPY.churn.afterFill, COPY.churn.afterFill, COPY.churn.afterFill, COPY.churn.afterFill]);
+  const none = churnKpis(churnPage({ summary: { ...churnPage().summary, down: { count: 0, loss: 0 }, newChurn: { count: 0, monthly: 0 }, returned: { count: 0, top: [] } } }));
+  assert.deepEqual([none[0].sub, none[1].sub, none[3].sub], [COPY.churn.downNone, COPY.churn.newChurnNone, COPY.churn.returnedNone]);
+});
+
+test("回流那一格：一位写「nova 近 7 天花了 ¥48.20」；2–3 位写合计；超过 3 位写「nova 等 4 个」（点了在表里列出来）；没有不写", () => {
+  const text = (parts) => parts.map((part) => part.text ?? part.name).join("");
+  const returned = (top, count = top.length) => churnPage({ summary: { ...churnPage().summary, returned: { count, top } } });
+  const one = returnedParts(churnPage());
+  assert.equal(text(one), "nova 近 7 天花了 ¥48.20");
+  assert.deepEqual(one.filter((part) => part.kind === "user").map((part) => [part.id, part.name]), [[7, "nova"]]);
+  assert.equal(text(returnedParts(returned([{ id: 1, username: "a", spend: 10 }, { id: 2, username: "b", spend: 5 }]))), "a、b 近 7 天一共花了 ¥15.00");
+  const many = returnedParts(returned([{ id: 1, username: "a", spend: 10 }, { id: 2, username: "b", spend: 5 }, { id: 3, username: "c", spend: 4 }], 4));
+  assert.equal(text(many), "a 等 4 个");
+  assert.deepEqual(many.map((part) => part.kind), ["list"]);
+  assert.deepEqual(returnedParts(returned([], 0)), []);
+  assert.deepEqual(returnedParts(churnPage({ ready: { ...churnPage().ready, churn: false } })), [], "还没补到的不点名");
+});
+
+test("流失表里「以前日均 → 最近日均（变化）」和「一天少花多少」；回流的人写「—」", () => {
+  const row = (over) => ({ id: 1, username: "a", big: false, disabled: false, group: "", lastUsed: null, balanceUsd: 1, model: null, status: "down", before: 53.68, after: 25.12, loss: 28.56, ...over });
+  assert.equal(changeText(row(), 1), "¥53.68 → ¥25.12（−53.2%）");
+  assert.equal(changeText(row({ status: "churned", before: 20, after: 0 }), 1), "¥20.00 → ¥0.00（−100.0%）");
+  assert.equal(changeText(row({ status: "returned", before: null, after: null, loss: null }), 1), EMPTY);
+  assert.equal(lossText(row(), 1), "−¥28.56 /天");
+  assert.equal(lossText(row({ loss: null }), 1), EMPTY);
+  assert.equal(lossText(row({ loss: 10 }), 7.2), "−¥72.00 /天", "按汇率换算");
+});
+
+test("流失页签的地址栏和查询串：不认识的筛选回到全部；默认值不写；流失页签是开着的", () => {
+  assert.equal(parseTab("churn"), "churn");
+  assert.deepEqual(["todayLow", "down", "churned", "returned", "all"].map((value) => parseChurnOnly(value)), ["todayLow", "down", "churned", "returned", "all"]);
+  assert.equal(parseChurnOnly("soon"), "all");
+  assert.equal(parseChurnOnly(null), "all");
+  assert.equal(churnQueryString({ only: "all", big: false, page: 1, q: "" }), "");
+  assert.equal(churnQueryString({ only: "down", big: true, page: 2, q: " nova " }), "only=down&big=1&page=2&q=nova");
+  assert.deepEqual(CHURN_FILTERS, ["all", "todayLow", "down", "churned"]);
 });

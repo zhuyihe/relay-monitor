@@ -23,6 +23,7 @@ import { COPY as NOTIFICATIONS_COPY } from "../app/(dashboard)/notifications/cop
 import { COPY as LOGIN_COPY } from "../app/login/copy.ts";
 import { COPY as USERS_COPY } from "../app/(dashboard)/users/copy.ts";
 import { buildUserDetail, buildUsersView, dayGrid } from "../lib/user-ops-view.js";
+import { buildChurnView, queryChurn } from "../lib/user-ops-churn.js";
 import { usersResponse } from "../server/user-ops-page.js";
 // 每日利润页上的字（一张对账表，app/(dashboard)/reconciliation/copy.ts）
 import { COPY as PROFIT_COPY } from "../app/(dashboard)/reconciliation/copy.ts";
@@ -2798,9 +2799,11 @@ function usersFixture() {
   for (let i = 1; i <= 120; i += 1) {
     const username = `u${String(i).padStart(3, "0")}`;
     const active = i <= 60, goneLong = i > 60 && i <= 80, goneRecent = i > 80 && i <= 85;
-    const fresh = i === 5;
+    const fresh = i === 5, declining = i === 6 || i === 7, comeback = i === 10;
     const series = Array.from({ length: N }, (_, d) => {
       if (fresh) return d >= N - 3 ? 12 : 0;
+      if (declining) return d >= N - 18 && d <= N - 5 ? 20 : d >= N - 4 && d <= N - 2 ? 2 : 0;
+      if (comeback) return d === 5 || (d >= N - 3 && d <= N - 2) ? 6 : 0;
       if (active) return (i <= 3 ? 40 : 6) + (d % 3);
       if (goneLong) return d >= N - 37 && d < N - 33 ? 5 : 0;
       if (goneRecent) return d >= N - 20 && d < N - 10 ? 5 : 0;
@@ -2812,7 +2815,17 @@ function usersFixture() {
     runways.set(i, i === 1 ? { state: "soon", level: 1, days: 0.3, burnPerDay: 120, balanceUsd: 20, big: true, dailyAvg: 41 } : { state: active ? "ok" : "none", level: 0, days: active ? 30 : null, burnPerDay: active ? 6 : null, balanceUsd: 100 + i, big: i <= 3, dailyAvg: i <= 3 ? 40 : 6 });
   }
   const view = buildUsersView({ now: USERS_NOW, tz: USERS_TZ, users, daily, recentHours: new Map(), runways, backfill: { done: true, core: true, days: 90, total: 90 }, pointsFirstMs: USERS_NOW - 5 * DAY, prepaidAgo: 9000 });
-  return { ...view, rate: 1, ownStationId: "own-1", level1Days: 0.5 };
+  const full = { ...view, rate: 1, ownStationId: "own-1", level1Days: 0.5 };
+  Object.defineProperty(full, "daily", { value: daily, enumerable: false });
+  return full;
+}
+// 流失页签的接口：用真的 buildChurnView / queryChurn；u009 今天明显少了，几位用户的主要模型
+function churnResponseOf(full, params) {
+  const sameTime = new Map([["u009", { today: 1, usual: 20, usualDay: 60 }]]);
+  const models = new Map([["u006", "gpt-4o"], ["u007", "claude-sonnet"]]);
+  const view = buildChurnView({ now: USERS_NOW, tz: USERS_TZ, rows: full.users, daily: full.daily, sameTime, models, ready: full.ready, backfill: full.backfill });
+  const list = queryChurn(view, { only: params.get("only"), big: params.get("big") === "1", q: params.get("q"), page: params.get("page") });
+  return { asOf: full.asOf, syncedMs: full.asOf, tz: full.tz, rate: 1, ownStationId: "own-1", fresh: true, backfill: full.backfill, ready: view.ready, summary: view.summary, modelsError: null, list };
 }
 async function openUsersPage(t, { viewport, search = "tab=users" } = {}) {
   const full = usersFixture(), requests = [];
@@ -2820,6 +2833,7 @@ async function openUsersPage(t, { viewport, search = "tab=users" } = {}) {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/users") { requests.push(url.search); return fulfill(route, usersResponse(full, url.searchParams)); }
+    if (url.pathname === "/api/users/churn") { requests.push(`churn${url.search}`); return fulfill(route, churnResponseOf(full, url.searchParams)); }
     const detail = url.pathname.match(/^\/api\/users\/(\d+)$/);
     if (detail) {
       const row = full.users.find((item) => item.id === Number(detail[1]));
@@ -2913,4 +2927,48 @@ test("用户运营·手机：用户表是一人一张卡片，筛选三行、没
   await page.getByText(USERS_COPY.drawer.created, { exact: true }).waitFor();
   assert.match(await page.locator(".jy-users-drawer-meta").innerText(), /分组\s*vip\s*注册时间[\s\S]*累计消费\s*¥/);
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-drawer-375.png`, fullPage: false }); }
+});
+
+test("用户运营·流失页签：四个数、按一天少花多少排的主表、状态筛选、回流、怎么判断的；筛选在服务端、地址栏跟着变", async (t) => {
+  const { page, requests } = await openUsersPage(t, { search: "tab=churn" });
+  await page.locator(".jy-churn-kpis dt").first().waitFor();
+  assert.deepEqual((await page.locator(".jy-churn-kpis dt").allInnerTexts()).map((text) => text.trim()), ["在下滑", "本周新流失", "月留存", "回流"]);
+  const kpis = (await page.locator(".jy-churn-kpis > div").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+  assert.match(kpis[0], /^在下滑 2 个 一天少收 ¥/);
+  assert.match(kpis[1], /^本周新流失 5 个 他们以前每月花 ¥/);
+  assert.match(kpis[2], /^月留存 \d+% /);
+  assert.match(kpis[3], /^回流 1 个 u010 近 7 天花了 ¥12\.00$/);
+  const rows = () => page.locator("table.jy-data tbody tr");
+  await rows().first().waitFor();
+  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "状态", "以前日均 → 最近日均", "一天少花多少", "最近使用", "余额", "主要用的模型"]);
+  // 默认：今天明显少了（u009，损失 ¥60 × 0.95）排最前，之后是在下滑（u006、u007，一天少 ¥18），再是已流失
+  assert.match(await rows().first().innerText(), /u009[\s\S]*今天明显少了/);
+  const names = await rows().locator("td:first-child button").allInnerTexts();
+  assert.deepEqual(names.slice(0, 3), ["u009", "u006", "u007"]);
+  assert.match(await rows().nth(1).innerText(), /在下滑[\s\S]*¥20\.00 → ¥2\.00（−90\.0%）[\s\S]*之前 14 天 → 近 3 天[\s\S]*−¥18\.00 \/天[\s\S]*gpt-4o/);
+  assert.match(await page.locator("table.jy-data tfoot").innerText(), /合计（\d+ 个用户）/);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/churn-1440.png`, fullPage: false }); }
+  // 状态筛选：在下滑 2 个
+  await usersGroup(page, USERS_COPY.churn.filterLabel).getByRole("button", { name: /^在下滑/ }).click();
+  await page.getByText("共 2 个，每页 50 个", { exact: true }).waitFor();
+  assert.match(page.url(), /only=down/);
+  assert.ok(requests.at(-1).startsWith("churn") && requests.at(-1).includes("only=down"));
+  // 回流：点名字开抽屉；筛选条上没有回流这一格，直到点了「N 个」的链接
+  assert.equal(await usersGroup(page, USERS_COPY.churn.filterLabel).getByRole("button", { name: /^回流/ }).count(), 0);
+  // 怎么判断的
+  await page.getByRole("button", { name: USERS_COPY.churn.howTitle }).click();
+  assert.match(await page.locator(".jy-churn-how").innerText(), /今天明显少了[\s\S]*在下滑[\s\S]*已流失[\s\S]*一个人只标一个状态/);
+  await page.getByRole("button", { name: "u010", exact: true }).click();
+  await page.waitForURL(/user=10/);
+});
+
+test("用户运营·流失页签·手机：一人一张卡片，损失在右上角，没有横向滚动", async (t) => {
+  const { page } = await openUsersPage(t, { viewport: { width: 375, height: 812 }, search: "tab=churn" });
+  const cards = page.locator(".jy-users-card");
+  await cards.first().waitFor();
+  assert.match(await cards.first().innerText(), /u009[\s\S]*今天明显少了[\s\S]*−¥/);
+  assert.match(await cards.nth(1).innerText(), /平时|之前 14 天 → 近 3 天/);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/churn-375.png`, fullPage: false }); }
 });

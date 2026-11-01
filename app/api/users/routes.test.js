@@ -11,11 +11,12 @@ const hook = registerHooks({ load(url, context, nextLoad) {
     source: "export const withAuth = handler => handler; export const json = (value, status = 200) => Response.json(value, {status});" };
   return nextLoad(url, context);
 } });
-let list, one, big;
+let list, one, big, churn;
 try {
   list = (await import("./route.js")).GET;
   one = (await import("./[id]/route.js")).GET;
   big = (await import("./big/route.js")).GET;
+  churn = (await import("./churn/route.js")).GET;
 } finally { hook.deregister(); }
 
 const own = { id: "own1", name: "我的站点", isOwn: true, type: "newapi", baseUrl: "https://own.test", accessToken: "tok" };
@@ -29,10 +30,10 @@ const fresh = () => {
 };
 const none = () => ({ store: { list: () => [], settings: {}, rules: {}, channels: [] }, pool: {} , _userOpsStore: new MemoryUserOpsStore() });
 
-test("没设置自营站点：三个接口都是 400 OWN_STATION_UNSET（页面走设置引导）", async () => {
+test("没设置自营站点：四个接口都是 400 OWN_STATION_UNSET（页面走设置引导）", async () => {
   const rt = none();
   rt.userOps = createUserOps(rt, { store: rt._userOpsStore });
-  for (const response of [await list(request("/api/users"), rt), await one(request("/api/users/1"), rt, { id: "1" }), await big(request("/api/users/big"), rt)]) {
+  for (const response of [await list(request("/api/users"), rt), await one(request("/api/users/1"), rt, { id: "1" }), await big(request("/api/users/big"), rt), await churn(request("/api/users/churn"), rt)]) {
     assert.equal(response.status, 400);
     assert.equal((await response.json()).code, "OWN_STATION_UNSET");
   }
@@ -47,6 +48,7 @@ test("后台还没读到过数：整页是 starting（页面写数据补全中�
   assert.equal(typeof page.tz, "string");
   assert.equal(page.summary, null);
   assert.deepEqual(await (await big(request("/api/users/big"), rt)).json(), { ready: false, big: [] });
+  assert.equal((await (await churn(request("/api/users/churn"), rt)).json()).starting, true, "流失页也是 starting");
   const missing = await one(request("/api/users/7"), rt, { id: "7" });
   assert.equal(missing.status, 404);
   assert.equal((await missing.json()).code, "USER_NOT_FOUND");
@@ -56,6 +58,7 @@ test("没有数据库（rt.pool 空）：不报错，整页是 starting，抽屉
   const rt = { store: { list: () => [own], settings: {}, rules: {}, channels: [] } };
   assert.equal((await (await list(request("/api/users"), rt)).json()).starting, true);
   assert.equal((await one(request("/api/users/1"), rt, { id: "1" })).status, 404);
+  assert.equal((await (await churn(request("/api/users/churn"), rt)).json()).starting, true);
   assert.deepEqual(await (await big(request("/api/users/big"), rt)).json(), { ready: false, big: [] });
   const unset = { store: { list: () => [], settings: {}, rules: {}, channels: [] } };
   assert.equal((await list(request("/api/users"), unset)).status, 400);
