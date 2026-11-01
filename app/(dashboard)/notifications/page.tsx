@@ -23,7 +23,7 @@ import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../com
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { More } from "../../components/more";
-import { etaRuleDisplay, etaWindowText } from "../../components/runway";
+import { etaRuleDisplay } from "../../components/runway";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
 import { COPY } from "./copy";
@@ -80,6 +80,9 @@ const USER_RULES = USER_ALERT_RULES.map((rule) => ({
 const ruleFormOf = (r: any): RuleForm => ({
   etaUnit: r?.etaUnit === "hours" ? "hours" : "days",
   etaVal: etaRuleDisplay(r),
+  // 重点用户快用完的提醒天数：自己一份，和上面的各设各的
+  userEtaUnit: r?.userEtaUnit === "hours" ? "hours" : "days",
+  userEtaVal: etaRuleDisplay({ etaDays: r?.userEtaDays ?? 3, etaUnit: r?.userEtaUnit }),
   renotify: Number(r?.renotifyHours ?? 24),
   errThreshold: Number(r?.errorThreshold ?? 1),
   errRetry: Number(r?.errorRetrySec ?? 30),
@@ -98,6 +101,8 @@ function shortLabel(label: string) {
 type RuleForm = {
   etaUnit: "days" | "hours";
   etaVal: number | null;
+  userEtaUnit: "days" | "hours";
+  userEtaVal: number | null;
   renotify: number | null;
   errThreshold: number | null;
   errRetry: number | null;
@@ -156,6 +161,7 @@ export default function NotificationsPage() {
     validate: (f) => {
       const errs: Record<string, string> = {};
       if (f.etaVal == null) errs.eta = requiredText(COPY.etaLabel);
+      if (f.userEtaVal == null) errs.userEta = requiredText(COPY.users.etaLabel);
       if (f.errThreshold == null && rulesRef.current.onError) errs.errThreshold = requiredText(COPY.errLabel);
       if (f.renotify == null) errs.renotify = `${requiredText(COPY.renotify)}${COPY.renotifyZero}`;
       if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retry)}${COPY.retryZero}`;
@@ -165,11 +171,15 @@ export default function NotificationsPage() {
       // 只有用户改过提醒天数才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把它改掉
       const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rulesRef.current, etaUnit: f.etaUnit });
       const val = Number(f.etaVal);
+      const userEtaEdited = f.userEtaVal != null && f.userEtaVal !== etaRuleDisplay({ etaDays: rulesRef.current.userEtaDays ?? 3, etaUnit: f.userEtaUnit });
+      const userVal = Number(f.userEtaVal);
       const r = await api("/api/notifications/rules", {
         method: "PUT",
         body: {
           ...(etaEdited ? { etaDays: f.etaUnit === "hours" ? val / 24 : val } : {}), // 内部统一按天
           etaUnit: f.etaUnit,
+          ...(userEtaEdited ? { userEtaDays: f.userEtaUnit === "hours" ? userVal / 24 : userVal } : {}),
+          userEtaUnit: f.userEtaUnit,
           renotifyHours: Number(f.renotify),
           errorThreshold: Number(f.errThreshold ?? rulesRef.current.errorThreshold ?? 1),
           errorRetrySec: Number(f.errRetry),
@@ -445,6 +455,20 @@ export default function NotificationsPage() {
     ruleForm.setValue(next);
     void ruleForm.commit(next);
   };
+  // 重点用户快用完的提醒天数换单位：同上
+  const onUserEtaUnitChange = (u: "days" | "hours") => {
+    const f = ruleForm.value;
+    const saved = { etaDays: rules.userEtaDays ?? 3, etaUnit: rules.userEtaUnit };
+    let userEtaVal = f.userEtaVal;
+    if (f.userEtaVal === etaRuleDisplay(saved)) userEtaVal = etaRuleDisplay({ ...saved, etaUnit: u });
+    else {
+      const v = Number(f.userEtaVal);
+      if (f.userEtaVal != null && Number.isFinite(v) && v > 0) userEtaVal = u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2);
+    }
+    const next = { ...f, userEtaUnit: u, userEtaVal };
+    ruleForm.setValue(next);
+    void ruleForm.commit(next);
+  };
   const setRuleField = <K extends keyof RuleForm>(key: K, v: RuleForm[K]) => {
     ruleForm.setValue((f) => ({ ...f, [key]: v }));
     ruleForm.clearInvalid();
@@ -667,7 +691,42 @@ export default function NotificationsPage() {
           )}
         </div>
       );
-    if (ruleKey === "onUserEta") return <p className="jy-notifications-note">{COPY.users.etaCond(etaWindowText(rules))}</p>;
+    if (ruleKey === "onUserEta")
+      return (
+        <div className="jy-notifications-cond">
+          <label htmlFor={`${uid}-ueta`}>{COPY.etaBefore}</label>
+          <Space.Compact>
+            <InputNumber
+              id={`${uid}-ueta`}
+              aria-label={COPY.users.etaLabel}
+              {...leaveRules}
+              min={0}
+              precision={2}
+              value={ruleForm.value.userEtaVal}
+              onChange={(v) => setRuleField("userEtaVal", v as number | null)}
+              status={ruleErrors.userEta ? "error" : undefined}
+              aria-invalid={ruleErrors.userEta ? true : undefined}
+              aria-describedby={ruleErrors.userEta ? `${uid}-ueta-err` : undefined}
+            />
+            <Select
+              aria-label={COPY.users.etaUnit}
+              value={ruleForm.value.userEtaUnit}
+              onChange={onUserEtaUnitChange}
+              options={[
+                { value: "days", label: COPY.day },
+                { value: "hours", label: COPY.hour },
+              ]}
+            />
+          </Space.Compact>
+          <span>{COPY.etaAfter}</span>
+          {ruleErrors.userEta && (
+            <span className="jy-err" id={`${uid}-ueta-err`} role="alert">
+              <Sym kind="crit" />
+              {ruleErrors.userEta}
+            </span>
+          )}
+        </div>
+      );
     if (ruleKey === "onError")
       return (
         <div className="jy-notifications-cond">

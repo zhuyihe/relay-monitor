@@ -716,6 +716,14 @@ test("「用户运营数据采集」总开关 settings.userOpsEnabled：默认�
   store.data.notifications.channels = [{ id: "ch-1", name: "A", type: "webhook", enabled: true }, { id: "ch-2", name: "B", type: "webhook", enabled: true }];
   const rules = await store.updateRules({ onUserExhaust: false, onUserEta: true, channelsFor: { userExhaust: ["ch-1", "ch-2", "bogus", "ch-1"], userEta: ["ch-2"] } });
   assert.deepEqual([rules.onUserExhaust, rules.onUserEta, rules.channelsFor.userExhaust, rules.channelsFor.userEta], [false, true, ["ch-1", "ch-2"], ["ch-2"]]);
+  assert.deepEqual([store.rules.userEtaDays, store.rules.userEtaUnit, store.rules.etaDays], [3, "days", 3], "重点用户的提醒天数默认 3 天，和上游的各存各的");
+  await store.updateRules({ userEtaDays: 12, userEtaUnit: "hours" });
+  assert.deepEqual([store.rules.userEtaDays, store.rules.userEtaUnit, store.rules.etaDays, store.rules.etaUnit], [12, "hours", 3, "days"], "改一个不牵动另一个");
+  await store.updateRules({ userEtaDays: -1 });
+  await store.updateRules({ userEtaDays: "x" });
+  assert.equal(store.rules.userEtaDays, 12, "非法输入保留原值");
+  await store.updateRules({ userEtaDays: 0.001 });
+  assert.equal(store.rules.userEtaDays, 1 / 24, "下限 1 小时");
   await store.updateRules({ onUserEta: "yes" });
   assert.equal(store.rules.onUserEta, false, "只认真正的 true 才开");
   await store.removeChannel("ch-2");

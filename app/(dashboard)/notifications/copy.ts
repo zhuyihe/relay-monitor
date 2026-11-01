@@ -2,7 +2,6 @@
 // 规则名里的余额四档取 lib/format.js 的 BALANCE_STATE_TEXT，这里只写「恢复正常」。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
 import { UNNAMED_CHANNEL } from "../../../lib/alert-rules.js";
-import { BALANCE_STATE_TEXT } from "../../../lib/format.js";
 
 // 余额提醒线下面那句的前半句：没有通知方式时那一小块只用这半句（那里的说明已经说了它管页面上的档位）
 const LOW_HINT_WHERE = "按各上游自己的余额单位比，不换算；单个上游可以在编辑上游里另填。";
@@ -65,7 +64,9 @@ export const COPY = Object.freeze({
     exhaustDesc: "重点用户的余额用完时通知",
     eta: "重点用户快用完",
     etaDesc: "重点用户的可用天数进提醒天数以内时通知；几个一起快用完时，每天花得多的排在前面",
-    etaCond: (window: string) => `可用天数在 ${window}以内时提醒，和上面「${BALANCE_STATE_TEXT.soon}」用同一个提醒天数。`,
+    // 提醒天数的输入框：「可用天数在 [3] 天以内提醒」，和上游「快用完」那一行各设各的
+    etaLabel: "重点用户快用完的提醒天数",
+    etaUnit: "重点用户快用完的提醒天数的单位",
   }),
   // 提醒节奏
   pace: "提醒节奏",

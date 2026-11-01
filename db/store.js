@@ -565,6 +565,12 @@ export class Store {
         if (Number.isFinite(v) && v > 0) r.etaDays = Math.max(1 / 24, Math.round(v * 10000) / 10000);
       }
       if ("etaUnit" in patch) r.etaUnit = patch.etaUnit === "hours" ? "hours" : "days";
+      // 重点用户快用完的提醒天数：规则同上游的（非法保留原值，下限 1 小时），各存各的
+      if ("userEtaDays" in patch) {
+        const v = Number(patch.userEtaDays);
+        if (Number.isFinite(v) && v > 0) r.userEtaDays = Math.max(1 / 24, Math.round(v * 10000) / 10000);
+      }
+      if ("userEtaUnit" in patch) r.userEtaUnit = patch.userEtaUnit === "hours" ? "hours" : "days";
       if ("renotifyHours" in patch) r.renotifyHours = Math.max(0, Number(patch.renotifyHours) || 0);
       if ("errorThreshold" in patch) r.errorThreshold = Math.max(1, Math.floor(Number(patch.errorThreshold) || 1));
       if ("errorRetrySec" in patch) r.errorRetrySec = Math.max(0, Math.floor(Number(patch.errorRetrySec) || 0));

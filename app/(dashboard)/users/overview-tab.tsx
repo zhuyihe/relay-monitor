@@ -9,7 +9,7 @@ import { Seg } from "../../components/seg";
 import { TrendChart } from "./charts";
 import type { Metric } from "./charts";
 import { COPY } from "./copy";
-import { SOON_LINK, money, overviewKpis, overviewSentence, seriesOf } from "./users-format";
+import { SOON_LINK, money, overviewKpis, overviewSentence, prevSeriesOf, seriesOf } from "./users-format";
 import type { UsersPage } from "./users-format";
 
 const METRICS: Metric[] = ["cost", "users", "fresh"];
@@ -21,6 +21,8 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
   const { rate } = page;
   const values = useMemo(() => seriesOf(page.trend, metric).map((v) => (v == null ? null : metric === "cost" ? v * rate : v)), [page.trend, metric, rate]);
   const hasDays = page.trend.some((day) => day.available);
+  const prevRaw = useMemo(() => prevSeriesOf(page, metric), [page, metric]);
+  const prev = useMemo(() => (prevRaw ? prevRaw.map((v) => (v == null ? null : metric === "cost" ? v * rate : v)) : null), [prevRaw, metric, rate]);
   return (
     <>
       <p className="jy-users-sentence">
@@ -59,13 +61,13 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
           <>
             <div className="jy-legend">
               <span><i className="line-key" style={{ background: "var(--jy-s1)" }} />{COPY.overview.legendNow}</span>
-              {metric === "fresh" && <span><i className="line-key line-key--dash" />{COPY.overview.legendPrev}</span>}
+              {prev && <span><i className="line-key line-key--dash" />{COPY.overview.legendPrev}</span>}
             </div>
             <TrendChart
               days={page.trend}
               metric={metric}
               values={values}
-              prev={metric === "fresh" ? page.prevNewUsers : null}
+              prev={prev}
               money={(usd) => money(usd, rate)}
               tz={page.tz}
               asOf={page.asOf}

@@ -56,7 +56,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
     return { status: 404, text: async () => "{}" };
   });
   const sent = [];
-  const rt = { store: { list: () => [own], settings: { ...settings }, rules: { onUserExhaust: true, onUserEta: true, renotifyHours: 24, etaDays: 3, ...rules }, channels } };
+  const rt = { store: { list: () => [own], settings: { ...settings }, rules: { onUserExhaust: true, onUserEta: true, renotifyHours: 24, etaDays: 3, userEtaDays: 3, ...rules }, channels } };
   const store = new MemoryUserOpsStore();
   const api = { ops: createUserOps(rt, { store, send: send || (async (list, title, body) => { sent.push({ title, body }); return [{ ok: true }]; }) }) };
   // 一步：时钟走 10 分钟，余额按每小时的花费降，然后跑一轮（api.ops 可以换成「重启以后」新建的那个）
@@ -95,14 +95,15 @@ test("第一轮：给非管理员用户记余额快照、读最近 3 小时用�
   assert.ok(usage.length > 0 && usage.every((row) => row.quota > 0));
 });
 
-test("回补 30 天：每轮最多 3 个请求，10 轮补完；补完以后每轮只剩用户列表 + 最近 3 小时两个请求；回补期间页面写补全进度", async (t) => {
+test("回补 60 天：每轮最多 3 个请求，20 轮补完；补完以后每轮只剩用户列表 + 最近 3 小时两个请求；回补期间页面写补全进度", async (t) => {
   const f = makeSite(t, crowd());
   const progress = [];
-  for (let run = 1; run <= 10; run += 1) { await f.step(); progress.push(f.ops.getView().backfill); }
-  assert.deepEqual([progress[0].done, progress[0].days, progress[0].total], [false, 3, 30], "补全中 3/30");
+  for (let run = 1; run <= 20; run += 1) { await f.step(); progress.push(f.ops.getView().backfill); }
+  assert.deepEqual([progress[0].done, progress[0].days, progress[0].total], [false, 3, 60], "补全中 3/60");
   assert.deepEqual([progress[4].done, progress[4].days], [false, 15]);
-  assert.deepEqual([progress.at(-1).done, progress.at(-1).days], [true, 30]);
-  assert.equal(f.count("/api/data/users?day"), 30, "一天一个请求，共 30 个");
+  assert.deepEqual([progress[18].done, progress[18].days], [false, 57]);
+  assert.deepEqual([progress.at(-1).done, progress.at(-1).days], [true, 60]);
+  assert.equal(f.count("/api/data/users?day"), 60, "一天一个请求，共 60 个");
   const before = f.site.requests.length;
   await f.step();
   assert.deepEqual(f.site.requests.slice(before), ["/api/user/", "/api/data/users?recent"]);
@@ -219,7 +220,7 @@ test("回补没完成之前不推送：回补读不成，到了 24 小时也不�
   assert.equal(f.sent.length, 0);
   assert.equal(f.ops.getView().backfill.done, false);
   f.site.softBackfill = false;
-  await f.stepsTo(33);
+  await f.stepsTo(34);
   assert.equal(f.ops.getView().backfill.done, true);
   assert.equal(f.sent.length >= 1, true);
 });
@@ -247,15 +248,17 @@ test("一级提醒一直没好：按 renotifyHours（默认 24 小时）每天�
 // ===== 用户运营页的接口（server/user-ops-page.js）=====
 const pageOf = (f) => usersPage(f.rt, f.ops, f.store, { now: f.clock.now });
 
-test("整页：补完 30 天以后，用户表、概览的数、重点用户、趋势都出来；状态来自余额和用量", async (t) => {
+test("整页：补完 60 天以后，用户表、概览的数、重点用户、趋势都出来；状态来自余额和用量", async (t) => {
   const f = makeSite(t, crowd());
-  for (let run = 0; run < 12; run += 1) await f.step();
+  for (let run = 0; run < 22; run += 1) await f.step();
   const page = await pageOf(f);
   assert.deepEqual([page.starting, page.ready.backfillDone, page.ready.week, page.ready.compare, page.ready.down, page.ready.balance], [undefined, true, true, true, true, false], "余额快照才记了 2 小时：可用天数还不出");
   assert.equal(page.users.length, 14, "15 个账号里管理员不进表；闲置号（余额 0、没消费）也在表里，只是不标状态");
   const names = page.users.map((row) => row.username);
   assert.ok(names.includes("big1") && names.includes("idle") && !names.includes("root"));
   assert.equal(page.trend.length, 30);
+  assert.equal(page.prevTrend.length, 30);
+  assert.ok(page.prevTrend.every((day) => day.available && day.cost > 0), "前 30 天也补到了");
   assert.ok(page.trend.every((day) => day.available));
   const big1 = page.users.find((row) => row.username === "big1");
   assert.equal(big1.week, 5 * 24 * 7, "近 7 天（7 个整天）= 每小时 5 美元 × 168");
@@ -271,7 +274,7 @@ test("整页：回补没补完时，比前 7 天、在下滑这些不判，重�
   const f = makeSite(t, crowd());
   const before = await pageOf(f);
   assert.equal(before.starting, true);
-  assert.deepEqual([before.backfill.done, before.backfill.days, before.backfill.total], [false, 0, 30]);
+  assert.deepEqual([before.backfill.done, before.backfill.days, before.backfill.total], [false, 0, 60]);
   await f.step();
   const page = await pageOf(f);
   assert.deepEqual([page.ready.week, page.ready.compare, page.ready.down, page.big.ready, page.big.count], [false, false, false, false, 0]);
@@ -281,7 +284,7 @@ test("整页：回补没补完时，比前 7 天、在下滑这些不判，重�
 
 test("整页只在采集那一轮变了才重算；整天的消费记在内存里，下一轮只重读最近两天的按小时用量", async (t) => {
   const f = makeSite(t, crowd());
-  for (let run = 0; run < 12; run += 1) await f.step();
+  for (let run = 0; run < 22; run += 1) await f.step();
   const first = await pageOf(f);
   const afterFirst = f.store.calls.usageRowsRead;
   assert.equal(await pageOf(f), first, "同一轮：直接用缓存，对象都是同一个");
@@ -298,7 +301,7 @@ test("整页只在采集那一轮变了才重算；整天的消费记在内存�
 
 test("抽屉：近 30 天每天、今天每小时、余额变化和充值、近 7 天按模型分（前 4 个 + 其他）；按用户名缓存 10 分钟", async (t) => {
   const f = makeSite(t, crowd());
-  for (let run = 0; run < 12; run += 1) await f.step();
+  for (let run = 0; run < 22; run += 1) await f.step();
   f.site.users.find((user) => user.username === "big1").balance += 500; // 充值
   await f.step();
   const modelRequests = () => f.site.requests.filter((item) => item === "/api/data/").length;
@@ -430,7 +433,7 @@ test("删除自营站点（或改地址）时正在跑的那一轮：迟到的�
   f.site.gate = null;
   const next = await f.step();
   assert.equal(next.backfill.steps, 3, "下一轮从头回补");
-  assert.ok((await f.store.getProgress("own1")).backfillTargetMs > START - 31 * 24 * H);
+  assert.ok((await f.store.getProgress("own1")).backfillTargetMs > START - 61 * 24 * H);
   assert.equal(f.ops._state.lastUsers.length, f.site.users.length, "用户列表是新读的");
 });
 
@@ -440,7 +443,7 @@ test("回补进度行只有半截（回补目标是空的）：重新初始化�
   const out = await f.step();
   assert.equal(out.backfill.steps, 3);
   const progress = await f.store.getProgress("own1");
-  assert.ok(progress.backfillTargetMs > START - 31 * 24 * H && progress.backfillTargetMs < START - 29 * 24 * H, String(progress.backfillTargetMs));
+  assert.ok(progress.backfillTargetMs > START - 61 * 24 * H && progress.backfillTargetMs < START - 59 * 24 * H, String(progress.backfillTargetMs));
   assert.equal(f.count("/api/data/users?day"), 3);
 });
 
@@ -464,7 +467,7 @@ const minuteStep = (f) => async () => {
 
 test("页面开着（页面来取数续 90 秒）：每分钟读一次用户列表和最近 3 小时的用量，不写快照；到 10 分钟照旧整轮；没人看就只有 10 分钟一档", async (t) => {
   const f = makeSite(t, crowd());
-  for (let run = 0; run < 12; run += 1) await f.step(); // 回补补完，整轮刚跑过
+  for (let run = 0; run < 22; run += 1) await f.step(); // 回补补完，整轮刚跑过
   const minute = minuteStep(f);
   // 没人看：1 分钟后什么都不读
   let before = f.site.requests.length;
@@ -499,7 +502,7 @@ test("页面开着（页面来取数续 90 秒）：每分钟读一次用户列�
 
 test("实时一档：页面上的余额、数据截至的时刻每分钟更新；还能用几天、重点用户、提醒不动；额度紧时不读", async (t) => {
   const f = makeSite(t, crowd());
-  for (let run = 0; run < 12; run += 1) await f.step();
+  for (let run = 0; run < 22; run += 1) await f.step();
   const minute = minuteStep(f);
   const first = await pageOf(f);
   const fullAt = f.ops.getView().at;
@@ -531,4 +534,15 @@ test("实时一档：回补没补完时接着补，页面上的补全进度跟�
   assert.equal(out.backfill.steps, 3);
   assert.equal(f.ops.getView().backfill.days, 6, "补全进度跟着走");
   assert.equal(f.site.requests.length - before, 5, "用户列表 1 + 最近 3 小时 1 + 回补 3");
+});
+
+test("重点用户快用完的提醒天数是自己的（rules.userEtaDays），和上游的提醒天数（etaDays）各设各的", async (t) => {
+  const tight = makeSite(t, crowd(), { rules: { etaDays: 30, userEtaDays: 0.5 } }); // 上游设得很宽，重点用户设得很紧
+  await tight.stepsTo(25);
+  assert.equal(tight.sent.length, 0, "big1 还够约 1.3 天，没进 0.5 天，不推");
+  assert.equal(tight.ops.getView().level1Days, 0.5);
+  const wide = makeSite(t, crowd(), { rules: { etaDays: 0.5, userEtaDays: 3 } }); // 反过来
+  await wide.stepsTo(25);
+  assert.equal(wide.sent.length, 1, "上游设得再紧，重点用户照自己的 3 天");
+  assert.equal(wide.ops.getView().level1Days, 3);
 });

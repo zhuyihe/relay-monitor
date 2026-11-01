@@ -24,7 +24,7 @@ export function TrendChart({
   // 每天的数（没补到的天是 null），已经换成显示的币种
   values: (number | null)[];
   // 前 30 天同一位置的数；没有就不画虚线、不出图例
-  prev: number[] | null;
+  prev: (number | null)[] | null;
   money: (usd: number) => string;
   tz: string; asOf: number; height: number; hoverOn: boolean; label: string;
 }) {
@@ -33,7 +33,7 @@ export function TrendChart({
   const n = days.length;
   const pw = Math.max(1, w - L - R), step = n > 1 ? pw / (n - 1) : pw;
   const x = (i: number) => L + step * i;
-  const top = Math.max(0, ...values.map((v) => v ?? 0), ...(prev || []));
+  const top = Math.max(0, ...values.map((v) => v ?? 0), ...(prev || []).map((v) => v ?? 0));
   const yt = niceTicks(0, metric === "cost" ? top : Math.max(top, 3), 4);
   const y = (v: number) => T + (1 - v / yt.hi) * (height - T - B);
   const gaps = runs(values.map((v, i) => v == null && i < n - 1));

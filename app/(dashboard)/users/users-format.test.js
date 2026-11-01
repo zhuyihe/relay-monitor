@@ -17,7 +17,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 const { COPY } = await import("./copy.ts");
 const {
   backfillEta, backfillLine, balanceWarmLine, bigLabel, bigTipText, defaultOrder, deltaText, filterCounts, filterRows, lastUsedText, money, overviewKpis, overviewSentence,
-  parseOnly, parseTab, runwayText, seriesOf, sortValue, sparkValues, SOON_LINK,
+  parseOnly, parseTab, prevSeriesOf, runwayText, seriesOf, sortValue, sparkValues, SOON_LINK,
 } = await import("./users-format.ts");
 const { EMPTY } = await import("../../../lib/format.js");
 const { dayStartInTz } = await import("../../../lib/business-time.js");
@@ -238,6 +238,19 @@ test("图的数：消费、有消费的用户没补到的天是 null；新用户
   assert.deepEqual(seriesOf(trend, "cost"), [null, 5]);
   assert.deepEqual(seriesOf(trend, "users"), [null, 3]);
   assert.deepEqual(seriesOf(trend, "fresh"), [2, 1], "新用户看注册时间，补数据没补到的天也有");
+});
+
+test("前 30 天的虚线：新用户随时有；消费、有消费的用户要补完回补才画，没补到的天是 null", () => {
+  const prevTrend = [{ day: "a", available: true, cost: 4, users: 2 }, { day: "b", available: false, cost: 0, users: 0 }];
+  const p = page({ prevTrend, prevNewUsers: [1, 0] });
+  assert.deepEqual(prevSeriesOf(p, "cost"), [4, null]);
+  assert.deepEqual(prevSeriesOf(p, "users"), [2, null]);
+  assert.deepEqual(prevSeriesOf(p, "fresh"), [1, 0]);
+  const filling = page({ prevTrend, prevNewUsers: [1, 0], backfill: { done: false, days: 12, total: 60 } });
+  assert.equal(prevSeriesOf(filling, "cost"), null, "补数据中不画虚线、不出图例");
+  assert.equal(prevSeriesOf(filling, "users"), null);
+  assert.deepEqual(prevSeriesOf(filling, "fresh"), [1, 0], "新用户看注册时间，补数据中也有");
+  assert.equal(prevSeriesOf(page({ prevTrend: [], prevNewUsers: [] }), "fresh"), null);
 });
 
 test("地址栏：不认识的页签回到概览，不认识的筛选回到「全部」", () => {

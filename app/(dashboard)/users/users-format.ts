@@ -19,7 +19,7 @@ export type UsersPage = {
   backfill: { done: boolean; days: number; total: number };
   big: { ready: boolean; ids: number[]; count: number };
   summary: { todayCost: number; yesterdaySameTime: number; weekCost: number; prevWeekCost: number; weekUsers: number; prevWeekUsers: number; prepaid: number; prepaidAgo: number | null } | null;
-  trend: TrendDay[]; prevNewUsers: number[]; users: UsersRow[];
+  trend: TrendDay[]; prevTrend: { day: string; available: boolean; cost: number; users: number }[]; prevNewUsers: number[]; users: UsersRow[];
 };
 export type DetailModels = { models: { model: string; cost: number; share: number }[] | null; others?: { count: number; cost: number; share: number } | null; total?: number; error: string | null };
 export type UserDetail = {
@@ -167,5 +167,11 @@ export const parseTab = (raw: string | null): UsersTab => (raw === "users" ? "us
 export const parseOnly = (raw: string | null): Filter => ((FILTERS as readonly string[]).includes(raw ?? "") ? (raw as Filter) : "all");
 
 // 图的数 → 坐标轴上要几个整齐刻度由 lib/chart-math 的 niceTicks 给
-// 新用户看注册时间，不用等补数据，没补到的天也有数
+// 前 30 天（图上的虚线），和近 30 天一一对应：新用户看注册时间，随时都有；消费、有消费的用户要前 30 天也补到了才画（补数据中不画虚线，也不出图例）
+export function prevSeriesOf(page: UsersPage, metric: "cost" | "users" | "fresh"): (number | null)[] | null {
+  if (metric === "fresh") return page.prevNewUsers?.length ? page.prevNewUsers : null;
+  if (!page.backfill.done || !page.prevTrend?.length) return null;
+  return page.prevTrend.map((day) => (!day.available ? null : metric === "cost" ? day.cost : day.users));
+}
+// 新用户看注册时间，不用等补数据，没补到的天也有
 export const seriesOf = (trend: TrendDay[], metric: "cost" | "users" | "fresh"): (number | null)[] => trend.map((day) => (metric === "fresh" ? day.newUsers : !day.available ? null : metric === "cost" ? day.cost : day.users));
