@@ -500,7 +500,7 @@ test("模型供需（电脑）：页顶一句、四个数、主表分两段（�
   const kpi = (title) => page.locator(".jy-models-kpis > div").filter({ has: page.getByText(title, { exact: true }) });
   assert.match(await kpi(MODELS_COPY.kpi.missing).innerText(), /2 个[\s\S]*估计每天少收约 ¥/);
   assert.match(await kpi(MODELS_COPY.kpi.single).innerText(), /2 个[\s\S]*合起来占全站消费 \d+%/);
-  assert.match(await kpi(MODELS_COPY.kpi.soon).innerText(), /1 个[\s\S]*claude-sonnet-4\.6[\s\S]*主力上游余额只够约 2 天/);
+  assert.match(await kpi(MODELS_COPY.kpi.soon).innerText(), /1 个[\s\S]*claude-sonnet-4\.6[\s\S]*主要上游余额只够约 2 天/);
   assert.match(await kpi(MODELS_COPY.kpi.rising).innerText(), /1 个[\s\S]*claude-haiku-4\.5[\s\S]*近 7 天是前 7 天的 2\.\d 倍/);
   // 分两段：有缺口的 6 个（claude-sonnet、gpt-5、gemini、haiku、qwen、glm），没缺口的 2 个
   assert.deepEqual(await page.locator("tr.jy-data-group").allInnerTexts(), [MODELS_COPY.segGap(6), MODELS_COPY.segNone(2)]);
