@@ -50,7 +50,7 @@ function scheduleErrorRetry(rt, station) {
 }
 
 async function doRefreshOne(rt, station, options = {}) {
-  const { result } = await queryStation(station, options.background && station.isOwn ? { shareOwnSelf: true } : undefined);
+  const { result } = await queryStation(station, options.background && station.isOwn ? { shareOwnSelf: "write" } : undefined);
   // 查询在途期间站点可能已被删除：丢弃结果，避免复活历史记录或发幽灵告警
   const current = rt.store.get(station.id);
   if (!current || current.archivedAt || current.monitorEnabled === false) return result;
