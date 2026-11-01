@@ -12,7 +12,7 @@ export const COPY = Object.freeze({
   setupDesc: "模型供需会看你的站今晚高峰哪些模型的货不够、还差多少、先救谁。",
   setupFigure: "设置完成后，这里会列出每个模型今晚高峰要多少、能给多少，缺的会标出来。",
   unreadable: "读不到模型数据",
-  headroomNull: "这次数据量太大，没算高峰余量。",
+  headroomNull: "这次没算出高峰余量（数据量太大，或者读不到），过一会儿再看。",
   readNote: (asOf: string) => `打开这一页时读，10 分钟内不重读 · 数据截至 ${asOf}`,
   unit: "次/小时",
   // 拿不到数据的几种情况（v4 §6）
@@ -187,7 +187,7 @@ export const COPY = Object.freeze({
     usersNone: "近 24 小时没有用户被挡过。",
     usersNeedLog: "没开错误日志，看不到。",
     usersNoRecords: "这 24 小时一条错误日志都没有。",
-    headroomNull: "这次数据量太大，没算高峰余量。",
+    headroomNull: "这次没算出高峰余量（数据量太大，或者读不到），过一会儿再看。",
     channelsTitle: "各渠道的上限", channelsSub: "这个模型现在走哪些渠道",
     channelCols: Object.freeze({ channel: "渠道", upstream: "上游", limit: "上限", used: "高峰用了", status: "状态" }),
     channelState: Object.freeze({ on: "启用", off: "已停用", auto: "被自动停用" } as Record<ChannelState, string>),
