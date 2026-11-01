@@ -3,7 +3,7 @@ import { consumeLogOffOverlap, consumeLogStillOff } from "../../../../lib/consum
 import { withAuth, json } from "../../../../lib/api.js";
 import { ownStationErrorCode } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
-import { queryOwnData } from "../../../../lib/providers.js";
+import { readOwnRows } from "../../../../server/own-raw-rows.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel, zonedParts } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
 import {
@@ -42,10 +42,10 @@ export const GET = withAuth(async (request, rt) => {
     // 上窗用户行单独拉一次；上窗模型行落在 35 天内时直接从 modelRows 切，不多发请求。
     const prevCovered = prevStart >= wideStart;
     const [modelRows, userRows, prevUserRows, prevModelFetched] = await Promise.all([
-      queryOwnData(own, wideStart, now, "model"),
-      queryOwnData(own, startMs, now, "user"),
-      queryOwnData(own, prevStart, prevEnd, "user").catch(() => null),
-      prevCovered ? null : queryOwnData(own, prevStart, prevEnd, "model").catch(() => null),
+      readOwnRows(rt, own, "model", wideStart, now),
+      readOwnRows(rt, own, "user", startMs, now),
+      readOwnRows(rt, own, "user", prevStart, prevEnd).catch(() => null),
+      prevCovered ? null : readOwnRows(rt, own, "model", prevStart, prevEnd).catch(() => null),
     ]);
 
     const winModel = modelRows.filter((r) => r.t >= startMs);
@@ -135,7 +135,7 @@ export const GET = withAuth(async (request, rt) => {
         ? unconfirmedIncomeProfit(rt, own, unconfirmed, { startMs, now, tz, range })
         : computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }),
       // 分组 / 渠道口径：模型行里看不出「哪个分组涨了」「换到了哪个上游渠道」
-      computeFlowBreakdown(own, {
+      computeFlowBreakdown(rt, own, {
         startMs, endMs: now, prevStartMs: prevStart, prevEndMs: prevEnd,
         totalCostUsd: winModel.reduce((a, r) => a + r.cost, 0),
       }),

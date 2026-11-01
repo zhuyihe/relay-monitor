@@ -42,7 +42,8 @@ test("后台还没读到过数：整页是 starting（页面写数据补全中�
   const rt = fresh();
   const page = await (await list(request("/api/users"), rt)).json();
   assert.equal(page.starting, true);
-  assert.deepEqual([page.backfill.done, page.backfill.days, page.backfill.total, page.users.length], [false, 0, 60, 0]);
+  assert.deepEqual([page.backfill.done, page.backfill.days, page.backfill.total, page.list.rows.length, page.list.total], [false, 0, 90, 0, 0]);
+  assert.equal(page.users, undefined, "整页不再带全部用户，只有筛出来的一页");
   assert.equal(typeof page.tz, "string");
   assert.equal(page.summary, null);
   assert.deepEqual(await (await big(request("/api/users/big"), rt)).json(), { ready: false, big: [] });

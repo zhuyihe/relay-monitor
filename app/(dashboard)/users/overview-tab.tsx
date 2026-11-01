@@ -1,15 +1,15 @@
 "use client";
-// 概览：一句结论 → 四个数 → 每天的用户消费（design 用户运营 v6 §2、v7 §2）。
+// 概览：一句结论 → 五个数 → 每天的用户消费 / 活跃用户 / 新消费用户（design 用户运营 v6 §2、v7 §2、v8 §1）。
 // 一句结论和四个数由 users-format.ts 拼，这里只摆；补数据没补满时哪些数先不出，由接口的 ready 说明。
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { EmptyState } from "../../components/data-state";
 import { Panel } from "../../components/panel";
 import { Seg } from "../../components/seg";
-import { TrendChart } from "./charts";
+import { FreshBars, TrendChart } from "./charts";
 import type { Metric } from "./charts";
 import { COPY } from "./copy";
-import { SOON_LINK, money, overviewKpis, overviewSentence, prevSeriesOf, seriesOf } from "./users-format";
+import { BIG_LINK, SOON_LINK, freshNote, money, overviewKpis, overviewSentence, prevSeriesOf, seriesOf } from "./users-format";
 import type { UsersPage } from "./users-format";
 
 const METRICS: Metric[] = ["cost", "users", "fresh"];
@@ -23,13 +23,14 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
   const hasDays = page.trend.some((day) => day.available);
   const prevRaw = useMemo(() => prevSeriesOf(page, metric), [page, metric]);
   const prev = useMemo(() => (prevRaw ? prevRaw.map((v) => (v == null ? null : metric === "cost" ? v * rate : v)) : null), [prevRaw, metric, rate]);
+  const note = metric === "fresh" ? freshNote(page) : null;
   return (
     <>
       <p className="jy-users-sentence">
         {sentence.map((part, index) =>
           part.kind === "text" ? <span key={index}>{part.text}</span>
             : part.kind === "user" ? <button key={index} type="button" className="jy-link jy-users-linkbtn" onClick={() => onOpenUser(part.id)}>{part.name}</button>
-              : <Link key={index} className="jy-link" href={SOON_LINK}>{part.text}</Link>,
+              : <Link key={index} className="jy-link" href={part.kind === "big" ? BIG_LINK : SOON_LINK}>{part.text}</Link>,
         )}
       </p>
       <Panel label={COPY.overview.kpiLabel}>
@@ -57,6 +58,11 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
       >
         {!hasDays ? (
           <EmptyState title={COPY.overview.chartEmpty} />
+        ) : metric === "fresh" ? (
+          <>
+            {note && <p className="jy-caption jy-users-chartnote">{note}</p>}
+            <FreshBars days={page.trend} money={(usd) => money(usd, rate)} tz={page.tz} asOf={page.asOf} height={300} label={COPY.overview.chartLabels.fresh} />
+          </>
         ) : (
           <>
             <div className="jy-legend">
@@ -72,7 +78,7 @@ export function OverviewTab({ page, onOpenUser }: { page: UsersPage; onOpenUser:
               tz={page.tz}
               asOf={page.asOf}
               height={300}
-              hoverOn={page.backfill.done || metric === "fresh"}
+              hoverOn={page.backfill.done || page.backfill.core === true}
               label={COPY.overview.chartLabels[metric]}
             />
           </>

@@ -1,0 +1,48 @@
+// 自营站点数据看板的原始行，一个带缓存的读法（自营业务页和用户运营页共用，不各读各的）：
+//   model：GET /api/data/        行按（模型、小时）
+//   user ：GET /api/data/users   行按（用户名、小时）
+//   flow ：GET /api/data/flow    窗口内按（用户、分组、模型、渠道）聚合，没有时间维度
+// 缓存按「读的类型 + 站点 + 窗口」放在运行时里，缓存多久由调用方说（自营业务 2 分钟，用户运营 10 分钟）：
+// 年龄不到调用方要的就直接用，所以两个页面在同一个时间窗里都打开，只读一次。同一份同时来几个请求，只发一个；读失败的不缓存。
+// 结束时刻是「现在」的窗口（每次调用都不一样）按「现在这一份」算同一个窗口，不然每次都是新窗口、缓存永远用不上。
+import { queryOwnData, queryOwnFlow } from "../lib/providers.js";
+
+const KEEP_MS = 10 * 60000; // 最长的调用方也只要 10 分钟，放久了没用，还占内存（一个月的用户行上千用户时有十几 MB）
+const MAX_ENTRIES = 12;
+const OPEN_WINDOW_MS = 60000; // 结束时刻离现在不到这么久的，算「到现在为止」
+
+export const OWN_ROW_READERS = Object.freeze({
+  model: (own, startMs, endMs) => queryOwnData(own, startMs, endMs, "model"),
+  user: (own, startMs, endMs) => queryOwnData(own, startMs, endMs, "user"),
+  flow: (own, startMs, endMs) => queryOwnFlow(own, startMs, endMs),
+});
+
+// kind：model | user | flow；返回读到的行（调用方不要改它：同一份会给几个调用方）
+export async function readOwnRows(rt, own, kind, startMs, endMs, { ttlMs = 120000, now = Date.now(), readers = OWN_ROW_READERS } = {}) {
+  const read = readers[kind];
+  if (!read) throw new Error(`unknown own rows kind: ${kind}`);
+  const cache = (rt._ownRawRows ||= new Map());
+  // 站点地址、令牌、用户 ID 一变就是另一份（换了站点不能用旧站点的数）；不把令牌本身放进键里，用配置版本号
+  const key = [kind, own.id, own.baseUrl, own.userId || "", own.authVersion ?? "", startMs, endMs >= now - OPEN_WINDOW_MS ? "open" : endMs].join("|");
+  const hit = cache.get(key);
+  if (hit?.rows && now - hit.at < ttlMs) return hit.rows;
+  if (hit?.promise) return hit.promise;
+  const startedAt = now;
+  const promise = Promise.resolve().then(() => read(own, startMs, endMs)).then((rows) => {
+    if (cache.get(key)?.promise === promise) {
+      const entry = { at: startedAt, rows };
+      cache.set(key, entry);
+      // 到期就放掉（没人再来取也不一直占着）；不拦进程退出
+      setTimeout(() => { if (cache.get(key) === entry) cache.delete(key); }, KEEP_MS).unref?.();
+    }
+    return rows;
+  }, (error) => {
+    if (cache.get(key)?.promise === promise) cache.delete(key);
+    throw error;
+  });
+  cache.set(key, { promise, at: startedAt });
+  // 太老的、太多的清掉
+  for (const [oldKey, entry] of cache) if (entry.rows && now - entry.at > KEEP_MS) cache.delete(oldKey);
+  while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value);
+  return promise;
+}

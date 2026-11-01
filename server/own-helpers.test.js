@@ -589,7 +589,7 @@ test("读自营站点没成时说自营站点：通用的繁忙、连不上和�
     delete rt._ownChannelsCache;
     const profit = await computeProfit(rt, own, 0, 0, window);
     assert.equal(profit.errorCode, profitCode, `利润：${name}`);
-    const flow = await computeFlowBreakdown(own, { startMs: window.startMs, endMs: window.now, prevStartMs: window.startMs - 86400000, prevEndMs: window.startMs, totalCostUsd: 0 });
+    const flow = await computeFlowBreakdown({}, own, { startMs: window.startMs, endMs: window.now, prevStartMs: window.startMs - 86400000, prevEndMs: window.startMs, totalCostUsd: 0 });
     assert.equal(flow.errorCode, flowCode, `分组和渠道数据：${name}`);
   }
   // 渠道列表返回一张网页（登录页、防火墙页）：说「自营站点返回的内容不对」，不说成上游的问题

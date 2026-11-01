@@ -1,5 +1,5 @@
 "use client";
-// 概览：指标行（有消费的用户、请求数、Token）；利润等式；每日收入（8 列）+ 消费最多的用户（4 列）；预计花费（8 列）+ 消费最多的模型（4 列）；利润怎么算（ui-design-spec §5.3）。
+// 概览：指标行（活跃用户、请求数、Token）；利润等式；每日收入（8 列）+ 消费最多的用户（4 列）；预计花费（8 列）+ 消费最多的模型（4 列）；利润怎么算（ui-design-spec §5.3）。
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
@@ -74,7 +74,7 @@ const COPY = Object.freeze({
   noModels: "这个时间范围内还没有模型用量",
   // 模型的消费含管理员自用，和等式里的收入不是一个数（只在有管理员自用时写；模型与渠道标签页同一个意思，shared.tsx totalsNote）
   modelsInclAdmin: "含管理员自用，和收入不是一个数。",
-  payingUsers: "有消费的用户",
+  payingUsers: "活跃用户",
   // 指标行（ui-design-spec §5.3）：这次只放利润等式里没有的三个数；收入和「这段时间毛利」等 G 把等式拿掉时再补
   metrics: "这段时间的用量",
   userCount: (n: number) => `${n} 个`,
@@ -428,7 +428,7 @@ function ForecastPanel({ v }: { v: OwnView }) {
 
 // ---- 指标行 ---------------------------------------------------------------
 
-// 指标行：有消费的用户、请求数、Token（不含缓存）。收入、毛利在利润等式里，这里不再写（同一个数一页只出现一次）；
+// 指标行：活跃用户、请求数、Token（不含缓存）。收入、毛利在利润等式里，这里不再写（同一个数一页只出现一次）；
 // G 把 /my 的等式拿掉时再补「收入」和「这段时间毛利 → 每日利润」（ui-design-spec §5.3，分两步做）
 function Metrics({ v }: { v: OwnView }) {
   return (
@@ -451,7 +451,7 @@ function Metrics({ v }: { v: OwnView }) {
   );
 }
 
-// 模型排行下面一行：这段时间的消费合计（按模型加总，含管理员自用），等于模型那几条加起来；有消费的用户、请求数、Token 在指标行里
+// 模型排行下面一行：这段时间的消费合计（按模型加总，含管理员自用），等于模型那几条加起来；活跃用户、请求数、Token 在指标行里
 const USAGE_FACTS_FOOT = (v: OwnView) => (
   <ul className="jy-my-facts">
     <li>
