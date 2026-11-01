@@ -130,7 +130,8 @@ function visibleTexts(file) {
 
 test("界面文字不出现 §3.6 的词", () => {
   // 例外：每日利润计算明细里「核对上游扣费」这一节的名字（设计 10-29 定），整个词组放行，别处单独的「核对」照旧不许
-  const withoutAllowed = (text) => text.replaceAll("核对上游扣费", "");
+  // 「月留存」是用户运营流失页签的指标名（设计 11-01 定，用语规范 §3.1），整个词放行，别处单独的「留存」照旧不许
+  const withoutAllowed = (text) => text.replaceAll("核对上游扣费", "").replaceAll("月留存", "");
   const hits = FILES.flatMap((file) => visibleTexts(file).flatMap(([line, text]) => FORBIDDEN
     .filter((word) => withoutAllowed(text).includes(word)).map((word) => `${file}:${line}「${word}」${text}`)));
   assert.deepEqual(hits, []);

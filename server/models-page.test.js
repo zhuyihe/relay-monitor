@@ -91,6 +91,7 @@ test("整页：打开一次读渠道、按小时用量、模型 × 渠道流量�
   assert.deepEqual(by["gpt-5"].tags, ["fail"], "成功率 80%，成功 90 次估出 112 次：卖不出去；有两个上游、主要上游甲余额够");
   assert.deepEqual(by["claude-x"].tags, ["soon", "single", "rising"], "主要上游乙只够 2 天、只有这一家、近 7 天是前 7 天的 5 倍");
   assert.deepEqual(by.glm.tags, ["out"]);
+  assert.equal(Object.hasOwn(by.glm, "flags") || Object.hasOwn(by.glm, "lost"), false, "页面不用的判断中间量不进响应");
   assert.deepEqual(by["deepseek-ai/DeepSeek-V3"].tags, ["out"], "被自动停用的渠道不算开着");
   assert.deepEqual([by["gpt-5"].supply, by.glm.supply], [{ upstreams: 2, open: 2, stopped: 1 }, { upstreams: 0, open: 0, stopped: 1 }]);
   assert.deepEqual([by["gpt-5"].main.name, by["gpt-5"].main.share, by["claude-x"].main.runway.days], ["上游甲", 8 / 11, 2], "流量 7+1 : 3，上游甲占 8/11");
