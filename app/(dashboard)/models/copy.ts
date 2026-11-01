@@ -20,7 +20,7 @@ export const COPY = Object.freeze({
     missingNone: "没有缺货的模型",
     singleSub: (pct: string) => `合起来占全站消费 ${pct}`,
     singleNone: "没有只靠一家供货的模型",
-    soonSub: (days: string) => `主力上游余额只够${days}`,
+    soonSub: (days: string) => `主要上游余额只够${days}`,
     soonNone: "没有快断货的模型",
     risingSub: (ratio: string) => `近 7 天是前 7 天的 ${ratio} 倍`,
     risingNone: "没有在猛涨的模型",
