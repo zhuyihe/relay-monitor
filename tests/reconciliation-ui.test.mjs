@@ -517,6 +517,9 @@ test("模型供需（电脑）：页顶一句、四个数、主表分两段（�
   await row("glm-4.6").getByText(MODELS_COPY.successNone, { exact: true }).waitFor();
   await row("glm-4.6").getByText(MODELS_COPY.supplyStopped(1), { exact: true }).waitFor();
   await row("claude-sonnet-4.6").getByText("约 2 天", { exact: true }).waitFor();
+  // 一格两行：金额在上、「比前 7 天」在下
+  const stacked = await row("claude-sonnet-4.6").locator(".jy-cell-two").first().evaluate((node) => { const [a, b] = [node.children[0].getBoundingClientRect(), node.children[1].getBoundingClientRect()]; return b.top >= a.bottom - 1; });
+  assert.equal(stacked, true, "近 7 天消费那格是上下两行");
   await row("claude-sonnet-4.6").getByText("比前 7 天 +38.8%", { exact: false }).waitFor();
   // 「怎么判断的」默认收起，展开后数字读同一份常数
   await page.getByRole("button", { name: MODELS_COPY.how.title }).click();
@@ -536,6 +539,10 @@ test("模型供需（电脑）：页顶一句、四个数、主表分两段（�
   assert.deepEqual(requests.filter((r) => r.startsWith("/api/models/detail")), ["/api/models/detail?name=claude-sonnet-4.6"]);
   assert.match(page.url(), /model=claude-sonnet-4\.6/);
   await drawer.getByText(MODELS_COPY.drawer.successLimit(MODELS_VIEW.FAIL_BELOW_PCT), { exact: false }).waitFor();
+  // 每天的柱子是钴蓝（不是黑的），今天那根浅色
+  const fills = await drawer.locator("path.jy-chart-bar").evaluateAll((nodes) => nodes.map((node) => [getComputedStyle(node).fill, getComputedStyle(node).opacity]));
+  assert.notEqual(fills[0][0], "rgb(0, 0, 0)", "柱子不是黑色");
+  assert.equal(fills[0][1], "1"); assert.equal(fills.at(-1)[1], "0.45", "今天那根浅色");
   assert.deepEqual(await drawer.locator(".jy-models-drawer-kpis dt").allInnerTexts(), [MODELS_COPY.drawer.kpiWeek, MODELS_COPY.drawer.kpiVs, MODELS_COPY.drawer.kpiSuccess, MODELS_COPY.drawer.kpiSupply]);
   // 渠道和上游：被自动停用的也列出来（灰字）
   const channels = drawer.locator("table").first();
@@ -571,6 +578,13 @@ test("模型供需（手机 375）：一个模型一张卡片、段标题照样�
   const drawer = page.locator(".jy-models-drawer");
   await drawer.getByRole("heading", { name: MODELS_COPY.drawer.finderTitle }).waitFor();
   assert.ok((await page.locator(".ant-drawer-content-wrapper").boundingBox()).width >= 374);
+  // 手机上渠道和找货帮手都是一项一张卡片，不是 6 列的表
+  assert.equal(await drawer.locator("table").count(), 0);
+  const channelCards = drawer.locator(".jy-models-subcards").first().locator("> li");
+  assert.equal(await channelCards.count(), 3);
+  assert.match(await channelCards.first().innerText(), /高速 A\s*启用[\s\S]*优先级 10 · 近 7 天占 72% · 主力上游/);
+  assert.match(await drawer.locator(".jy-models-subcards").nth(1).locator("> li").first().innerText(), /上游丙[\s\S]*还没在供[\s\S]*0\.80 倍 · 便宜 20%[\s\S]*去绑定渠道/);
+  assert.ok(await channelCards.first().locator("strong, b").first().evaluate((node) => node.getBoundingClientRect().width > 40), "渠道名不是一个字一行");
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "抽屉打开也不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-drawer-375x812.png` }); }
 });
@@ -3062,8 +3076,8 @@ test("用户运营·概览：五个数、一句话里的集中度、主图切到
   assert.equal(await page.getByRole("link", { name: "3 个重点用户", exact: true }).getAttribute("href"), "/users?tab=users&big=1");
   await usersGroup(page, USERS_COPY.overview.metricLabel).getByRole("button", { name: "新消费用户" }).click();
   await page.getByText("每天的新消费用户", { exact: true }).waitFor();
-  await page.locator("path.jy-users-bar").first().waitFor();
-  assert.equal(await page.locator("path.jy-users-bar").count(), 1, "3 天前第一次花钱的 1 位：一根柱子");
+  await page.locator("path.jy-chart-bar").first().waitFor();
+  assert.equal(await page.locator("path.jy-chart-bar").count(), 1, "3 天前第一次花钱的 1 位：一根柱子");
   assert.match(await page.locator(".jy-users-chartnote").innerText(), /近 30 天共 1 个/);
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-overview-new-1440.png`, fullPage: true }); }
 });

@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { businessTimeZone } from "../lib/business-time.js";
 import { MODELS_VIEW } from "../lib/models-view.js";
 import { dayGrid } from "../lib/user-ops-view.js";
-import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
-import { modelDetail, modelsPage, MODELS_TTL_MS } from "./models-page.js";
+import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
+import { modelDetail, modelsPage, MODELS_FAIL_TTL_MS, MODELS_TTL_MS } from "./models-page.js";
 
 const H = 3600000;
 const NOW = Date.parse("2026-11-01T08:00:00Z");
@@ -122,12 +122,9 @@ test("读不到时降级：性能统计读不到 → 成功率写「读不到」
   assert.deepEqual(by.glm.tags, ["out"], "断货不靠这两样");
 });
 
-test("渠道列表读不到、或按小时用量读不到：整页读不到（抛错，不缓存，下次再读）", async (t) => {
-  const { rt, requests } = makeRt(t, { ...world(), failures: { "/api/channel/": 500 } });
+test("渠道列表读不到、或按小时用量读不到：整页读不到（抛错）", async (t) => {
+  const { rt } = makeRt(t, { ...world(), failures: { "/api/channel/": 500 } });
   await assert.rejects(modelsPage(rt, { now: NOW }));
-  const before = requests.length;
-  await assert.rejects(modelsPage(rt, { now: NOW }));
-  assert.ok(requests.length > before, "失败的不缓存");
   const second = makeRt(t, { ...world(), failures: { "/api/data/": 500 } });
   await assert.rejects(modelsPage(second.rt, { now: NOW }));
   // 站点读不到时 10 分钟内不再去读（同一个错直接给），不是每次打开页面都重读
@@ -135,6 +132,47 @@ test("渠道列表读不到、或按小时用量读不到：整页读不到（�
   const first = reads();
   await assert.rejects(modelsPage(second.rt, { now: NOW + 60000 }));
   assert.equal(reads(), first, "按小时用量读失败后 10 分钟内不再读");
+});
+
+test("整页读失败：2 分钟内再开不重读（直接给同一个错），过了 2 分钟才再试；渠道列表读失败也一样", async (t) => {
+  const { rt, requests } = makeRt(t, { ...world(), failures: { "/api/channel/": 500 } });
+  const base = Date.now(); // 读失败会让断路开 1 分钟（按真时钟记），用真时钟做起点才看得出「过了 2 分钟」
+  await assert.rejects(modelsPage(rt, { now: base }));
+  const first = requests.length;
+  for (const minute of [1, 1.5]) await assert.rejects(modelsPage(rt, { now: base + minute * 60000 }));
+  assert.equal(requests.length, first, "2 分钟里每分钟刷新也不再发请求");
+  await assert.rejects(modelsPage(rt, { now: base + MODELS_FAIL_TTL_MS + 1000 }));
+  assert.ok(requests.length > first, "过了 2 分钟再试一次");
+});
+
+test("额度和断路：断路开着时打开页面和抽屉一个请求都不发，也不记成读失败；额度快满时同样", async (t) => {
+  const { rt, requests } = makeRt(t, world());
+  noteOwnRequest("https://own.test/x", { status: 503, now: NOW });
+  await assert.rejects(modelsPage(rt, { now: NOW + 1000 }), (error) => error.code === "BUSY");
+  assert.deepEqual(requests, [], "断路开着：一个请求都不发");
+  assert.equal(rt._modelsPage ?? null, null, "被拦下的不记");
+  // 断路过了（最短 1 分钟）、额度够：马上就能读，不用等失败的那 2 分钟
+  const page = await modelsPage(rt, { now: NOW + 2 * 60000 });
+  assert.equal(page.rows.length, 4);
+  assert.ok(requests.length >= 4);
+  // 额度快满：300 个请求（限额 360 的 60% 之内要留出一个）
+  const full = makeRt(t, world());
+  for (let i = 0; i < 300; i += 1) noteOwnRequest("https://own.test/x", { status: 200, now: NOW });
+  await assert.rejects(modelsPage(full.rt, { now: NOW + 1000 }), (error) => error.code === "BUSY");
+  assert.deepEqual(full.requests, []);
+});
+
+test("额度和断路：抽屉的成功率序列也不发，成功率线写读不到、不缓存；额度回来再开就读", async (t) => {
+  const { rt, requests } = makeRt(t, world());
+  await modelsPage(rt, { now: NOW });
+  const before = requests.length;
+  noteOwnRequest("https://own.test/x", { status: 429, now: NOW });
+  const blocked = await modelDetail(rt, "gpt-5", { now: NOW + 1000 });
+  assert.equal(blocked.successLine, null);
+  assert.equal(requests.length, before, "断路开着：序列不发");
+  const later = await modelDetail(rt, "gpt-5", { now: NOW + 3 * 60000 });
+  assert.ok(later.successLine, "不缓存被拦下的");
+  assert.equal(requests.length, before + 1);
 });
 
 test("没设置自营站点：unset", async (t) => {

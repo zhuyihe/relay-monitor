@@ -18,6 +18,9 @@
 .jy-models-tags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .jy-models-search { width: 220px; }
 .jy-models-empty { margin: 0; padding: 32px 16px; text-align: center; }
+/* 表里的跑道格靠左放（只在这一页的表，别的表的「约 N 天」照旧右对齐） */
+.jy-models-panel table.jy-data .jy-cell-runway, .jy-models-drawer table.jy-data .jy-cell-runway { justify-content: flex-start; }
+.jy-models-panel table.jy-data .jy-cell-runway .v, .jy-models-drawer table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
 
 /* 手机：一个模型一张卡片，三行；段标题在卡片上面 */
 .jy-models-cards { list-style: none; margin: 0; padding: 0; }
@@ -48,7 +51,14 @@
 /* 成功率线上 95% 的判断线：状态红的虚线，旁边有字，不只靠颜色 */
 .jy-models-limit { stroke: var(--jy-crit); stroke-width: 1; stroke-dasharray: 4 3; }
 .jy-models-limit-label { fill: var(--jy-crit-ink); font-size: 11px; }
-.jy-models-off td { color: var(--jy-ink-3); }
+.jy-models-off td, .jy-models-subcards .jy-models-off { color: var(--jy-ink-3); }
+/* 手机：抽屉里渠道、找货帮手的卡片，三行 */
+.jy-models-subcards { list-style: none; margin: 0; padding: 0; border: 1px solid var(--jy-rule-soft); border-radius: var(--jy-r2); }
+.jy-models-subcards > li { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-models-subcards > li:first-child { border-top: 0; }
+.jy-models-subcards .r1, .jy-models-subcards .r3 { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.jy-models-subcards .r1 b { font-weight: 600; overflow-wrap: anywhere; }
+.jy-models-subcards .r2 { display: block; }
 .jy-models-finder-note { margin: 8px 0 0; }
 .jy-models-users { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .jy-models-users .line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -64,6 +74,5 @@
   .jy-models-note { text-align: left; }
   .jy-models-drawer-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .jy-models-drawer-kpis > div + div { padding-left: 0; border-left: 0; }
-  /* 手机上抽屉里的两张表放不下，横着滑 */
-  .jy-models-drawer .jy-table-wrap { overflow-x: auto; }
+  .jy-models-subcards .jy-mini-track { width: 72px; }
 }

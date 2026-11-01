@@ -6,6 +6,7 @@
 import { businessTimeZone } from "../lib/business-time.js";
 import { rateSnapshotOf } from "../lib/profit.js";
 import { queryOwnPerfSeries, queryOwnPerfSummary } from "../lib/providers.js";
+import { ownRequestState } from "../lib/own-request-budget.js";
 import { balanceDaysText, balanceViewOf, etaWindowDays, stationDisplayName } from "../lib/overview-actions.js";
 import { MODELS_VIEW, arrangeFinder, buildModelsView, comparePrice, dailySuccessLine, priceInUpstream } from "../lib/models-view.js";
 import { dayGrid } from "../lib/user-ops-view.js";
@@ -14,8 +15,11 @@ import { createChannelProfitModule } from "./channel-profit.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { readOwnRows } from "./own-raw-rows.js";
 import { ownChannelList } from "./own-helpers.js";
+import { USER_OPS } from "./user-ops.js";
 
 export const MODELS_TTL_MS = 10 * 60000;
+// 整页读失败（渠道列表、按小时用量）后这么久之内不再重读，直接给同一个错；额度紧、断路拦下的不算失败，不记
+export const MODELS_FAIL_TTL_MS = 2 * 60000;
 const SERIES_KEEP = 24; // 最多留几个模型的成功率序列（抽屉点过的）
 
 const ownOf = (rt) => rt.store?.list?.().find((station) => station.isOwn && station.type === "newapi" && !station.archivedAt) || null;
@@ -42,17 +46,26 @@ function userIdsOf(rt) {
   return new Map(users.filter((user) => user.role < 10).map((user) => [user.username, user.id]));
 }
 
+// 对自营站点发请求之前先问一下额度和断路（和用户运营一样，上限是额度的 60%）：额度紧、断路开着就不发，抛 BUSY；
+// 被拦下的不算读失败，不记、不缓存（额度回来下一次就能读）
+const busy = () => Object.assign(new Error("自营站点这会儿请求太多，稍后再看"), { code: "BUSY" });
+const guardOf = (own, now) => () => {
+  const request = ownRequestState(String(own.baseUrl || "").replace(/\/+$/, ""), now);
+  if (request.broken || request.used + 1 > USER_OPS.BUDGET_MAX_USED) throw busy();
+};
+
 async function read(rt, own, now, tz, rate) {
+  const beforeRead = guardOf(own, now);
   const grid = dayGrid(now, tz, MODELS_VIEW.DAYS);
   const N = grid.days;
   const flowFrom = grid.starts[N - 1 - MODELS_VIEW.WEEK], flowTo = grid.starts[N - 1];
   rt.reconciliation ||= createReconciliationModule(rt);
   const channelProfit = (rt.channelProfit ||= createChannelProfitModule(rt));
   const [rows, channels, flow, perf, rules] = await Promise.allSettled([
-    readOwnRows(rt, own, "model", grid.starts[0], now, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now }),
-    ownChannelList(rt, own),
-    readOwnRows(rt, own, "flow", flowFrom, flowTo, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now }),
-    queryOwnPerfSummary(own, MODELS_VIEW.SUCCESS_HOURS),
+    readOwnRows(rt, own, "model", grid.starts[0], now, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead }),
+    ownChannelList(rt, own, { beforeRead }),
+    readOwnRows(rt, own, "flow", flowFrom, flowTo, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead }),
+    Promise.resolve().then(() => { beforeRead(); return queryOwnPerfSummary(own, MODELS_VIEW.SUCCESS_HOURS); }),
     channelProfit.channelRules(own.id),
   ]);
   // 没有每天卖多少、没有渠道，这一页就没有意思：整页读不到
@@ -66,10 +79,12 @@ async function read(rt, own, now, tz, rate) {
   });
   // 页面不用的判断中间量（flags、lost）不放进响应：一百个模型能少 1/4 的字节
   const payload = { asOf: now, tz, rate, critDays: etaWindowDays(rt.store.rules), rows: view.rows.map(({ flags, lost, ...row }) => row), summary: view.summary, flowReadable: view.flowReadable, perfReadable: view.perfReadable };
-  return { payload, details: view.details, upstreams, rules: rules.status === "fulfilled" ? rules.value.rules : [], modelRows: rows.value, grid: view.grid, at: now };
+  // 成功率被额度、断路拦下（不是读失败）：这一页先给，但不缓存，额度回来再开就读
+  const blocked = perf.status === "rejected" && perf.reason?.code === "BUSY" || flow.status === "rejected" && flow.reason?.code === "BUSY";
+  return { payload, details: view.details, upstreams, rules: rules.status === "fulfilled" ? rules.value.rules : [], modelRows: rows.value, grid: view.grid, at: now, blocked };
 }
 
-// 整页（带抽屉要的）：10 分钟内不重读；同一时间来几个请求只读一次；读失败的不缓存
+// 整页（带抽屉要的）：10 分钟内不重读；同一时间来几个请求只读一次；读失败的 2 分钟内不重读（直接给同一个错），被额度、断路拦下的不记
 async function context(rt, { now = Date.now() } = {}) {
   const own = ownOf(rt);
   if (!own) return { unset: true };
@@ -77,16 +92,19 @@ async function context(rt, { now = Date.now() } = {}) {
   const rate = rateSnapshotOf(own).cnyPerUsd;
   const key = [own.id, own.baseUrl, own.userId || "", own.authVersion ?? "", tz, rate].join("|");
   const hit = rt._modelsPage;
-  if (hit?.key === key && hit.value && now - hit.at < MODELS_TTL_MS) return { own, ...hit.value };
-  if (hit?.key === key && hit.promise) return { own, ...(await hit.promise) };
+  if (hit?.key === key) {
+    if (hit.value && now - hit.at < MODELS_TTL_MS) return { own, ...hit.value };
+    if (hit.error && now - hit.at < MODELS_FAIL_TTL_MS) throw hit.error;
+    if (hit.promise) return { own, ...(await hit.promise) };
+  }
   const promise = read(rt, own, now, tz, rate);
   rt._modelsPage = { key, promise, at: now };
   try {
     const value = await promise;
-    if (rt._modelsPage?.promise === promise) rt._modelsPage = { key, value, at: now };
+    if (rt._modelsPage?.promise === promise) rt._modelsPage = value.blocked ? null : { key, value, at: now };
     return { own, ...value };
   } catch (error) {
-    if (rt._modelsPage?.promise === promise) rt._modelsPage = null;
+    if (rt._modelsPage?.promise === promise) rt._modelsPage = error?.code === "BUSY" ? null : { key, error, at: now };
     throw error;
   }
 }
@@ -102,6 +120,8 @@ async function seriesOf(rt, own, model, now) {
   const hit = cache.get(model);
   if (hit && now - hit.at < MODELS_TTL_MS) return hit.value;
   if (hit?.promise) return hit.promise;
+  // 额度紧、断路时不发：这一次写「读不到成功率」，不缓存
+  try { guardOf(own, now)(); } catch { return null; }
   const promise = queryOwnPerfSeries(own, model, MODELS_VIEW.DAYS * 24).then((value) => value, () => null).then((value) => {
     if (cache.get(model)?.promise === promise) {
       cache.set(model, { at: now, value });

@@ -384,9 +384,11 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
 }
 
 // 自营站点的渠道列表，缓存 10 分钟（拉取开销不小）：利润和模型供需共用这一份，不各读各的
-export async function ownChannelList(rt, own) {
+// beforeRead：缓存过期、真的要发请求之前问一下（额度紧、断路时抛错就不发）；命中缓存不问
+export async function ownChannelList(rt, own, { beforeRead = null } = {}) {
   const cc = rt._ownChannelsCache;
   if (!cc?.list || cc.stationId !== own.id || Date.now() - cc.at > 600000) {
+    beforeRead?.();
     rt._ownChannelsCache = { at: Date.now(), stationId: own.id, list: await queryOwnChannels(own) };
   }
   return rt._ownChannelsCache.list;

@@ -81,6 +81,8 @@ export const COPY = Object.freeze({
     channelsTitle: "渠道和上游", channelsSub: "这个模型现在走哪些渠道",
     channelCols: Object.freeze({ channel: "渠道", state: "状态", priority: "优先级", share: "近 7 天流量占比", upstream: "上游", runway: "上游还能撑" }),
     channelState: Object.freeze({ on: "启用", off: "已停用", auto: "被自动停用" } as Record<ChannelState, string>),
+    channelLine: (priority: number, share: string, upstream: string) => `优先级 ${priority} · 近 7 天占 ${share} · ${upstream}`,
+    finderLine: (price: string, vs: string) => `${price} · ${vs}`,
     channelNone: "没有渠道配了这个模型。",
     unbound: "没绑上游",
     finderTitle: "找货帮手", finderSub: "已经加了的上游里，谁也卖这个模型：按价格从低到高",

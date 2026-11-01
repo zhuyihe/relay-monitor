@@ -19,6 +19,7 @@ import type { ModelDetail, ModelsPage } from "./models-format";
 export function ModelDrawer({ name, page, onClose }: { name: string | null; page: ModelsPage; onClose: () => void }) {
   const open = name != null;
   const screens = Grid.useBreakpoint();
+  const phone = screens.md === false;
   const triggerRef = useRef<HTMLElement | null>(null);
   const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "notFound" | "failed">("loading");
@@ -81,11 +82,11 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
         </section>
         <section className="jy-models-chart">
           <div className="jy-chart-sub"><h3>{COPY.drawer.channelsTitle}</h3><span className="jy-caption">{COPY.drawer.channelsSub}</span></div>
-          <Channels detail={detail} critDays={detail.critDays} />
+          <Channels detail={detail} critDays={detail.critDays} phone={phone} />
         </section>
         <section className="jy-models-chart">
           <div className="jy-chart-sub"><h3>{COPY.drawer.finderTitle}</h3><span className="jy-caption">{COPY.drawer.finderSub}</span></div>
-          <Finder detail={detail} rate={rate} critDays={detail.critDays} />
+          <Finder detail={detail} rate={rate} critDays={detail.critDays} phone={phone} />
         </section>
         <section className="jy-models-chart">
           <div className="jy-chart-sub"><h3>{COPY.drawer.usersTitle}</h3><span className="jy-caption">{COPY.drawer.usersSub}</span></div>
@@ -100,7 +101,7 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
     <Drawer
       className="jy-drawer jy-models-drawer"
       placement="right"
-      size={screens.md === false ? "100%" : 720}
+      size={phone ? "100%" : 720}
       open={open}
       onClose={onClose}
       keyboard={false}
@@ -119,9 +120,23 @@ export function ModelDrawer({ name, page, onClose }: { name: string | null; page
 }
 
 // 渠道和上游：一个渠道一行；被停用的也列（灰字），提醒还有一条路可以开
-function Channels({ detail, critDays }: { detail: ModelDetail; critDays: number }) {
+function Channels({ detail, critDays, phone }: { detail: ModelDetail; critDays: number; phone: boolean }) {
   const cols = COPY.drawer.channelCols;
   if (!detail.channels.length) return <p className="jy-muted">{COPY.drawer.channelNone}</p>;
+  // 手机：一个渠道一张卡片——第一行渠道名和状态，第二行优先级 · 流量占比 · 上游，第三行跑道
+  if (phone) {
+    return (
+      <ul className="jy-models-subcards">
+        {detail.channels.map((channel) => (
+          <li key={channel.channelId} className={channel.state === "on" ? undefined : "jy-models-off"}>
+            <span className="r1"><b>{channel.name}</b><span>{COPY.drawer.channelState[channel.state]}</span></span>
+            <span className="r2 jy-caption">{COPY.drawer.channelLine(channel.priority, channel.share == null ? EMPTY : formatPct(channel.share, 0), channel.upstream ? (channel.upstream.name ?? EMPTY) : COPY.drawer.unbound)}</span>
+            {channel.upstream && <span className="r3"><RunwayCell runway={channel.upstream.runway} critDays={critDays} /></span>}
+          </li>
+        ))}
+      </ul>
+    );
+  }
   return (
     <div className="jy-table-wrap">
       <table className="jy-data jy-num jy-data--compact">
@@ -145,11 +160,23 @@ function Channels({ detail, critDays }: { detail: ModelDetail; critDays: number 
 }
 
 // 找货帮手：已经加了的上游里，谁也卖这个模型，按价格从低到高；还没在供的最右边一个「去绑定渠道」
-function Finder({ detail, rate, critDays }: { detail: ModelDetail; rate: number; critDays: number }) {
+function Finder({ detail, rate, critDays, phone }: { detail: ModelDetail; rate: number; critDays: number; phone: boolean }) {
   const cols = COPY.drawer.finderCols;
+  // 手机：一个上游一张卡片——第一行上游名和在不在供（还没在供的右边一个「去绑定渠道」），第二行价格 · 和现在用的比，第三行余额够用的跑道
+  const cards = (
+    <ul className="jy-models-subcards">
+      {detail.finder.map((item) => (
+        <li key={item.upstreamId}>
+          <span className="r1"><b>{item.name ?? EMPTY}</b><span>{item.supplying ? COPY.drawer.supplying : COPY.drawer.notSupplying}</span></span>
+          <span className="r2 jy-caption">{COPY.drawer.finderLine(item.readable ? priceText(item.price, rate) : COPY.drawer.unreadablePrice, compareText(item))}</span>
+          <span className="r3"><RunwayCell runway={item.runway} critDays={critDays} />{!item.supplying && item.bindable && <Link className="jy-link" href={bindLink(item.upstreamId)} aria-label={`${COPY.drawer.goBind}：${item.name ?? ""}`}>{COPY.drawer.goBind}</Link>}</span>
+        </li>
+      ))}
+    </ul>
+  );
   return (
     <>
-      {detail.finder.length === 0 ? <p className="jy-muted">{COPY.drawer.finderNone}</p> : (
+      {detail.finder.length === 0 ? <p className="jy-muted">{COPY.drawer.finderNone}</p> : phone ? cards : (
         <div className="jy-table-wrap">
           <table className="jy-data jy-num jy-data--compact">
             <caption className="sr-only">{COPY.drawer.finderTitle}</caption>

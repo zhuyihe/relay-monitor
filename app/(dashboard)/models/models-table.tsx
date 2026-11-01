@@ -70,6 +70,7 @@ export function ModelsTable({ page, sort, onSort, onOpen }: { page: ModelsPage; 
 
   return (
     <Panel
+      className="jy-models-panel"
       title={COPY.tableTitle}
       body="flush"
       extra={<Input allowClear prefix={<Icon name="search" />} placeholder={COPY.search} aria-label={COPY.search} value={text} onChange={(event) => setText(event.target.value)} className="jy-models-search" />}
