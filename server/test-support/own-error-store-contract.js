@@ -74,6 +74,19 @@ export function defineOwnErrorStoreContract({ name, create, createConsume = null
       assert.equal(await store.latestSlot(a), 3 * 3600000);
     });
 
+    await t.test("maxAttempt：[from, to) 里整个站点见到的最大第几次尝试；请求问题、其他和次数为 0 的不算；范围之外和别的站点不算；一个都没有是 0", async () => {
+      const a = id("x"), b = id("y");
+      await store.startCursor(a, 0); await store.startCursor(b, 0);
+      assert.equal(await store.maxAttempt(a, 0, 99 * 3600000), 0);
+      await store.applyWindow(a, { fromMs: 0, toMs: 1, buckets: [bucket({ slotMs: 3600000, attempt: 2 }), bucket({ slotMs: 2 * 3600000, attempt: 4, channelId: 5 }), bucket({ slotMs: 3 * 3600000, attempt: 9, reason: "bad_request", status: 400 }),
+        bucket({ slotMs: 3 * 3600000, attempt: 8, reason: "other", status: 404 }), bucket({ slotMs: 9 * 3600000, attempt: 7 }), bucket({ slotMs: 4 * 3600000, attempt: 6, count: 0 })] });
+      await store.applyWindow(b, { fromMs: 0, toMs: 1, buckets: [bucket({ slotMs: 3600000, attempt: 10 })] });
+      assert.equal(await store.maxAttempt(a, 0, 8 * 3600000), 4, "请求问题、其他、次数为 0 的不算");
+      assert.equal(await store.maxAttempt(a, 0, 2 * 3600000), 2, "[from, to) 不含终点");
+      assert.equal(await store.maxAttempt(a, 0, 99 * 3600000), 7);
+      assert.equal(await store.maxAttempt(a, 5 * 3600000, 8 * 3600000), 0);
+    });
+
     await t.test("别的站点、别的小时的桶分开；按小时范围读；清理只删早的", async () => {
       const a = id("c"), b = id("d");
       await store.startCursor(a, 0); await store.startCursor(b, 0);

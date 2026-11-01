@@ -208,6 +208,12 @@ export class OwnLogStore {
     return row?.slot == null ? null : Number(row.slot);
   }
 
+  // [fromSlotMs, toSlotMs) 里整个站点见到的最大「第几次尝试」（第一张桶表，只算有次数、不是请求问题和「其他」的桶（和 F 数的尝试一致））；一个都没有是 0。读不到站点重试次数时用它推（模型供需的 F）
+  async maxAttempt(stationId, fromSlotMs, toSlotMs) {
+    const [[row]] = await this.pool.query(`SELECT MAX(attempt) AS top FROM ${this.spec.tables[0].table} WHERE station_id = ? AND slot_ms >= ? AND slot_ms < ? AND count > 0 AND reason NOT IN ('bad_request', 'other')`, [stationId, fromSlotMs, toSlotMs]);
+    return row?.top == null ? 0 : Number(row.top);
+  }
+
   // 每小时清一批：beforeSlotMs 以前的桶，每张表一次最多 limit 行；返回删了几行（各表加起来）
   async pruneBuckets(beforeSlotMs, limit = 2000) {
     let deleted = 0;

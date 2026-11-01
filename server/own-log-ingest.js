@@ -86,6 +86,14 @@ export const ERROR_KIND = Object.freeze({
   limits: Object.freeze({ pagesPerRound: 3, pagesBehind: 6, windowStartMs: 5 * 60000, windowMaxMs: 5 * 60000, minAdvanceMs: 5 * 60000 }),
 });
 
+// 采样挑哪几页：窗口不超过 maxPages 页就全读；超过就在 total 分出的页里均匀挑 maxPages 页（第 1 页、中间、最后一页，页码只由 total 算，不多发请求）。
+// 页是按 created_at 倒序切的，只取最新几页会把窗口前半段的小渠道漏成 0；分层取，窗口的头、中、尾都有样本
+export function samplePlan(total, maxPages) {
+  const pages = Math.ceil(total / INGEST.PAGE_SIZE);
+  if (pages <= maxPages) return Array.from({ length: pages }, (_, i) => i + 1);
+  return Array.from({ length: maxPages }, (_, i) => 1 + Math.round((i * (pages - 1)) / (maxPages - 1)));
+}
+
 const ownBase = (own) => String(own?.baseUrl || "").replace(/\/+$/, "");
 const wholeSecond = (ms) => Math.floor(ms / 1000) * 1000;
 
@@ -206,17 +214,21 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
           seen.add(id); fresh.push(row);
         }
         if (items.length && !fresh.length) throw invalid("pending-page-not-advancing");
-        if (total != null && (seen.size > total || (items.length < INGEST.PAGE_SIZE && seen.size !== total)))
+        // 采样的流水线（错误日志）：窗口超过 samplePages 页就只读分层挑的几页（见 samplePlan），每页的条数照 total 算得出来，对不上就是窗口里的日志在读的时候变了
+        const plan = kind.samplePages && total != null ? samplePlan(total, kind.samplePages) : null;
+        if (plan) {
+          if (items.length !== (total === 0 ? 0 : Math.min(INGEST.PAGE_SIZE, total - INGEST.PAGE_SIZE * (page - 1))) || (total > 0 && !plan.includes(page))) throw invalid("pending-count-mismatch");
+        } else if (total != null && (seen.size > total || (items.length < INGEST.PAGE_SIZE && seen.size !== total)))
           throw invalid("pending-count-mismatch");
-        const sampleDone = !!kind.samplePages && total != null && page >= kind.samplePages;
-        const complete = total == null ? items.length < INGEST.PAGE_SIZE : seen.size === total || sampleDone;
+        const nextPage = plan ? plan[plan.indexOf(page) + 1] : undefined;
+        const complete = plan ? nextPage === undefined : total == null ? items.length < INGEST.PAGE_SIZE : seen.size === total;
         // 已翻完 total 指定的页数还缺编号，不能靠空页把漏掉的记录当作已采完。
-        if (total != null && !complete && page >= Math.ceil(total / INGEST.PAGE_SIZE)) throw invalid("pending-count-mismatch");
+        if (!plan && total != null && !complete && page >= Math.ceil(total / INGEST.PAGE_SIZE)) throw invalid("pending-count-mismatch");
         const buckets = new Map((pending?.buckets || []).map((bucket) => [kind.keyOf(bucket), bucket]));
         kind.accumulate(fresh, { adminSet, resoldKeys, ...context }, buckets);
         // 只读了样本（窗口里的条数比读到的多）：窗口读完时把样本里的比例摊到 total 上，桶标成估算；不满 samplePages 页读完的是实数
-        const finalBuckets = complete && sampleDone && seen.size < total ? kind.finalize(buckets, { total, sample: seen.size }) : buckets;
-        const saved = await store.savePending(own.id, { fromMs, toMs, nextPage: page + 1, total,
+        const finalBuckets = complete && plan && seen.size < total ? kind.finalize(buckets, { total, sample: seen.size }) : buckets;
+        const saved = await store.savePending(own.id, { fromMs, toMs, nextPage: nextPage ?? page + 1, total,
           seenIds: [...seen], buckets: [...finalBuckets.values()], complete, classificationKey },
           { expectedRevision: pending?.revision ?? null }, now());
         if (!saved) return result({ error: "cursor-moved" });

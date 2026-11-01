@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { ERROR_KIND, INGEST, RETRY_SETTINGS_FAIL_TTL_MS, RETRY_SETTINGS_TTL_MS, cachedRetrySettings, createOwnLogIngest, readRetrySettings } from "./own-log-ingest.js";
+import { ERROR_KIND, INGEST, RETRY_SETTINGS_FAIL_TTL_MS, RETRY_SETTINGS_TTL_MS, cachedRetrySettings, createOwnLogIngest, readRetrySettings, samplePlan } from "./own-log-ingest.js";
 import { ERROR_SPEC } from "./own-log-store.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { ownUsersKey } from "./own-helpers.js";
@@ -493,11 +493,11 @@ test("错误日志采样：一个窗口最多读 3 页（300 条）当样本，�
   const ingest = errorIngest(rt, store, () => NOW);
   let maxPages = 0;
   await catchUp(ingest, own, { each: async (r) => { maxPages = Math.max(maxPages, r.pages || 0); } });
-  const perWindow = new Map();
-  for (const r of errorReads(requests)) perWindow.set(`${r.start}-${r.end}`, Math.max(perWindow.get(`${r.start}-${r.end}`) || 0, r.p));
+  const perWindow = new Map(); // 窗口 → 读了哪几页
+  for (const r of errorReads(requests)) perWindow.set(`${r.start}-${r.end}`, [...(perWindow.get(`${r.start}-${r.end}`) || []), r.p]);
   assert.ok(maxPages <= ERROR_KIND.limits.pagesPerRound, `落后不到 1 小时每轮最多 3 页：${maxPages}`);
-  assert.ok([...perWindow.values()].every((pages) => pages <= INGEST.PAGES_PER_WINDOW), "每个窗口最多读 3 页，没有第 4 页，窗口也没有被切小");
-  assert.equal(Math.max(...[...perWindow.values()]), 3);
+  assert.ok([...perWindow.values()].every((pages) => pages.length <= INGEST.PAGES_PER_WINDOW), "每个窗口最多读 3 页，窗口也没有被切小");
+  assert.deepEqual([...perWindow.values()].find((pages) => pages.length === 3), [1, 4, 7], "700 条 = 7 页：读第 1 页、中间页（第 4 页）、最后一页（第 7 页），不是最新的 3 页");
   assert.ok(errorReads(requests).every((r) => (r.end - r.start + 1) * 1000 <= 300000), "窗口没被切小，也没被放大");
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
   assert.equal(total(buckets), logs.length, "摊完以后加起来正好是窗口的总条数（含样本没读到的）：每条只算一次（续读不重不漏）");
@@ -511,6 +511,26 @@ test("错误日志采样：一个窗口最多读 3 页（300 条）当样本，�
   assert.equal(userBuckets.reduce((sum, b) => sum + b.count, 0), logs.length);
   assert.equal(userBuckets.reduce((sum, b) => sum + b.firstCount, 0), logs.length);
   assert.ok(userBuckets.some((b) => b.sampled > 0));
+});
+
+test("采样分层取页：页是按时间倒序切的，样本要覆盖窗口的头、中、尾；窗口前半段才有的小渠道不会被摊成 0；页码只由 total 算，不多发请求", async (t) => {
+  assert.deepEqual([0, 1, 250, 300].map((n) => samplePlan(n, 3)), [[], [1], [1, 2, 3], [1, 2, 3]], "不超过 3 页全读");
+  assert.deepEqual([301, 400, 600, 15000].map((n) => samplePlan(n, 3)), [[1, 3, 4], [1, 3, 4], [1, 4, 6], [1, 76, 150]]);
+  resetOwnRequestBudget();
+  // 一个窗口 600 条：渠道 1 有 570 条（晚），渠道 2 只有 30 条而且最早（按时间倒序是最后 30 条，落在第 6 页）。只取最新 3 页会把渠道 2 估成 0
+  const start = NOW - 30 * 60000, logs = []; let id = 1;
+  for (let k = 0; k < 30; k += 1) logs.push(errRow(id++, start + 1000 + k * 1000, { channel: 2 }, { admin_info: { use_channel: ["2"] } }));
+  for (let k = 0; k < 570; k += 1) logs.push(errRow(id++, start + 60000 + Math.floor(k / 5) * 1000, { channel: 1 }));
+  const { own, rt, requests } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await store.startCursor("own", wholeSecondMs(start), NOW);
+  await catchUp(errorIngest(rt, store, () => NOW), own);
+  const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  const by = (channelId) => buckets.filter((b) => b.channelId === channelId).reduce((sum, b) => sum + b.count, 0);
+  assert.equal(by(1) + by(2), 600, "摊完正好是 600");
+  assert.ok(by(2) > 0, `渠道 2 的 30 条在最后一页，分层取页取得到（只取最新 3 页会是 0）：${by(2)}`);
+  assert.ok(buckets.every((b) => b.sampled === 1));
+  assert.deepEqual(errorReads(requests).filter((r) => r.start === wholeSecondMs(start) / 1000).map((r) => r.p), [1, 4, 6], "600 条 = 6 页：第 1、4、6 页，一共 3 个请求");
 });
 
 test("错误日志采样：窗口里不到 300 条（样本读全了）是实数；刚好 300 条也是实数；301 条就按样本摊成估算", async (t) => {
@@ -567,7 +587,7 @@ test("上游大面积出错（每秒 50 条）：一个窗口只读 3 页样本�
   const perRound = [];
   await catchUp(ingest, own, { each: (r) => perRound.push(r.pages || 0) });
   assert.ok(perRound.every((pages) => pages <= ERROR_KIND.limits.pagesBehind), `每轮页数：${perRound.join(",")}`);
-  assert.ok(Math.max(...errorReads(requests).filter((r) => r.start === YESTERDAY_START / 1000).map((r) => r.p)) === 3, "事故的那个窗口只读 3 页");
+  assert.deepEqual(errorReads(requests).filter((r) => r.start === YESTERDAY_START / 1000).map((r) => r.p), [1, 76, 150], "事故的那个窗口 150 页：只读第 1 页、中间页、最后一页");
   assert.equal((await store.getCursor("own")).coveredToMs, NOW - INGEST.LAG_MS, "追平了，没有被拖在原地");
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
   assert.ok(buckets.every((b) => b.reason === "upstream" && b.status === 529 && b.sampled === 1), "529 是上游故障、估算");

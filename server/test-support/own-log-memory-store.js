@@ -62,6 +62,11 @@ export class MemoryOwnLogStore {
     for (const row of this.tableBuckets.get(this.spec.tables[0].name).values()) if (row.station_id === stationId && (latest == null || row.slot_ms > latest)) latest = row.slot_ms;
     return latest;
   }
+  async maxAttempt(stationId, fromSlotMs, toSlotMs) {
+    let top = 0;
+    for (const row of this.tableBuckets.get(this.spec.tables[0].name).values()) if (row.station_id === stationId && row.slot_ms >= fromSlotMs && row.slot_ms < toSlotMs && row.count > 0 && row.reason !== "bad_request" && row.reason !== "other") top = Math.max(top, row.attempt);
+    return top;
+  }
   async pruneBuckets(beforeSlotMs, limit = 2000) {
     let n = 0;
     for (const into of this.tableBuckets.values()) {
