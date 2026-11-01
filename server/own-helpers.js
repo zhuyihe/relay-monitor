@@ -2,7 +2,7 @@
 // 供 /api/own/analytics、/api/own/admin-keys 与每日日报共用。
 // 约定：不在顶层 import lib/runtime.js；跨请求状态（缓存）一律挂在 rt 字段上。
 import {
-  queryStationUsage, queryOwnUsers, queryOwnChannels, queryLogStat, queryOwnFlow,
+  queryStationUsage, queryOwnUsers, queryOwnChannels, queryLogStat,
 } from "../lib/providers.js";
 import { isAccessTokenError } from "../lib/access-token-scopes.js";
 import { businessTimeZone, dayKeyInTz, dayRangeInTz, resolveBusinessWindow } from "../lib/business-time.js";
@@ -10,6 +10,7 @@ import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnap
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
 import { errorCodeOf, errorDetail, ownStationErrorCode } from "../lib/error-copy.js";
 import { ownStationDisplayName, stationDisplayName } from "../lib/overview-actions.js";
+import { readOwnRows } from "./own-raw-rows.js";
 
 // 上游在自营站点的渠道里找不到对应地址时，成本明细「渠道」一栏的写法（成本来源另有一栏）
 const NO_MATCHED_CHANNEL = "没有对上的渠道";
@@ -537,11 +538,11 @@ export function joinPrev(cur, prev, field) {
  * totalCostUsd 传窗内模型口径合计，用来算覆盖率：new-api 的 flow 查询带
  * use_group <> '' 过滤，没有分组字段的历史行不在内，合计会偏小。
  */
-export async function computeFlowBreakdown(own, { startMs, endMs, prevStartMs, prevEndMs, totalCostUsd }) {
+export async function computeFlowBreakdown(rt, own, { startMs, endMs, prevStartMs, prevEndMs, totalCostUsd }) {
   try {
     const [cur, prev] = await Promise.all([
-      queryOwnFlow(own, startMs, endMs),
-      queryOwnFlow(own, prevStartMs, prevEndMs).catch(() => []),
+      readOwnRows(rt, own, "flow", startMs, endMs),
+      readOwnRows(rt, own, "flow", prevStartMs, prevEndMs).catch(() => []),
     ]);
     const chKey = (r) => r.channelName || (r.channelId ? `渠道 ${r.channelId}` : "");
     const ugKey = (r) => (r.user && r.group ? `${r.user} · ${r.group}` : "");

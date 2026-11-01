@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Drawer, Grid } from "antd";
 import { api } from "../../../lib/client";
-import { EMPTY, axisMoney, formatDayKey, formatZonedTime, weekdayOfDayKey } from "../../../lib/format";
+import { EMPTY, axisMoney, formatDayKey, formatZonedDate, formatZonedTime, weekdayOfDayKey } from "../../../lib/format";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import { useDrawerEscape } from "../../components/drawer-escape";
 import { BalanceLine, Bars } from "./charts";
@@ -45,7 +45,7 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
   useEffect(() => { if (id != null && state === "ready") load(id, true); }, [page.asOf]);
   useDrawerEscape(open, onClose);
 
-  const row: UsersRow | null = detail?.user || (id != null ? page.users.find((user) => user.id === id) || null : null);
+  const row: UsersRow | null = detail?.user || null;
   const rate = detail?.rate ?? page.rate, tz = page.tz;
   const m = (usd: number | null | undefined) => money(usd, rate);
   const name = detail?.username || row?.username || "";
@@ -60,6 +60,13 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
     const week = row ? (page.ready.week ? m(row.week) : EMPTY) : EMPTY;
     return (
       <>
+        {row && (
+          <dl className="jy-users-drawer-meta">
+            <div><dt>{COPY.drawer.group}</dt><dd>{row.group || EMPTY}</dd></div>
+            <div><dt>{COPY.drawer.created}</dt><dd>{row.createdAtMs != null ? formatZonedDate(row.createdAtMs, tz, page.asOf) : EMPTY}</dd></div>
+            <div><dt>{COPY.drawer.used}</dt><dd>{m(row.usedUsd)}</dd></div>
+          </dl>
+        )}
         <dl className="jy-kpis jy-users-drawer-kpis">
           <div><dt>{COPY.drawer.kpiWeek}</dt><dd className="jy-kpi-figure">{week}</dd></div>
           <div><dt>{COPY.drawer.kpiVs}</dt><dd className="jy-kpi-figure">{row && detail.ready.compare ? deltaText(row.week, row.prevWeek) : EMPTY}</dd></div>

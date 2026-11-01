@@ -6,7 +6,7 @@ import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../li
 import { rateSnapshotOf } from "../lib/profit.js";
 import { QUOTA_PER_UNIT, queryOwnData } from "../lib/providers.js";
 import { ownRequestState } from "../lib/own-request-budget.js";
-import { USERS_VIEW, buildUserDetail, buildUsersView, dayGrid, filledFromOf, weekReadyOf } from "../lib/user-ops-view.js";
+import { USERS_VIEW, buildUserDetail, buildUsersView, dayGrid, filledFromOf, queryUsers, weekReadyOf } from "../lib/user-ops-view.js";
 import { USER_OPS } from "./user-ops.js";
 
 const HOUR_MS = 3600000, DAY_MS = 86400000;
@@ -16,6 +16,18 @@ const toUsd = (quota) => quota / QUOTA_PER_UNIT;
 
 const ownOf = (rt) => rt.store?.list?.().find((station) => station.isOwn && station.type === "newapi" && !station.archivedAt) || null;
 const emptyHint = (own, rate, now) => ({ starting: true, asOf: now, syncedMs: null, tz: businessTimeZone(), rate, ownStationId: own.id, backfill: { done: false, days: 0, total: USER_OPS.BACKFILL_DAYS }, users: [], trend: [], big: { ready: false, ids: [], count: 0 }, summary: null, ready: {} });
+
+// 接口给页面的：概览要的数照旧，全部用户的行换成筛、排、切片以后的一页（一页 50 个）和个数、合计。
+// 地址栏的写法：scope=all、big=1、only=soon|down|new|churned、group=vip（可以多个，逗号分开）、q=搜索、sort=user|week|today|balance|last、dir=asc|desc、page=2
+export function usersResponse(page, params) {
+  const { users, ...rest } = page;
+  const query = {
+    scope: params.get("scope"), big: params.get("big") === "1", only: params.get("only"), q: params.get("q"),
+    groups: params.getAll("group").flatMap((value) => value.split(",")).map((value) => value.trim()),
+    sort: params.get("sort"), dir: params.get("dir"), page: params.get("page"),
+  };
+  return { ...rest, list: queryUsers(users || [], query, page.ready || {}) };
+}
 
 // 整页的数（概览 + 用户表）。ops 是 createUserOps 的返回；没读到过数时 starting: true（页面写补全中）
 export async function usersPage(rt, ops, store, { now = Date.now() } = {}) {

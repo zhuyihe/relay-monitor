@@ -613,7 +613,7 @@ test("日报按 §10 写：标题、统计的那天、经营概览、用量、�
     "利润怎么算：快用完上游 不算进利润。",
     "",
     "■ 用量",
-    "请求数 3.5 万 ｜ Token（不含缓存）1,000 万 ｜ 有消费的用户 3 个",
+    "请求数 3.5 万 ｜ Token（不含缓存）1,000 万 ｜ 活跃用户 3 个",
     "",
     "■ 用得最多的模型",
     "1. gpt-4o  ¥900.00（Token 800 万 · 请求数 3 万）",
@@ -651,7 +651,7 @@ test("日报按 §10 写：标题、统计的那天、经营概览、用量、�
     "",
     "由炬元控制台生成",
   ].join("\n"));
-  // 不写上游返回的原文、不标 ⚠、归档的上游不列；carol 这天只调了免费模型（¥0.00），不算有消费的用户、不进排行
+  // 不写上游返回的原文、不标 ⚠、归档的上游不列；carol 这天只调了免费模型（¥0.00），不算活跃用户、不进排行
   assert.doesNotMatch(text, /Unauthorized|sk-abc|⚠|归档上游|carol/);
 });
 
@@ -668,7 +668,7 @@ test("日报的邮件版和文字版同样的字：四个格子、近 14 天消�
   assert.match(html, />近 14 天消费</);
   assert.match(html, />9月24日</);
   assert.match(html, />10月7日 · ¥1,050.00</);
-  assert.match(html, />用量：请求数 3\.5 万 · Token（不含缓存）1,000 万 · 有消费的用户 3 个</);
+  assert.match(html, />用量：请求数 3\.5 万 · Token（不含缓存）1,000 万 · 活跃用户 3 个</);
   assert.match(html, />用得最多的模型</);
   // 管理员用次要颜色，不标红；「利润怎么算」用墨色
   assert.match(html, /root <span style="color:#667085;font-size:10px">管理员<\/span>/);
@@ -806,7 +806,7 @@ test("日报：这天没有消费、一个上游都没有时写「（这天没�
   const { text, html } = await buildReport(h.rt);
   assert.match(text, /\n■ 用得最多的模型\n（这天没有消费）\n\n■ 消费最多的用户\n（这天没有消费）\n/);
   assert.match(text, /\n■ 上游余额\n（还没有上游）\n/);
-  assert.match(text, /\n请求数 0 ｜ Token（不含缓存）0 ｜ 有消费的用户 0 个\n/);
+  assert.match(text, /\n请求数 0 ｜ Token（不含缓存）0 ｜ 活跃用户 0 个\n/);
   assert.equal(html.match(/>（这天没有消费）</g)?.length, 2);
   assert.match(html, />（还没有上游）</);
   assert.deepEqual(tile(html, "收入"), ["¥0.00", ""]);

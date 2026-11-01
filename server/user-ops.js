@@ -2,7 +2,7 @@
 // 每 10 分钟（挂在对账轮询的每一轮后面，自己限频）：
 //   1. 读用户列表（server/own-helpers.js 的 getOwnUsers，10 分钟缓存），给每个非管理员用户记一条余额快照（变了才写，没变每天补一条）；
 //   2. 读 /api/data/users 最近 3 小时，按小时覆盖写进 user_usage_hours；
-//   3. 第一次往回补 60 天（页面趋势图要画近 30 天和前 30 天）：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
+//   3. 第一次往回补 90 天（页面趋势图要画近 30 天和前 30 天，月留存要再往前 30 天）：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
 //   4. 算每个用户还能用几天（lib/user-balance.js）和重点用户（日均消费占全站八成），结果放在 rt._userOpsView 里（以后页面读）；
 //   5. 站长提醒：规则「重点用户余额用完」「重点用户快用完」（rules.onUserExhaust / onUserEta，告警中心「用户」一组）开着、数据新鲜、回补完成时，只推送重点用户，几位一起推一条。
 // 页面开着的时候（页面来取数就续 90 秒「有人在看」，做法同每日利润页）加一档「实时」：每分钟读一次用户列表和最近 3 小时的用量（回补没完也接着补），
@@ -26,9 +26,10 @@ export const USER_OPS = Object.freeze({
   USERS_MAX_AGE_MS: 9 * 60000, // 用户列表缓存超过这么久就重读，保证每轮的快照是新的
   SNAPSHOT_REFRESH_MS: DAY_MS, // 余额没变的用户每天补一条
   USAGE_LOOKBACK_HOURS: 3,
-  BACKFILL_DAYS: 60,
+  BACKFILL_DAYS: 90, // 趋势图近 30 天 + 前 30 天，月留存要再往前 30 天
+  BACKFILL_CORE_DAYS: 60, // 提醒要等补到这么多天（和以前一样）；再往前的 30 天后补，不拦提醒
   BACKFILL_PER_RUN: 3,
-  USAGE_KEEP_MS: 65 * DAY_MS, // 趋势图近 30 天 + 前 30 天，再留 5 天余量
+  USAGE_KEEP_MS: 95 * DAY_MS, // 90 天，再留 5 天余量
   BALANCE_KEEP_MS: 14 * DAY_MS, // 7 天窗口 + 余量
   EVAL_LOOKBACK_MS: 8 * DAY_MS,
   // 最近 180 秒这个站点已经发了这么多请求（共 360 个额度）就整轮不读：比整站日志读取的份额更保守，别的读取（运营总览、对账）优先
@@ -118,15 +119,19 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     return rows.length;
   }
 
-  const backfillView = (backfillState) => ({ done: backfillState.done, days: Math.min(USER_OPS.BACKFILL_DAYS, Math.ceil((backfillState.startedMs - backfillState.cursor) / DAY_MS)), total: USER_OPS.BACKFILL_DAYS, cursorMs: backfillState.cursor });
+  const backfillView = (backfillState) => ({ done: backfillState.done, core: !!backfillState.core, days: Math.min(USER_OPS.BACKFILL_DAYS, Math.ceil((backfillState.startedMs - backfillState.cursor) / DAY_MS)), total: USER_OPS.BACKFILL_DAYS, cursorMs: backfillState.cursor });
 
-  // 回补：从「现在」往前一天一个请求，补到 60 天前的 0 点；每轮最多 BACKFILL_PER_RUN 个，每个之前问额度
+  // 回补：从「现在」往前一天一个请求，补到 90 天前的 0 点；每轮最多 BACKFILL_PER_RUN 个，每个之前问额度。
+  // 目标从开始回补的那一天算起：以前只补 60 天的站，目标往前挪到 90 天，接着从补到的地方往前补（不重补）
   async function backfill(ops, own, at) {
     const tz = businessTimeZone();
+    const targetOf = (startedMs, days) => dayStartInTz(shiftDayLabel(dayKeyInTz(startedMs, tz), -(days - 1)), tz);
     let progress = await ops.getProgress(own.id);
     // 进度行没有、或者只有半截（别的字段先写进去、回补目标是空的）：重新初始化，不然目标是空就一路往 1970 年读
     if (progress?.backfillCursorMs == null || progress.backfillTargetMs == null) {
-      progress = await ops.saveProgress(own.id, { backfillCursorMs: at, backfillStartedMs: at, backfillTargetMs: dayStartInTz(shiftDayLabel(dayKeyInTz(at, tz), -(USER_OPS.BACKFILL_DAYS - 1)), tz) }, at);
+      progress = await ops.saveProgress(own.id, { backfillCursorMs: at, backfillStartedMs: at, backfillTargetMs: targetOf(at, USER_OPS.BACKFILL_DAYS) }, at);
+    } else if (progress.backfillStartedMs != null && progress.backfillTargetMs > targetOf(progress.backfillStartedMs, USER_OPS.BACKFILL_DAYS)) {
+      progress = await ops.saveProgress(own.id, { backfillTargetMs: targetOf(progress.backfillStartedMs, USER_OPS.BACKFILL_DAYS) }, at);
     }
     let cursor = progress.backfillCursorMs, steps = 0;
     while (cursor > progress.backfillTargetMs && steps < USER_OPS.BACKFILL_PER_RUN && budgetOk(own)) {
@@ -138,7 +143,8 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
       steps += 1;
       await ops.saveProgress(own.id, { backfillCursorMs: cursor }, at);
     }
-    return { steps, done: cursor <= progress.backfillTargetMs, cursor, target: progress.backfillTargetMs, startedMs: progress.backfillStartedMs };
+    const startedMs = progress.backfillStartedMs;
+    return { steps, done: cursor <= progress.backfillTargetMs, core: startedMs != null && cursor <= targetOf(startedMs, USER_OPS.BACKFILL_CORE_DAYS), cursor, target: progress.backfillTargetMs, startedMs };
   }
 
   async function evaluate(ops, own, at, { backfillState, fresh }) {
@@ -171,7 +177,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
       const runway = points?.length ? userRunway({ points, hours: hoursByName.get(user.username), now: at, syncedMs: progress?.usageSyncedMs ?? at, level1Days }) : { state: "warming", level: 0, days: null, burnPerDay: null, balanceUsd: user.quotaUsd, hasConsumption: false };
       users.set(id, { id, username: user.username, big: bigSet.has(id), dailyAvg: averages.get(user.username) || 0, ...runway });
     }
-    const pushAllowed = fresh && backfillState.done;
+    const pushAllowed = fresh && backfillState.core;
     // 页面要的两个数顺手在这里算（这一轮已经读了 8 天的快照）：快照最早一条的时刻（余额记满 24 小时才判可用天数）、7 天前的预收（客户余额合计）。页面不再自己读快照
     let pointsFirstMs = null, prepaidAgo = null;
     const weekAgo = at - 7 * DAY_MS;
@@ -266,7 +272,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
       alive();
       if (budgetOk(own)) { try { out.usageRows = await syncUsage(ops, own, at); } catch (error) { note(out, "usage", error); } }
       alive();
-      let backfillState = { done: false, steps: 0, cursor: at, target: at, startedMs: at };
+      let backfillState = { done: false, core: false, steps: 0, cursor: at, target: at, startedMs: at };
       try { backfillState = await backfill(ops, own, at); } catch (error) { note(out, "backfill", error); }
       if (live) {
         // 实时一档到这里为止：回补有进展时把页面上的补全进度跟着更新，别的（还能用几天、重点用户、提醒）等下一个整轮

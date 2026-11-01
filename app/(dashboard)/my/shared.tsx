@@ -160,6 +160,8 @@ export function DataTable<R>({
   compact,
   caption,
   onRowClick,
+  controlledSort,
+  onSortChange,
 }: {
   rows: R[];
   cols: Col<R>[];
@@ -174,11 +176,16 @@ export function DataTable<R>({
   caption?: string;
   // 点一行做什么（用户运营页点一行开抽屉）；键盘用行里的按钮，行本身不进 Tab 顺序
   onRowClick?: (r: R) => void;
+  // 排序交给调用方（服务端排好了再给）：传这两个，表头只显示当前排法、点了通知调用方，rows 原样显示
+  controlledSort?: SortState;
+  onSortChange?: (next: SortState) => void;
 }) {
-  const [sort, setSort] = useState<SortState | null>(defaultSort || null);
+  const [ownSort, setSort] = useState<SortState | null>(defaultSort || null);
+  const controlled = controlledSort !== undefined && onSortChange !== undefined;
+  const sort = controlled ? controlledSort : ownSort;
   const sorted = useMemo(() => {
     const col = sort && cols.find((c) => c.key === sort.key);
-    if (!col?.sort) return rows;
+    if (controlled || !col?.sort) return rows;
     const f = col.sort;
     const k = sort.dir === "asc" ? 1 : -1;
     return rows
@@ -199,12 +206,11 @@ export function DataTable<R>({
         return c === 0 ? a.i - b.i : c * k;
       })
       .map((x) => x.r);
-  }, [rows, cols, sort]);
+  }, [rows, cols, sort, controlled]);
 
-  const onSort = (c: Col<R>) =>
-    setSort((s) =>
-      s && s.key === c.key ? { key: c.key, dir: s.dir === "asc" ? "desc" : "asc" } : { key: c.key, dir: c.num ? "desc" : "asc" },
-    );
+  const nextSort = (s: SortState | null, c: Col<R>): SortState =>
+    (s && s.key === c.key ? { key: c.key, dir: s.dir === "asc" ? "desc" : "asc" } : { key: c.key, dir: c.num ? "desc" : "asc" });
+  const onSort = (c: Col<R>) => (controlled ? onSortChange(nextSort(sort, c)) : setSort((s) => nextSort(s, c)));
   const hasFoot = cols.some((c) => c.foot !== undefined);
 
   return (

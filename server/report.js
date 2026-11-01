@@ -59,7 +59,7 @@ export const REPORT_TEXT = Object.freeze({
   unread: "没读到",
   usage: "用量",
   // 用量那一行的三项：文字版用「｜」隔开，邮件用「·」
-  usageParts: (requests, tokens, users) => [`请求数 ${requests}`, `Token（不含缓存）${tokens}`, `有消费的用户 ${users} 个`],
+  usageParts: (requests, tokens, users) => [`请求数 ${requests}`, `Token（不含缓存）${tokens}`, `活跃用户 ${users} 个`],
   requests: "请求数",
   token: "Token",
   topModels: "用得最多的模型",
@@ -117,7 +117,7 @@ export async function buildReport(rt) {
   const yRows = modelRows.filter((r) => r.t >= dayStart && r.t < dayEnd);
   const yUserRows = userRows.filter((r) => r.t >= dayStart && r.t < dayEnd);
   const byModel = agg(yRows);
-  // 用户只算这天消费金额大于 0 的：只调了免费模型的不算进「有消费的用户」，也不进排行
+  // 用户只算这天消费金额大于 0 的：只调了免费模型的不算进「活跃用户」，也不进排行
   const byUser = agg(yUserRows).filter((u) => u.cost > 0).map((u) => ({ ...u, isAdmin: adminSet.has(u.key) }));
   // 这一天的利润（成本也只算这一天）
   const profit = unconfirmed

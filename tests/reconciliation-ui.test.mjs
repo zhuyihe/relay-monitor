@@ -21,6 +21,9 @@ import { COPY as USAGE_COPY } from "../app/(dashboard)/usage/copy.ts";
 import { COPY as SETTINGS_COPY } from "../app/(dashboard)/settings/copy.ts";
 import { COPY as NOTIFICATIONS_COPY } from "../app/(dashboard)/notifications/copy.ts";
 import { COPY as LOGIN_COPY } from "../app/login/copy.ts";
+import { COPY as USERS_COPY } from "../app/(dashboard)/users/copy.ts";
+import { buildUserDetail, buildUsersView, dayGrid } from "../lib/user-ops-view.js";
+import { usersResponse } from "../server/user-ops-page.js";
 // 每日利润页上的字（一张对账表，app/(dashboard)/reconciliation/copy.ts）
 import { COPY as PROFIT_COPY } from "../app/(dashboard)/reconciliation/copy.ts";
 
@@ -820,7 +823,7 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   const metrics = region("这段时间的用量");
   // 加载骨架也叫这个名字（块名一样、数据回来时不跳）：等指标格真的出来再断言
   await metrics.locator("dt").first().waitFor();
-  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
+  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["活跃用户", "请求数", "Token（不含缓存）"]);
   await metrics.getByText("5 个", { exact: true }).waitFor();
   assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
   assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
@@ -2784,3 +2787,135 @@ const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeC
 
 test("占位：夹具段结束", () => {});
 
+// ---- 用户运营页（概览、用户）：夹具用真的 buildUsersView / usersResponse 算整页，所以筛选、分页、地址栏和接口的参数是一整条链 ----
+const USERS_TZ = "Asia/Shanghai", USERS_NOW = Date.parse("2026-11-02T10:30:00+08:00");
+function usersFixture() {
+  const grid = dayGrid(USERS_NOW, USERS_TZ);
+  const N = grid.days, DAY = 86400000;
+  const users = [], daily = new Map(), runways = new Map();
+  // 1–60：近 30 天有消费（前 3 位是重点用户，u001 快用完；u005 是 3 天前第一次花钱的新消费用户）；61–80：35 天前停的（已流失，近 30 天没消费）；
+  // 81–85：15 天前停的（已流失，近 30 天有消费）；86–120：从没花过
+  for (let i = 1; i <= 120; i += 1) {
+    const username = `u${String(i).padStart(3, "0")}`;
+    const active = i <= 60, goneLong = i > 60 && i <= 80, goneRecent = i > 80 && i <= 85;
+    const fresh = i === 5;
+    const series = Array.from({ length: N }, (_, d) => {
+      if (fresh) return d >= N - 3 ? 12 : 0;
+      if (active) return (i <= 3 ? 40 : 6) + (d % 3);
+      if (goneLong) return d >= N - 37 && d < N - 33 ? 5 : 0;
+      if (goneRecent) return d >= N - 20 && d < N - 10 ? 5 : 0;
+      return 0;
+    });
+    const total = series.reduce((sum, value) => sum + value, 0);
+    users.push({ id: i, username, role: 1, status: 1, quotaUsd: 100 + i, usedUsd: fresh ? total : total > 0 ? total + 900 : 0, createdAtMs: USERS_NOW - 200 * DAY, group: i % 2 ? "vip" : "default" });
+    daily.set(username, series);
+    runways.set(i, i === 1 ? { state: "soon", level: 1, days: 0.3, burnPerDay: 120, balanceUsd: 20, big: true, dailyAvg: 41 } : { state: active ? "ok" : "none", level: 0, days: active ? 30 : null, burnPerDay: active ? 6 : null, balanceUsd: 100 + i, big: i <= 3, dailyAvg: i <= 3 ? 40 : 6 });
+  }
+  const view = buildUsersView({ now: USERS_NOW, tz: USERS_TZ, users, daily, recentHours: new Map(), runways, backfill: { done: true, core: true, days: 90, total: 90 }, pointsFirstMs: USERS_NOW - 5 * DAY, prepaidAgo: 9000 });
+  return { ...view, rate: 1, ownStationId: "own-1", level1Days: 0.5 };
+}
+async function openUsersPage(t, { viewport, search = "tab=users" } = {}) {
+  const full = usersFixture(), requests = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/users") { requests.push(url.search); return fulfill(route, usersResponse(full, url.searchParams)); }
+    const detail = url.pathname.match(/^\/api\/users\/(\d+)$/);
+    if (detail) {
+      const row = full.users.find((item) => item.id === Number(detail[1]));
+      return fulfill(route, { ...buildUserDetail({ now: USERS_NOW, tz: USERS_TZ, user: row, series: new Array(full.trend.length + 60).fill(0), hours: new Map(), points: [] }), user: row, rate: 1, ready: full.ready, backfill: full.backfill, models: { models: [], others: null, total: 0, error: null } });
+    }
+    throw new Error("unexpected users fixture API: " + url.pathname);
+  }, viewport, USERS_NOW, null, `/users${search ? `?${search}` : ""}`);
+  await page.getByRole("tab", { name: "概览" }).waitFor();
+  return { page, requests, full };
+}
+const usersGroup = (page, name) => page.getByRole("group", { name });
+
+test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；范围、状态、分组、搜索、翻页都是服务端筛的，地址栏跟着变", async (t) => {
+  const { page, requests } = await openUsersPage(t, { search: "tab=users" });
+  const rows = () => page.locator("table.jy-data tbody tr");
+  await rows().first().waitFor();
+  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "近 14 天", "近 7 天消费", "今天", "余额和可用时间", "最近使用"], "六列");
+  assert.equal(await rows().count(), 50);
+  await page.getByText("共 65 个，每页 50 个", { exact: true }).waitFor();
+  assert.match(await usersGroup(page, USERS_COPY.users.scopeLabel).innerText(), /近 30 天有消费\s*65[\s\S]*全部\s*120/);
+  assert.match(await rows().first().innerText(), /u001[\s\S]*快用完/);
+  assert.match(await rows().first().innerText(), /vip/, "名字下面一行小字写分组");
+  assert.match(await page.locator("table.jy-data tfoot").innerText(), /合计（65 个用户）/);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-users-1440.png`, fullPage: false }); }
+  // 翻页：第 2 页 15 个
+  await page.getByRole("button", { name: USERS_COPY.users.nextPage }).click();
+  await page.getByText("第 2 / 2 页").waitFor();
+  assert.equal(await rows().count(), 15);
+  assert.match(page.url(), /page=2/);
+  assert.ok(requests.at(-1).includes("page=2"));
+  // 范围：全部（回到第 1 页）
+  await usersGroup(page, USERS_COPY.users.scopeLabel).getByRole("button", { name: /^全部/ }).click();
+  await page.getByText("共 120 个，每页 50 个", { exact: true }).waitFor();
+  assert.match(page.url(), /scope=all/);
+  assert.ok(!page.url().includes("page="), "改筛选回到第 1 页");
+  // 状态：已流失（范围是全部：25 个，近 30 天范围里只有 5 个）
+  await usersGroup(page, USERS_COPY.users.filterLabel).getByRole("button", { name: /已流失/ }).click();
+  await page.getByText("共 25 个，每页 50 个", { exact: true }).waitFor();
+  assert.match(page.url(), /only=churned/);
+  assert.ok(requests.at(-1).includes("only=churned") && requests.at(-1).includes("scope=all"));
+  // 搜索：打字停一下才去问服务端，不写进地址栏
+  const search = page.getByRole("textbox", { name: USERS_COPY.users.search });
+  await search.fill("u065");
+  await page.getByText("共 1 个，每页 50 个", { exact: true }).waitFor();
+  assert.equal(await rows().count(), 1);
+  assert.ok(requests.at(-1).includes("q=u065"));
+  assert.ok(!page.url().includes("q="));
+  await search.fill("");
+  await page.getByText("共 25 个，每页 50 个", { exact: true }).waitFor();
+  // 点表头排：用户名
+  await page.getByRole("button", { name: USERS_COPY.users.cols.user, exact: true }).click();
+  await page.waitForURL(/sort=user/);
+  assert.match(page.url(), /dir=asc/);
+  assert.match(await rows().first().innerText(), /u061/);
+  // 分组：下拉里选 default，只剩 default 组的人
+  await page.getByRole("combobox", { name: USERS_COPY.users.groupLabel }).click();
+  await page.locator('.ant-select-item-option[title="default"]').click();
+  await page.waitForURL(/group=default/);
+  await page.getByText("共 12 个，每页 50 个", { exact: true }).waitFor();
+  assert.ok(requests.at(-1).includes("group=default"));
+  const names = await rows().locator("td:first-child button").allInnerTexts();
+  assert.ok(names.length > 0 && names.every((name) => Number(name.replace("u", "")) % 2 === 0), "只剩 default 组（编号是偶数）的人");
+});
+
+test("用户运营·概览：五个数、一句话里的集中度、主图切到新消费用户是柱子", async (t) => {
+  const { page } = await openUsersPage(t, { search: "" });
+  await page.locator(".jy-users-kpis dt").first().waitFor();
+  assert.deepEqual((await page.locator(".jy-users-kpis dt").allInnerTexts()).map((text) => text.trim()), ["今天消费", "近 7 天消费", "活跃用户", "新消费用户", "预收"]);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-overview-1440.png`, fullPage: true }); }
+  assert.match(await page.locator(".jy-users-sentence").innerText(), /，3 个重点用户占 \d+%/);
+  assert.equal(await page.getByRole("link", { name: "3 个重点用户", exact: true }).getAttribute("href"), "/users?tab=users&big=1");
+  await usersGroup(page, USERS_COPY.overview.metricLabel).getByRole("button", { name: "新消费用户" }).click();
+  await page.getByText("每天的新消费用户", { exact: true }).waitFor();
+  await page.locator("path.jy-users-bar").first().waitFor();
+  assert.equal(await page.locator("path.jy-users-bar").count(), 1, "3 天前第一次花钱的 1 位：一根柱子");
+  assert.match(await page.locator(".jy-users-chartnote").innerText(), /近 30 天共 1 个/);
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-overview-new-1440.png`, fullPage: true }); }
+});
+
+test("用户运营·手机：用户表是一人一张卡片，筛选三行、没有横向滚动；抽屉标题下面有分组、注册时间、累计消费", async (t) => {
+  const { page } = await openUsersPage(t, { viewport: { width: 375, height: 812 }, search: "tab=users" });
+  const cards = page.locator(".jy-users-card");
+  await cards.first().waitFor();
+  assert.equal(await cards.count(), 50);
+  // 手机上筛选三行：范围一整行；勾选框在左、分组下拉在右同一行；状态一整行
+  const box = (locator) => locator.evaluate((node) => { const rect = node.getBoundingClientRect(); return { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width) }; });
+  const [scope, big, group, status] = [await box(usersGroup(page, USERS_COPY.users.scopeLabel)), await box(page.locator(".jy-users-bigcheck")), await box(page.locator(".jy-users-group")), await box(usersGroup(page, USERS_COPY.users.filterLabel))];
+  assert.ok(scope.top < big.top && Math.abs(big.top - group.top) < 24 && big.left < group.left && Math.max(big.top, group.top) < status.top, JSON.stringify({ scope, big, group, status }));
+  assert.deepEqual(await page.getByRole("tab").allInnerTexts().then((list) => list.map((text) => text.replace(/\s+/g, " ").trim())), ["概览", "用户", "流失即将上线"], "页签只有三个，流失这一批还没上线时灰着");
+  assert.match(await cards.first().innerText(), /u001[\s\S]*vip · 最近使用/);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-users-375.png`, fullPage: false }); }
+  await cards.first().click();
+  await page.getByText(USERS_COPY.drawer.created, { exact: true }).waitFor();
+  assert.match(await page.locator(".jy-users-drawer-meta").innerText(), /分组\s*vip\s*注册时间[\s\S]*累计消费\s*¥/);
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-drawer-375.png`, fullPage: false }); }
+});

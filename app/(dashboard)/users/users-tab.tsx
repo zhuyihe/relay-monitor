@@ -1,8 +1,8 @@
 "use client";
-// 用户：一个用户表（design 用户运营 v6 §3、v7 §3）。默认按近 7 天消费从高到低；每列都能点表头排；
-// 上面一行：只看重点用户（勾选框）| 全部 / 快用完 / 在下滑 / 新用户 / 不活跃，右边搜索；点一行开抽屉。手机是一人一张卡片。
-import { useMemo, useState } from "react";
-import { Grid, Input, Tooltip } from "antd";
+// 用户：一个用户表（design 用户运营 v6 §3、v7 §3、v8 §2）。默认只列近 30 天有消费的人，按近 7 天消费从高到低，每页 50 个；
+// 筛选、排序、分页都在服务端（/api/users），这里只管摆：范围 | 只看重点用户 | 状态 | 分组，右边搜索；点一行开抽屉。手机是一人一张卡片。
+import { useEffect, useState } from "react";
+import { Button, Grid, Input, Select, Tooltip } from "antd";
 import { EMPTY } from "../../../lib/format";
 import { Icon } from "../../components/icons";
 import { Panel } from "../../components/panel";
@@ -13,8 +13,8 @@ import type { Col } from "../my/shared";
 import { SparkLine } from "./charts";
 import { UserGroups } from "./groups-panel";
 import { COPY } from "./copy";
-import { FILTERS, FILTER_LABEL, bigLabel, bigTipText, defaultOrder, deltaText, filterCounts, filterRows, lastUsedText, money, runwayText, sortValue, sparkValues } from "./users-format";
-import type { Filter, UsersPage, UsersRow } from "./users-format";
+import { ONLY_LABEL, ONLY_VALUES, bigLabel, bigTipText, deltaText, lastUsedText, money, runwayText, sparkValues } from "./users-format";
+import type { ListQuery, Only, Scope, SortKey, UsersPage, UsersRow } from "./users-format";
 
 // 「重点」小标签；提示写这位占多少、全部重点用户合起来占多少。表里和抽屉里鼠标停上去（键盘聚焦、点一下）出提示；
 // 手机卡片整张是个按钮（点了开抽屉），标签里放不了第二个按钮，只带 title，抽屉标题上的那个点一下有提示
@@ -28,7 +28,7 @@ export function BigTag({ tip, plain }: { tip: string; plain?: boolean }) {
 }
 export function StatusTag({ status }: { status: UsersRow["status"] }) {
   if (!status) return null;
-  const level = status === "empty" || status === "soon" ? "crit" : status === "down" ? "warn" : status === "inactive" ? "muted" : "info";
+  const level = status === "empty" || status === "soon" ? "crit" : status === "down" ? "warn" : status === "churned" ? "muted" : "info";
   return <span className={`jy-tag jy-tag--${level}`}>{COPY.status[status]}</span>;
 }
 
@@ -45,42 +45,75 @@ function RunwayCell({ row, page }: { row: UsersRow; page: UsersPage }) {
   );
 }
 
+const SEARCH_DELAY_MS = 300;
+const noop = () => null;
+
 export function UsersTab({
-  page, big, only, onBig, onOnly, onOpenUser,
+  page, query, onQuery, onOpenUser, loading,
 }: {
-  page: UsersPage; big: boolean; only: Filter;
-  onBig: (v: boolean) => void; onOnly: (v: Filter) => void; onOpenUser: (id: number) => void;
+  page: UsersPage; query: ListQuery; loading: boolean;
+  // 改筛选：页码回到第 1 页由调用方处理（翻页本身不回）
+  onQuery: (patch: Partial<ListQuery>) => void; onOpenUser: (id: number) => void;
 }) {
-  const [q, setQ] = useState("");
+  const { list } = page;
+  // 搜索框里的字立刻显示，过一小会儿才去问服务端
+  const [text, setText] = useState(query.q);
+  useEffect(() => { setText(query.q); }, [query.q]);
+  useEffect(() => {
+    if (text === query.q) return;
+    const timer = setTimeout(() => onQuery({ q: text }), SEARCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [text]);
   const phone = Grid.useBreakpoint().md === false;
   const { rate } = page;
   const compare = !!page.ready.compare;
-  const counts = useMemo(() => filterCounts(page, big), [page, big]);
-  const rows = useMemo(() => defaultOrder(filterRows(page.users, { big, only, q })), [page.users, big, only, q]);
-  const searching = q.trim() !== "";
   const weekOk = !!page.ready.week;
-  const sum = (pick: (row: UsersRow) => number) => rows.reduce((total, row) => total + pick(row), 0);
+  const searching = query.q.trim() !== "";
+  const rows = list.rows;
 
   const name = (row: UsersRow) => (
     <span className="jy-users-name">
       <button type="button" className="jy-link jy-users-linkbtn" title={row.username} aria-label={COPY.users.rowOpen(row.username)} onClick={(event) => { event.stopPropagation(); onOpenUser(row.id); }}>{row.username}</button>
       {row.big && <BigTag tip={bigTipText(row, page)} />}
       {row.disabled && <span className="jy-tag jy-tag--muted">{COPY.disabled}</span>}
+      <StatusTag status={row.status} />
     </span>
   );
-  const vs = (row: UsersRow) => (!compare ? <span className="jy-muted">{EMPTY}</span> : <span className={row.prevWeek > 0 ? undefined : "jy-muted"}>{deltaText(row.week, row.prevWeek)}</span>);
+  // 近 7 天消费：金额加粗，下面一行小字写比前 7 天
+  const vsText = (row: UsersRow) => (!compare ? EMPTY : row.prevWeek > 0 ? COPY.users.vsPrev(deltaText(row.week, row.prevWeek)) : row.week > 0 ? COPY.users.vsNone : EMPTY);
   const cols: Col<UsersRow>[] = [
-    { key: "user", label: COPY.users.cols.user, sort: (r) => sortValue(r, "user", compare) as string, render: name, foot: searching ? COPY.users.totalMatched(rows.length) : COPY.users.total(rows.length) },
-    { key: "spark", label: COPY.users.cols.spark, render: (r) => <SparkLine values={sparkValues(r, page.availableDays)} gray={r.status === "down" || r.status === "inactive"} label={COPY.users.sparkLabel(r.username)} /> },
-    { key: "week", label: COPY.users.cols.week, num: true, sort: (r) => sortValue(r, "week", compare) as number, render: (r) => <b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b>, foot: weekOk ? money(sum((r) => r.week), rate) : EMPTY },
-    { key: "vs", label: COPY.users.cols.vsPrev, num: true, sort: (r) => sortValue(r, "vs", compare) as number, render: vs },
-    { key: "today", label: COPY.users.cols.today, num: true, sort: (r) => r.today, render: (r) => money(r.today, rate), foot: money(sum((r) => r.today), rate) },
-    { key: "balance", label: COPY.users.cols.balance, num: true, sort: (r) => r.balanceUsd, render: (r) => money(r.balanceUsd, rate), foot: money(sum((r) => r.balanceUsd || 0), rate) },
-    { key: "days", label: COPY.users.cols.days, sort: (r) => (page.ready.balance ? (sortValue(r, "days", compare) as number) : null), render: (r) => <RunwayCell row={r} page={page} /> },
-    { key: "status", label: COPY.users.cols.status, sort: (r) => sortValue(r, "status", compare) as number, render: (r) => <StatusTag status={r.status} /> },
-    { key: "last", label: COPY.users.cols.lastUsed, num: true, sort: (r) => sortValue(r, "last", compare) as number, render: (r) => lastUsedText(r, page) },
+    {
+      key: "user", label: COPY.users.cols.user, sort: noop,
+      render: (r) => (<span className="jy-two">{name(r)}{r.group && <span className="jy-caption">{r.group}</span>}</span>),
+      foot: searching ? COPY.users.totalMatched(list.total) : COPY.users.total(list.total),
+    },
+    { key: "spark", label: COPY.users.cols.spark, render: (r) => <SparkLine values={sparkValues(r, page.availableDays)} gray={r.status === "down" || r.status === "churned"} label={COPY.users.sparkLabel(r.username)} /> },
+    {
+      key: "week", label: COPY.users.cols.week, num: true, sort: noop,
+      render: (r) => (<span className="jy-two jy-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
+      foot: weekOk ? money(list.totals.week, rate) : EMPTY,
+    },
+    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => money(r.today, rate), foot: money(list.totals.today, rate) },
+    {
+      key: "balance", label: COPY.users.cols.balanceDays, sort: noop,
+      render: (r) => (<span className="jy-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
+      foot: <span className="jy-users-balance">{money(list.totals.balance, rate)}</span>,
+    },
+    { key: "last", label: COPY.users.cols.lastUsed, num: true, sort: noop, render: (r) => lastUsedText(r, page) },
   ];
-  const empty = searching ? COPY.users.noMatch : page.users.length === 0 ? COPY.users.noUsers : COPY.users.noOnly;
+  const empty = searching ? COPY.users.noMatch : list.counts.scope.all === 0 ? COPY.users.noUsers : COPY.users.noOnly;
+  const pager = list.total > 0 && (
+    <div className="jy-users-pager">
+      <span className="jy-caption">{COPY.users.pageNote(list.total, list.pageSize)}</span>
+      {list.pages > 1 && (
+        <nav className="jy-users-pages" aria-label={COPY.users.pagerLabel}>
+          <Button size="small" disabled={list.page <= 1} onClick={() => onQuery({ page: list.page - 1 })}>{COPY.users.prevPage}</Button>
+          <span className="jy-caption" aria-live="polite">{COPY.users.pageOf(list.page, list.pages)}</span>
+          <Button size="small" disabled={list.page >= list.pages} onClick={() => onQuery({ page: list.page + 1 })}>{COPY.users.nextPage}</Button>
+        </nav>
+      )}
+    </div>
+  );
 
   return (
     <>
@@ -88,27 +121,60 @@ export function UsersTab({
       title={COPY.users.tableTitle}
       body="flush"
       extra={
-        <Input allowClear prefix={<Icon name="search" />} placeholder={COPY.users.search} aria-label={COPY.users.search} value={q} onChange={(event) => setQ(event.target.value)} className="jy-users-search" />
+        <Input allowClear prefix={<Icon name="search" />} placeholder={COPY.users.search} aria-label={COPY.users.search} value={text} onChange={(event) => setText(event.target.value)} className="jy-users-search" />
       }
     >
-      <div className="jy-users-filters">
+      <div className="jy-users-filters" aria-busy={loading || undefined}>
+        <Seg<Scope>
+          size="sm"
+          className="jy-users-seg-scope"
+          label={COPY.users.scopeLabel}
+          value={query.scope}
+          onChange={(value) => onQuery({ scope: value })}
+          options={[
+            { value: "active30", label: COPY.users.scopeActive, count: list.counts.scope.active30 },
+            { value: "all", label: COPY.users.scopeAll, count: list.counts.scope.all },
+          ]}
+        />
+        <span className="jy-users-filters-rule" aria-hidden="true" />
         <label className="jy-users-bigcheck">
-          <input type="checkbox" checked={big} onChange={(event) => onBig(event.target.checked)} />
-          <span>{bigLabel(page)}</span>
+          <input type="checkbox" checked={query.big} onChange={(event) => onQuery({ big: event.target.checked })} />
+          <span>{bigLabel(page, list.counts.big)}</span>
         </label>
         <span className="jy-users-filters-rule" aria-hidden="true" />
-        <Seg<Filter>
+        <Seg<Only>
           size="sm"
+          className="jy-users-seg-status"
           label={COPY.users.filterLabel}
-          value={only}
-          onChange={onOnly}
-          options={FILTERS.map((value) => ({
+          value={query.only}
+          onChange={(value) => onQuery({ only: value })}
+          options={ONLY_VALUES.map((value) => ({
             value,
             // 还判不了的类（补数据没补满、余额没记满）个数写「—」
-            label: counts[value] == null ? <>{FILTER_LABEL[value]} <span className="count">{EMPTY}</span></> : FILTER_LABEL[value],
-            count: counts[value] ?? undefined,
+            label: list.counts.only[value] == null ? <>{ONLY_LABEL[value]} <span className="count">{EMPTY}</span></> : ONLY_LABEL[value],
+            count: list.counts.only[value] ?? undefined,
           }))}
         />
+        {list.groups.length > 0 && (
+          <>
+            <span className="jy-users-filters-rule" aria-hidden="true" />
+            <label className="jy-users-group">
+              <span>{COPY.users.groupLabel}</span>
+              <Select
+                mode="multiple"
+                allowClear
+                size="small"
+                maxTagCount="responsive"
+                placeholder={COPY.users.groupAll}
+                aria-label={COPY.users.groupLabel}
+                value={query.groups}
+                onChange={(value) => onQuery({ groups: value })}
+                options={list.groups.map((value) => ({ value, label: value }))}
+                style={{ minWidth: 140 }}
+              />
+            </label>
+          </>
+        )}
       </div>
       {phone ? (
         rows.length ? (
@@ -121,11 +187,11 @@ export function UsersTab({
                     <b className="jy-users-week">{weekOk ? money(row.week, rate) : EMPTY}</b>
                   </span>
                   <span className="r2">
-                    <SparkLine values={sparkValues(row, page.availableDays)} gray={row.status === "down" || row.status === "inactive"} label={COPY.users.sparkLabel(row.username)} />
-                    <span className="jy-caption">{compare ? COPY.users.cardVs(deltaText(row.week, row.prevWeek), money(row.balanceUsd, rate)) : `${COPY.users.cols.balance} ${money(row.balanceUsd, rate)}`}</span>
+                    <SparkLine values={sparkValues(row, page.availableDays)} gray={row.status === "down" || row.status === "churned"} label={COPY.users.sparkLabel(row.username)} />
+                    <span className="jy-caption">{compare ? COPY.users.cardVs(deltaText(row.week, row.prevWeek), money(row.balanceUsd, rate)) : `${COPY.users.balanceWord} ${money(row.balanceUsd, rate)}`}</span>
                   </span>
                   <span className="r3">
-                    <span className="jy-caption">{COPY.users.cardLast(lastUsedText(row, page))}</span>
+                    <span className="jy-caption">{COPY.users.cardLast(lastUsedText(row, page), row.group)}</span>
                     {page.ready.balance ? <RunwayCell row={row} page={page} /> : <span className="jy-caption">{COPY.users.cardDays(EMPTY)}</span>}
                   </span>
                 </button>
@@ -140,12 +206,14 @@ export function UsersTab({
           caption={COPY.users.tableTitle}
           rows={rows}
           rowKey={(row) => String(row.id)}
-          defaultSort={{ key: "week", dir: "desc" }}
+          controlledSort={{ key: query.sort, dir: query.dir }}
+          onSortChange={(next) => onQuery({ sort: next.key as SortKey, dir: next.dir })}
           empty={empty}
           cols={cols}
           onRowClick={(row) => onOpenUser(row.id)}
         />
       )}
+      {pager}
     </Panel>
     <UserGroups />
     </>
