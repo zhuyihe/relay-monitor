@@ -45,7 +45,7 @@ export type NotBought = {
   lostUsd: number;        // 至少少收（F × 同模型同一小时的平均每次收入，各小时相加）
   blockedRetried: number; // 被挡过后靠重试买到的 = max(0, 被挡过的请求 − 没买到)
 };
-export type KeyUser = { userId: number; name: string; blocked: number }; // blocked：近 24 小时被挡过几次
+export type KeyUser = { userId: number; name: string; blocked: number; blockedRequests: number }; // blocked：近 24 小时被拒几次（含重试）；blockedRequests：被挡过的请求数（firstCount，每个请求算一次）——页面写「受影响 N 次」用它，不写「失败」
 
 export type HeadroomRow = {
   name: string;
@@ -72,7 +72,8 @@ export type UpstreamHeadroom = {
   room: number | null;         // 高峰空多少 = limit − peakUsed，不小于 0；limit 是「至少」时也是下限；null 拿不到
   full: boolean;               // 满了：高峰用了 ≥ limit（只有 limit 是测到的才会 true）
   accountLimited: boolean;     // 几把 Key 一起被限流，按账号限
-  blocked24: BlockedByReason | null; // 近 24 小时被挡过，没开错误日志是 null
+  blocked24: BlockedByReason | null; // 近 24 小时被挡过（含后来重试买到的），没开错误日志是 null；v5 页面不读，读下面的 lost24
+  lost24: LostByReason | null;       // v5：近 24 小时缺货失败按限流 / 故障 / 没钱分（摊到上游，加起来是各模型 lost24 之和）；没开错误日志是 null
   models: { count: number; names: string[] }; // 供几个模型，names 是前几个（按近 7 天消费排）
   actions: ("topup" | "addKey" | "weights")[]; // 页面该放的动作链接（都是到你的站或上游网站去操作）
 };
@@ -112,6 +113,8 @@ export type DetailChannelHeadroom = {
   state: "on" | "off" | "auto";
   limit: Quantity; peakUsed: number | null; room: number | null;
   status: "full" | "room" | "unmeasured" | "auto" | "off"; // 满了 / 空约 room / 上限没测到 / 被自动停用不算 / 手动停用不算
+  // v5「哪些渠道在失败」：这个模型在这个渠道上近 24 小时的缺货失败次数，和它的主要原因（没有失败是 null）。缺货失败只有「模型 × 小时」，摊到渠道是按这个小时各渠道这个原因的被拒次数的比例摊的（加起来还是这个模型的 lost24）；没开错误日志是 null
+  lost24: number | null; mainCause: LostCause | null;
 };
 
 export type HeadroomDetail = {
@@ -122,7 +125,7 @@ export type HeadroomDetail = {
   limitLine: Quantity; // 图上那条上限线，和 supply 同一个数（一个模型的能给）
   // 图下面那句结论要的事实（页面拼字）：哪些钟点超过上限、被挡的主要是什么原因、近 24 小时没买到多少、平时的余量
   facts: { overLimitHours: number[]; topReason: keyof BlockedByReason | null; notBought24: number; typicalRoom: number | null };
-  users: { top: (KeyUser & { key: boolean })[]; others: { count: number; blocked: number } | null }; // 受影响最多的用户（近 24 小时，按被挡过几次），key：重点用户
+  users: { top: (KeyUser & { key: boolean })[]; others: { count: number; blocked: number; blockedRequests: number } | null }; // 受影响最多的用户（近 24 小时，按被挡过几次），key：重点用户
   channels: DetailChannelHeadroom[];
   finderRoom: Record<string, number | null>; // 找货帮手每个上游的「高峰空约」，key 是上游 id
 };
@@ -142,29 +145,38 @@ export type UpstreamRef = { upstreamId: string; name: string | null };
 export type LostReco =
   | { kind: "topup"; upstreamId: string | null; name: string | null; hoursLeft: number | null }
   | { kind: "rateLimit"; upstreamId: string | null; name: string | null; accountLimited: boolean; addKeys: { n: number; perKey: number } | null; moveTo: UpstreamRef | null }
+  // moveTo（rateLimit、fault）：这个模型还有开着的渠道在供、不是失败最多的那家、余额撑得到今晚高峰结束（读不到余额的不排除）、没有用满上限（full）、近 7 天被挡最少的；都不合格是 null，页面只给另外那半句
   | { kind: "fault"; upstreamId: string | null; name: string | null; moveTo: UpstreamRef | null }
   | { kind: "openChannel" } | { kind: "none" };
 export type LostRow = {
   name: string;
   weekUsd: number;                 // 近 7 天消费（模型名下面那行小字）
-  lost24: number;                  // 近 24 小时缺货失败次数（F）
-  lostMoney24: number;             // 少收的钱（美元）= 缺货失败 × 同一模型同一小时的平均每次收入，各小时相加
+  lost24: number | null;           // 近 24 小时缺货失败次数（F）；断货（没渠道）的行是 null——分发阶段的拒绝不进错误日志，数不出来
+  lostMoney24: number;             // 少收的钱（美元）= 缺货失败 × 同一模型同一小时的平均每次收入，各小时相加；断货的行是估计值（断货前 7 天的日均消费）
+  estimated: boolean;              // true：断货的行，lostMoney24 和 tomorrowLost 是估计值，页面要标出来
+  outSince: string | null;         // 断货的行：断货起点（最后一个有消费的整天的下一天，YYYY-MM-DD），给不出是 null，页面就不写；别的行是 null
   mainCause: LostCause | null;     // 主要原因：没有开着的渠道就是 no_channel，否则按缺货失败的原因拆，最多的那个
-  mainUpstream: UpstreamRef | null; // 失败最多的那家上游（按主要原因的被拒次数），渠道没绑上游或没渠道是 null
+  mainUpstream: UpstreamRef | null; // 失败最多的那家上游（缺货失败按被拒次数摊到上游，这个原因最多的），渠道没绑上游或没渠道是 null
+  upstreamCount: number;           // 失败涉及几家上游（页面写「上游甲 等 2 家」）；没渠道是 0
   peakFailHours: { hours: number[] } | null; // 失败最多的时段，连续 1–3 个钟点，可以跨午夜（[23, 0]）；页面写「21–23 点」= 第一个到最后一个加 1
-  tomorrowLost: number;            // 明天预计失败次数 = lost24 × 涨幅（近 3 天 ÷ 前 4 天，限在 0.8–1.25），前提是什么都不改；成交不够算涨幅时按 1
+  tomorrowLost: number;            // 明天预计失败次数 = 近 24 小时（整天，不只高峰）缺货失败 × 涨幅（近 3 天 ÷ 前 4 天，限在 0.8–1.25），前提是什么都不改；成交不够算涨幅时按 1；断货的行是估计值（断货前 7 天的日均请求数）
   reco: LostReco;
   keyUsers: { count: number; top: KeyUser[] }; // 受影响的重点用户（近 24 小时被挡过的重点用户）
 };
 export type LostView = {
-  // ok 有失败；noFailures 近 24 小时没有缺货失败（页面写一句话）；noErrorLog 没有错误日志可看（noErrorLogReason：switchOff 控制台里关了读取，noRecords 开着但站点没开或一直没出过错，页面写打开方法一句话）
+  // 三种没数据的状态：noErrorLog + switchOff（控制台设置里关了「读取错误日志」）；noErrorLog + noRecords（开着读取，但从来没读到过一条：用户站还没开错误日志）；
+  // noFailures（以前读到过，近 24 小时没有缺货失败）；有行就是 ok。字由页面出。断货的行（没渠道）不靠错误日志：没开错误日志时 rows 里也有它们（只有它们），页面自己决定怎么摆
   status: "ok" | "noFailures" | "noErrorLog";
   noErrorLogReason: "switchOff" | "noRecords" | null;
   kpis: {
-    tomorrow: { count: number; lost: number } | null;          // 明天预计会缺：几个模型（预计失败 ≥ 1 次）、预计失败总数；没有错误日志是 null
-    last24: { lost: number; lostUsd: number; keyUsers: number } | null; // 近 24 小时：缺货失败总数、少收总额（美元）、影响的重点用户数；没有错误日志是 null
+    // 明天预计会缺：模型数（预计失败 ≥ 1 次的，加上断货的）、预计失败总数（不算断货的）、断货的几个、预计失败最多的那个模型（不算断货的，没有是 null）；没有错误日志是 null
+    tomorrow: { count: number; lost: number; outOfStockCount: number; top: { name: string; lost: number } | null } | null;
+    // 近 24 小时：缺货失败总数（不算断货的）、少收总额（美元，算上断货行的估计值）、影响的重点用户数、断货的几个；没有错误日志是 null
+    last24: { lost: number; lostUsd: number; keyUsers: number; outOfStockCount: number } | null;
     topup: { count: number; first: { upstreamId: string | null; name: string | null; hoursLeft: number | null } | null }; // 快没钱的上游，不变
   };
   rows: LostRow[];    // 主表：近 24 小时有缺货失败的模型，少收的钱从多到少排
-  quietCount: number; // 另外几个模型近 24 小时没有缺货失败（没有错误日志时是 0）
+  quietCount: number; // 另外几个模型近 24 小时没有缺货失败（没有错误日志时是 0；断货的模型在 rows 里，不算在这里）
+  smallCount: number; // 另外几个模型量很小（近 7 天日均消费不到全站日均的千分之一），有缺货失败也不列进主表（用户嫌太吵）；页面写「另外 N 个模型量很小，没列」
+  quiet: { name: string; weekUsd: number }[]; // 这些模型，近 7 天消费从高到低，最多 200 个（点开「另外 N 个」用）
 };
