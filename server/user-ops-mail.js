@@ -3,7 +3,9 @@
 // 邮箱只在内存里：这里不写日志、不进返回值、不进库；发不出去只留错误码，不留服务器回的原话（原话里常常带着收件人地址）。
 import { USER_MAIL_CHANNEL_TYPES } from "../lib/alert-rules.js";
 import { formatMoney, formatUsd } from "../lib/format.js";
+import { isMailbox } from "../lib/mailbox.js";
 import { sendToChannel } from "../lib/notify.js";
+import { splitRecipients } from "../lib/smtp.js";
 import { isConfiguredRate, rateSnapshotOf } from "../lib/profit.js";
 import { buildUserMail, userMailPayUrl } from "../lib/user-mail.js";
 
@@ -22,6 +24,8 @@ export function mailMoneyOf(own) {
 
 // 发一封：收件人换成这位用户的邮箱，别的（服务器、发信人、密钥）用站长配好的；返回 { ok, code }，不带原话
 export async function sendUserMail(channel, to, mail) {
+  // 保险：收件人必须是一个干净的地址（取邮箱的地方已经校验过一道）；发信那一层按逗号分号拆收件人，多出来的会同时发给别人
+  if (!isMailbox(to) || splitRecipients(to).length !== 1) return { ok: false, code: "NOTIFY_CONFIG_MISSING" };
   try {
     const result = await sendToChannel({ ...channel, config: { ...(channel.config || {}), to } }, mail.subject, mail.text, { html: mail.html });
     return { ok: !!result.ok, code: result.ok ? undefined : result.code || "ERROR" };

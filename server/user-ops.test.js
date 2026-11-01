@@ -700,3 +700,18 @@ test("邮箱只在内存里：不进日志、不进库、不进整页和抽屉�
   ]);
   assert.ok(!dump.includes("@mail.test"), "整个运行过程里没有任何用户邮箱");
 });
+
+test("给用户发邮件：用户填的邮箱带逗号、换行、尖括号的，当没填邮箱——不发、不写状态；填干净的以后下一轮补当前这一级", async (t) => {
+  const bad = ["big2@mail.test,victim@x.test", "big2@mail.test，victim@x.test", "a@b.test\r\nBcc: victim@x.test", "Big <big2@mail.test>"];
+  for (const email of bad) {
+    const f = mailSite(t, mailUsers({ email }));
+    await f.stepsTo(40);
+    assert.deepEqual(f.mails, [], JSON.stringify(email));
+    assert.equal((await f.store.getMailStates("own1")).has(2), false);
+  }
+  const f = mailSite(t, mailUsers({ email: "x@y.test,victim@x.test" }));
+  await f.stepsTo(40);
+  f.site.users[1].email = "big2@mail.test";
+  await f.step();
+  assert.deepEqual(f.mails.map((item) => item.to), ["big2@mail.test"]);
+});
