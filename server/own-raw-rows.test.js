@@ -73,3 +73,31 @@ test("缓存有上限：太多的窗口把最老的挤掉", async () => {
   await readOwnRows(rt, own, "model", 0, T0, { now: T0, readers });
   assert.equal(calls.length, 41, "最老的那份被挤掉了，要重读");
 });
+
+test("failTtlMs：读失败以后这个窗口在这么久之内不再重试，直接给同一个错；不传的调用方不受影响；额度拦下的（beforeRead）不算失败", async () => {
+  const rt = {};
+  let calls = 0;
+  const boom = new Error("404");
+  const readers = { flow: async () => { calls += 1; throw boom; } };
+  const ask = (now, options = {}) => readOwnRows(rt, own, "flow", 1, T0 + now, { now: T0 + now, readers, ...options }); // 结束时刻是「现在」
+  await assert.rejects(ask(0, { failTtlMs: 10 * MIN }), (error) => error === boom);
+  assert.equal(calls, 1);
+  for (const minutes of [1, 2, 9]) await assert.rejects(ask(minutes * MIN, { failTtlMs: 10 * MIN }), (error) => error === boom);
+  assert.equal(calls, 1, "10 分钟内每分钟来取，也只读过一次");
+  await assert.rejects(ask(5 * MIN), (error) => error === boom);
+  assert.equal(calls, 2, "没传 failTtlMs 的调用方（自营业务）照旧每次都读");
+  await assert.rejects(ask(11 * MIN, { failTtlMs: 10 * MIN }));
+  assert.equal(calls, 3, "过了 10 分钟再读一次");
+  // 额度拦下的不记：下一次额度好了就能读
+  const rt2 = {};
+  let ok = false, reads = 0;
+  const readers2 = { flow: async () => { reads += 1; return [1]; } };
+  const guarded = (now) => readOwnRows(rt2, own, "flow", 1, T0 + now, { now: T0 + now, readers: readers2, failTtlMs: 10 * MIN, beforeRead: () => { if (!ok) throw Object.assign(new Error("busy"), { code: "BUSY" }); } });
+  await assert.rejects(guarded(0), { code: "BUSY" });
+  ok = true;
+  assert.deepEqual(await guarded(MIN), [1]);
+  assert.equal(reads, 1);
+  // 读成功以后缓存照旧
+  assert.deepEqual(await guarded(2 * MIN), [1]);
+  assert.equal(reads, 1);
+});

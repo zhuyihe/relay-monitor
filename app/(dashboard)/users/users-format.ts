@@ -44,7 +44,7 @@ export type UserDetail = {
 };
 
 export const TABS: readonly UsersTab[] = ["overview", "users", "churn"];
-export const OPEN_TABS: readonly UsersTab[] = ["overview", "users"];
+export const OPEN_TABS: readonly UsersTab[] = ["overview", "users", "churn"];
 export const ONLY_VALUES = ["all", "soon", "down", "new", "churned"] as const;
 export const ONLY_LABEL: Record<Only, string> = { all: COPY.users.filterAll, soon: COPY.status.soon, down: COPY.status.down, new: COPY.status.new, churned: COPY.status.churned };
 
@@ -82,7 +82,7 @@ export const bigLabel = (page: UsersPage, count: number = page.big.count) => COP
 export const sparkValues = (row: UsersRow, availableDays: number): (number | null)[] => row.spark.map((value, index) => (index >= row.spark.length - availableDays ? value : null));
 
 // 最近使用：今天 / 昨天 / 10月20日；最近两天有消费的那一小时是准的，抽屉里再带时间（用量按小时记，写那一小时的起点「今天 14:00」）
-export function lastUsedText(row: UsersRow, page: Pick<UsersPage, "asOf" | "tz" | "today">, withTime = false): string {
+export function lastUsedText(row: Pick<UsersRow, "lastUsed"> & { isNew?: boolean }, page: Pick<UsersPage, "asOf" | "tz" | "today">, withTime = false): string {
   if (!row.lastUsed) return row.isNew ? COPY.users.notUsed : EMPTY;
   // 准的那一刻是消费那一小时的结束，减 1 毫秒才落在消费的那一小时里
   const key = dayKeyInTz(row.lastUsed.ms - (row.lastUsed.precise ? 1 : 0), page.tz);
@@ -152,7 +152,7 @@ export function overviewKpis(page: UsersPage): Kpi[] {
 }
 
 // ---- 地址栏 ----
-export const parseTab = (raw: string | null): UsersTab => (raw === "users" ? "users" : "overview");
+export const parseTab = (raw: string | null): UsersTab => (raw === "users" || raw === "churn" ? raw : "overview");
 export const parseOnly = (raw: string | null): Only => ((ONLY_VALUES as readonly string[]).includes(raw ?? "") ? (raw as Only) : "all");
 export const parseScope = (raw: string | null): Scope => (raw === "all" ? "all" : "active30");
 export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "last"];
@@ -190,4 +190,91 @@ export function freshNote(page: UsersPage): string | null {
   if (!s || !page.trend.length || !page.trend.every((day) => day.available)) return null;
   const prevFilled = page.prevTrend.length > 0 && page.prevTrend.every((day) => day.available);
   return prevFilled ? COPY.overview.freshNote(s.newUsers30, s.prevNewUsers30) : COPY.overview.freshNoteNow(s.newUsers30);
+}
+
+// ---- 流失页签 ----
+export type ChurnStatus = "todayLow" | "down" | "churned" | "returned";
+export type ChurnOnly = "all" | ChurnStatus;
+export type ChurnRow = {
+  id: number; username: string; big: boolean; disabled: boolean; group: string; lastUsed: { ms: number; precise: boolean } | null; balanceUsd: number | null; model: string | null;
+  status: ChurnStatus; before: number | null; after: number | null; loss: number | null; daysAgo?: number; spend?: number;
+};
+export type ChurnPage = {
+  starting?: boolean; asOf: number; syncedMs: number; tz: string; rate: number; ownStationId: string; fresh: boolean;
+  backfill: UsersPage["backfill"];
+  ready: { down: boolean; churn: boolean; today: boolean; retention: boolean; retentionPrev: boolean; available: number };
+  // 今天明显少了比到几点（上一个整点，毫秒）；还判不了是 null
+  sameUntilMs: number | null;
+  summary: {
+    down: { count: number; loss: number };
+    newChurn: { count: number; monthly: number };
+    retention: { cohort: number; kept: number; rate: number | null; prev: { cohort: number; kept: number; rate: number | null } | null } | null;
+    returned: { count: number; top: { id: number; username: string; spend: number }[] };
+  };
+  modelsError: string | null;
+  list: {
+    rows: ChurnRow[]; total: number; page: number; pages: number; pageSize: number; totals: { count: number; loss: number };
+    counts: { big: number; only: Record<ChurnOnly, number | null> };
+  };
+};
+export const CHURN_ONLY_VALUES = ["all", "todayLow", "down", "churned", "returned"] as const;
+// 筛选条上常驻的四个；「回流」只在点了回流那一格的链接过来时出现
+export const CHURN_FILTERS = ["all", "todayLow", "down", "churned"] as const;
+export const parseChurnOnly = (raw: string | null): ChurnOnly => ((CHURN_ONLY_VALUES as readonly string[]).includes(raw ?? "") ? (raw as ChurnOnly) : "all");
+export type ChurnQuery = { only: ChurnOnly; big: boolean; page: number; q: string };
+export function churnQueryString(query: ChurnQuery): string {
+  const params = new URLSearchParams();
+  if (query.only !== "all") params.set("only", query.only);
+  if (query.big) params.set("big", "1");
+  if (query.page > 1) params.set("page", String(query.page));
+  if (query.q.trim()) params.set("q", query.q.trim());
+  return params.toString();
+}
+// 「¥53.68 → ¥25.12（−53.2%）」；回流的人没有这一格
+export function changeText(row: ChurnRow, rate: number): string {
+  if (row.before == null || row.after == null) return EMPTY;
+  const pct = row.before > 0 ? deltaText(row.after, row.before) : EMPTY;
+  return COPY.churn.change(money(row.before, rate), money(row.after, rate), pct);
+}
+export const lossText = (row: ChurnRow, rate: number): string => (row.loss == null ? EMPTY : COPY.churn.lossPerDay(money(row.loss, rate)));
+
+// 月留存写整数百分比（86%），一两个人的差别不用写到小数
+const wholePct = (ratio: number) => `${Math.round(ratio * 100)}%`;
+
+// 四个数；补数据没补到的写「—」「补满后再算」
+export function churnKpis(page: ChurnPage): Kpi[] {
+  const s = page.summary, r = page.ready, rate = page.rate, C = COPY.churn;
+  const out: Kpi[] = [];
+  out.push({
+    key: "down", title: C.kpiDown, titleHint: C.kpiDownHint,
+    value: r.down ? C.count(s.down.count) : EMPTY, sub: !r.down ? C.afterFill : s.down.count > 0 ? C.downSub(money(s.down.loss, rate)) : C.downNone,
+  });
+  out.push({
+    key: "newChurn", title: C.kpiNewChurn, titleHint: C.kpiNewChurnHint,
+    value: r.churn ? C.count(s.newChurn.count) : EMPTY, sub: !r.churn ? C.afterFill : s.newChurn.count > 0 ? C.newChurnSub(money(s.newChurn.monthly, rate)) : C.newChurnNone,
+  });
+  const ret = s.retention;
+  let retValue: string = EMPTY, retSub: string = C.afterFill;
+  if (ret) {
+    retValue = ret.rate == null ? EMPTY : wholePct(ret.rate);
+    if (ret.rate == null) retSub = C.retentionNone;
+    else if (ret.prev && ret.prev.rate != null) retSub = C.retentionPrev(wholePct(ret.prev.rate), Math.round(ret.prev.rate * 100) - Math.round(ret.rate * 100));
+    else retSub = C.retentionFirst(ret.cohort, ret.kept);
+  }
+  out.push({ key: "retention", title: C.kpiRetention, titleHint: C.kpiRetentionHint, value: retValue, sub: retSub });
+  out.push({
+    key: "returned", title: C.kpiReturned, titleHint: C.kpiReturnedHint,
+    value: r.churn ? C.count(s.returned.count) : EMPTY, sub: !r.churn ? C.afterFill : s.returned.count > 0 ? "" : C.returnedNone,
+  });
+  return out;
+}
+// 回流那一格下面的一句：名字（链接）+ 近 7 天花了多少；超过 3 个写「nova 等 4 个」，点了在表里列出来
+export type ReturnedPart = { kind: "text"; text: string } | { kind: "user"; id: number; name: string } | { kind: "list"; text: string };
+export function returnedParts(page: ChurnPage): ReturnedPart[] {
+  const { count, top } = page.summary.returned, rate = page.rate, C = COPY.churn;
+  if (!page.ready.churn || count === 0) return [];
+  if (count > top.length) return [{ kind: "list", text: C.returnedMore(top[0].username, count) }];
+  const spend = money(top.reduce((total, item) => total + item.spend, 0), rate);
+  const names: ReturnedPart[] = top.flatMap((item, index) => [...(index ? [{ kind: "text", text: "、" } as ReturnedPart] : []), { kind: "user", id: item.id, name: item.username } as ReturnedPart]);
+  return [...names, { kind: "text", text: ` ${top.length > 1 ? C.returnedSpendMany(spend) : C.returnedSpend(spend)}` }];
 }

@@ -50,7 +50,7 @@ export async function forgetUserOps(rt, stationId) {
   if (!rt?.pool) return;
   rt._userOpsGen = (rt._userOpsGen || 0) + 1;
   rt._userOpsView = null;
-  rt._userOpsPageCache = null; rt._userOpsDayCache = null; rt._userOpsModels = null;
+  rt._userOpsPageCache = null; rt._userOpsDayCache = null; rt._userOpsHourCache = null; rt._userOpsModels = null;
   await (rt._userOpsStore ||= new UserOpsStore(rt.pool)).deleteStation(stationId);
 }
 

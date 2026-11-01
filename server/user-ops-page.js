@@ -84,7 +84,7 @@ export async function usersPage(rt, ops, store, { now = Date.now() } = {}) {
 
   // 余额快照最早一条的时刻、7 天前的预收：后台那一轮已经算好放在 view 里，页面不再读快照
   const payload = { ...buildUsersView({ now, tz, users, daily, recentHours, runways: view.users, backfill: view.backfill, pointsFirstMs: view.pointsFirstMs, prepaidAgo: view.prepaidAgo, syncedMs: liveAt, fresh: view.fresh }), rate, ownStationId: own.id, level1Days: view.level1Days };
-  rt._userOpsPageCache = { key, payload };
+  rt._userOpsPageCache = { key, payload, daily };
   return payload;
 }
 
