@@ -3,7 +3,7 @@
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
 import { normalizeOffPeriods } from "../lib/consume-log.js";
-import { ALERT_RULE_KEYS, CHANNEL_EVENT_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, USER_MAIL_CHANNEL_TYPES, resetNoRenewalAlertState } from "../lib/alert-rules.js";
+import { ALERT_RULE_KEYS, CHANNEL_EVENT_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
@@ -223,6 +223,13 @@ export class Store {
     if (meta.settings?.expectedCostMigratedV1b !== true) {
       if (meta.settings?.expectedCost === false) this.data.settings.expectedCost = true;
       this.data.settings.expectedCostMigratedV1b = true;
+    }
+    // 一次性迁移（用户 11-01 定：重点用户快用完的提醒线默认从 3 天改成半天）：规则整份存库，#195 上线以后保存过规则的站，库里留着旧默认值 3 天 / 天。
+    // 没有迁移标记、而且值正好是旧默认（3 天、单位天）的，当成「没人动过」改成 12 小时，写上标记；以后站长自己改的带着标记，这里不会再碰
+    if (meta.notifications?.rules?.userEtaHalfDayV1 !== true) {
+      const saved = meta.notifications?.rules;
+      if (saved && saved.userEtaDays === 3 && (saved.userEtaUnit ?? "days") === "days") { this.data.notifications.rules.userEtaDays = 0.5; this.data.notifications.rules.userEtaUnit = "hours"; }
+      this.data.notifications.rules.userEtaHalfDayV1 = true;
     }
     this.data.settings.historyRetentionDays =
       normalizeHistoryRetentionDays(this.data.settings.historyRetentionDays);
@@ -544,8 +551,6 @@ export class Store {
           if (Array.isArray(cf[k])) cf[k] = cf[k].filter((x) => x !== id);
         }
       }
-      // 给重点用户发邮件用的那个通知方式没了：选择清掉、开关一起关
-      if (notifications.rules.userMailChannelId === id) { notifications.rules.userMailChannelId = null; notifications.rules.onUserMail = false; }
       const dr = settings.dailyReport;
       if (Array.isArray(dr?.channelIds)) dr.channelIds = dr.channelIds.filter((x) => x !== id);
       return notifications.channels.length < n;
@@ -567,18 +572,6 @@ export class Store {
         if (Number.isFinite(v) && v > 0) r.etaDays = Math.max(1 / 24, Math.round(v * 10000) / 10000);
       }
       if ("etaUnit" in patch) r.etaUnit = patch.etaUnit === "hours" ? "hours" : "days";
-      // 给重点用户发邮件：用哪个通知方式（只能是已有的 smtp / resend，不存在就当没选）、充值页地址（http/https，空 = 站点地址加 /wallet）、开关（没选通知方式不能开）
-      if ("userMailChannelId" in patch) {
-        const channel = notifications.channels.find((c) => c.id === String(patch.userMailChannelId ?? "") && USER_MAIL_CHANNEL_TYPES.includes(c.type));
-        r.userMailChannelId = channel ? channel.id : null;
-      }
-      if ("userMailPayUrl" in patch) {
-        const url = String(patch.userMailPayUrl ?? "").trim();
-        if (!url) r.userMailPayUrl = "";
-        else if (/^https?:\/\/\S+$/i.test(url) && url.length <= 500) r.userMailPayUrl = url;
-      }
-      if ("onUserMail" in patch) r.onUserMail = patch.onUserMail === true;
-      if (!r.userMailChannelId) r.onUserMail = false;
       // 重点用户快用完的提醒天数：规则同上游的（非法保留原值，下限 1 小时），各存各的
       if ("userEtaDays" in patch) {
         const v = Number(patch.userEtaDays);

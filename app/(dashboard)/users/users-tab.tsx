@@ -39,7 +39,7 @@ function RunwayCell({ row, page }: { row: UsersRow; page: UsersPage }) {
   const has = row.runwayState === "soon" || row.runwayState === "ok";
   return (
     <span className="jy-cell-runway">
-      {has && <RunwayTrack mini days={row.days} level={level} critDays={page.level1Days ?? 3} warnDays={0} />}
+      {has && <RunwayTrack mini days={row.days} level={level} critDays={page.level1Days ?? 0.5} warnDays={0} />}
       <span className={`v${has ? "" : " jy-muted"}`}>{runwayText(row)}</span>
     </span>
   );

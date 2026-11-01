@@ -11,7 +11,7 @@ import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../c
 import Link from "next/link";
 import { App, Button, Form, Grid, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
-import { ALERT_RULES, USER_ALERT_RULES, USER_MAIL_CHANNEL_TYPES } from "../../../lib/alert-rules";
+import { ALERT_RULES, USER_ALERT_RULES } from "../../../lib/alert-rules";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { SECRET_FIELD_TEXT } from "../../../lib/channel-onboarding";
@@ -81,9 +81,8 @@ const ruleFormOf = (r: any): RuleForm => ({
   etaUnit: r?.etaUnit === "hours" ? "hours" : "days",
   etaVal: etaRuleDisplay(r),
   // 重点用户快用完的提醒天数：自己一份，和上面的各设各的
-  userEtaUnit: r?.userEtaUnit === "hours" ? "hours" : "days",
-  userEtaVal: etaRuleDisplay({ etaDays: r?.userEtaDays ?? 3, etaUnit: r?.userEtaUnit }),
-  mailPay: String(r?.userMailPayUrl || ""),
+  userEtaUnit: r?.userEtaUnit === "days" ? "days" : "hours", // 默认半天，写「12 小时」
+  userEtaVal: etaRuleDisplay({ etaDays: r?.userEtaDays ?? 0.5, etaUnit: r?.userEtaUnit ?? "hours" }),
   renotify: Number(r?.renotifyHours ?? 24),
   errThreshold: Number(r?.errorThreshold ?? 1),
   errRetry: Number(r?.errorRetrySec ?? 30),
@@ -104,8 +103,6 @@ type RuleForm = {
   etaVal: number | null;
   userEtaUnit: "days" | "hours";
   userEtaVal: number | null;
-  // 给用户发邮件的充值页地址（空 = 站点地址加 /wallet）
-  mailPay: string;
   renotify: number | null;
   errThreshold: number | null;
   errRetry: number | null;
@@ -165,7 +162,6 @@ export default function NotificationsPage() {
       const errs: Record<string, string> = {};
       if (f.etaVal == null) errs.eta = requiredText(COPY.etaLabel);
       if (f.userEtaVal == null) errs.userEta = requiredText(COPY.users.etaLabel);
-      if (f.mailPay.trim() && !/^https?:\/\/\S+$/i.test(f.mailPay.trim())) errs.mailPay = COPY.users.mail.payBad;
       if (f.errThreshold == null && rulesRef.current.onError) errs.errThreshold = requiredText(COPY.errLabel);
       if (f.renotify == null) errs.renotify = `${requiredText(COPY.renotify)}${COPY.renotifyZero}`;
       if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retry)}${COPY.retryZero}`;
@@ -175,7 +171,7 @@ export default function NotificationsPage() {
       // 只有用户改过提醒天数才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把它改掉
       const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rulesRef.current, etaUnit: f.etaUnit });
       const val = Number(f.etaVal);
-      const userEtaEdited = f.userEtaVal != null && f.userEtaVal !== etaRuleDisplay({ etaDays: rulesRef.current.userEtaDays ?? 3, etaUnit: f.userEtaUnit });
+      const userEtaEdited = f.userEtaVal != null && f.userEtaVal !== etaRuleDisplay({ etaDays: rulesRef.current.userEtaDays ?? 0.5, etaUnit: f.userEtaUnit });
       const userVal = Number(f.userEtaVal);
       const r = await api("/api/notifications/rules", {
         method: "PUT",
@@ -184,7 +180,6 @@ export default function NotificationsPage() {
           etaUnit: f.etaUnit,
           ...(userEtaEdited ? { userEtaDays: f.userEtaUnit === "hours" ? userVal / 24 : userVal } : {}),
           userEtaUnit: f.userEtaUnit,
-          userMailPayUrl: f.mailPay.trim(),
           renotifyHours: Number(f.renotify),
           errorThreshold: Number(f.errThreshold ?? rulesRef.current.errorThreshold ?? 1),
           errorRetrySec: Number(f.errRetry),
@@ -239,10 +234,6 @@ export default function NotificationsPage() {
   const [chSaving, setChSaving] = useState(false);
   const [chTesting, setChTesting] = useState(false);
   const [chTest, setChTest] = useState<TestResult | null>(null);
-  // 给用户发邮件：「看邮件样子」的弹窗、给自己发的试信
-  const [mailPreview, setMailPreview] = useState<{ open: boolean; loading: boolean; error: unknown; mails: { key: string; label: string; subject: string; text: string }[] }>({ open: false, loading: false, error: null, mails: [] });
-  const [mailTesting, setMailTesting] = useState(false);
-  const [mailTest, setMailTest] = useState<TestResult | null>(null);
   // 列表行：测试中的渠道 id 与本次会话内的测试结果（服务端不记录测试历史）
   const [rowTesting, setRowTesting] = useState<string | null>(null);
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
@@ -467,7 +458,7 @@ export default function NotificationsPage() {
   // 重点用户快用完的提醒天数换单位：同上
   const onUserEtaUnitChange = (u: "days" | "hours") => {
     const f = ruleForm.value;
-    const saved = { etaDays: rules.userEtaDays ?? 3, etaUnit: rules.userEtaUnit };
+    const saved = { etaDays: rules.userEtaDays ?? 0.5, etaUnit: rules.userEtaUnit ?? "hours" };
     let userEtaVal = f.userEtaVal;
     if (f.userEtaVal === etaRuleDisplay(saved)) userEtaVal = etaRuleDisplay({ ...saved, etaUnit: u });
     else {
@@ -566,35 +557,6 @@ export default function NotificationsPage() {
     value: c.id,
     label: c.enabled === false ? `${c.name}${COPY.disabledSuffix}` : c.name,
   }));
-  // 给用户发邮件只能选邮件类的通知方式（停用的不列）；选一个才能打开开关
-  const mailChannelOptions = channels
-    .filter((c: any) => USER_MAIL_CHANNEL_TYPES.includes(c.type) && c.enabled !== false)
-    .map((c: any) => ({ value: c.id, label: c.name }));
-  const saveMailChannel = (id: string | undefined) => toggles.run(async () => {
-    const r = await api("/api/notifications/rules", { method: "PUT", body: { userMailChannelId: id || null } });
-    setRules(r.rules);
-    setMailTest(null);
-  });
-  const openMailPreview = async () => {
-    setMailPreview({ open: true, loading: true, error: null, mails: [] });
-    try {
-      const r = await api("/api/users/mail-preview");
-      setMailPreview({ open: true, loading: false, error: null, mails: r.mails || [] });
-    } catch (e) {
-      setMailPreview({ open: true, loading: false, error: e, mails: [] });
-    }
-  };
-  const sendMailTest = async () => {
-    setMailTesting(true);
-    setMailTest(null);
-    try {
-      setMailTest(deliveryResult(await api("/api/users/mail-test", { method: "POST", body: {} }), COPY.users.mail.testOk));
-    } catch (e) {
-      setMailTest(apiFailure(e));
-    } finally {
-      setMailTesting(false);
-    }
-  };
 
   const testCell = (c: any) => {
     const t = rowTests[c.id];
@@ -879,65 +841,6 @@ export default function NotificationsPage() {
       </tr>
     );
   };
-  // 「给用户发邮件」一行：开关（先选了通知方式才能开）、说明、充值页地址、看邮件样子和给自己发一封试信；「发到」那一格是选一个邮件通知方式
-  const mailOn = !!rules.onUserMail, mailChannelId = rules.userMailChannelId || undefined;
-  const mailTitleId = `${uid}-rule-userMail`;
-  const mailRow = (
-    <tr key="userMail" className={mailOn ? undefined : "is-off"}>
-      <td className="col-switch">
-        <Switch
-          checked={mailOn}
-          checkedChildren={COPY.on}
-          unCheckedChildren={COPY.off}
-          onChange={() => toggleRule("onUserMail")}
-          disabled={!mailChannelId}
-          aria-labelledby={mailTitleId}
-        />
-      </td>
-      <td>
-        <span className="jy-notifications-rule-title" id={mailTitleId}>{COPY.users.mail.title}</span>
-        <span className="jy-notifications-rule-desc">{COPY.users.mail.desc}</span>
-        <div className="jy-notifications-cond">
-          <label htmlFor={`${uid}-mailpay`}>{COPY.users.mail.payLabel}</label>
-          <Input
-            id={`${uid}-mailpay`}
-            allowClear
-            placeholder={COPY.users.mail.payPlaceholder}
-            {...leaveRules}
-            value={ruleForm.value.mailPay}
-            onChange={(e) => setRuleField("mailPay", e.target.value)}
-            status={ruleErrors.mailPay ? "error" : undefined}
-            aria-invalid={ruleErrors.mailPay ? true : undefined}
-            aria-describedby={ruleErrors.mailPay ? `${uid}-mailpay-err` : undefined}
-            style={{ width: 320, maxWidth: "100%" }}
-          />
-          {ruleErrors.mailPay && (
-            <span className="jy-err" id={`${uid}-mailpay-err`} role="alert">
-              <Sym kind="crit" />
-              {ruleErrors.mailPay}
-            </span>
-          )}
-        </div>
-        <div className="jy-notifications-cond">
-          <button type="button" className="jy-link jy-notifications-linkbtn" onClick={() => void openMailPreview()}>{COPY.users.mail.preview}</button>
-          <Button size="small" loading={mailTesting} disabled={!mailChannelId} onClick={() => void sendMailTest()}>{COPY.users.mail.test}</Button>
-        </div>
-        <div aria-live="polite">{mailTest && <ResultBox r={mailTest} okTitle={COPY.users.mail.testOk} tz={tz} />}</div>
-      </td>
-      <td className="col-to">
-        <Select
-          allowClear
-          aria-label={COPY.users.mail.pickLabel}
-          placeholder={mailChannelOptions.length ? COPY.users.mail.pickPlaceholder : COPY.users.mail.noMailChannel}
-          value={mailChannelId}
-          onChange={(id) => void saveMailChannel(id)}
-          options={mailChannelOptions}
-          disabled={!mailChannelOptions.length && !mailChannelId}
-        />
-        {!mailChannelId && <p className="jy-caption jy-notifications-mail-hint">{COPY.users.mail.pickFirst}</p>}
-      </td>
-    </tr>
-  );
   const rulesBlock = (
     <>
       {/* 提醒规则 */}
@@ -988,7 +891,6 @@ export default function NotificationsPage() {
                   </tr>
                 )}
                 {bigUsers && USER_RULES.map(ruleRow)}
-                {bigUsers && mailRow}
               </tbody>
             </table>
           </div>
@@ -1385,23 +1287,6 @@ export default function NotificationsPage() {
         <TabPanel idPrefix={`${uid}-report`} tabKey="text" active={reportTab === "text"}>
           <pre className="jy-notifications-text">{report?.text}</pre>
         </TabPanel>
-      </Modal>
-      <Modal
-        open={mailPreview.open}
-        title={COPY.users.mail.previewTitle}
-        onCancel={() => setMailPreview((v) => ({ ...v, open: false }))}
-        footer={<Button onClick={() => setMailPreview((v) => ({ ...v, open: false }))}>{COPY.close}</Button>}
-        width={640}
-      >
-        {mailPreview.loading ? <p className="jy-muted">{COPY.users.mail.previewLoading}</p>
-          : mailPreview.error ? <ErrorState what={COPY.users.mail.previewFailed} error={mailPreview.error} onRetry={() => void openMailPreview()} />
-            : mailPreview.mails.map((mail) => (
-              <section key={mail.key} className="jy-notifications-mailsample">
-                <h3>{mail.label}</h3>
-                <p><b>{mail.subject}</b></p>
-                <pre className="jy-notifications-text">{mail.text}</pre>
-              </section>
-            ))}
       </Modal>
     </div>
   );

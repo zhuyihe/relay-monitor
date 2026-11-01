@@ -6,13 +6,6 @@
 .jy-notifications-rules .col-to { width: 320px; }
 .jy-notifications-rules .col-to .ant-select { width: 100%; }
 .jy-notifications-rule-title { display: block; font-weight: 500; color: var(--jy-ink); }
-/* 「给用户发邮件」一行：看邮件样子（外观像链接的按钮）、选通知方式下面的灰字、预览弹窗里的三封 */
-.jy-notifications-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
-.jy-notifications-mail-hint { margin: 4px 0 0; }
-.jy-notifications-mailsample + .jy-notifications-mailsample { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--jy-rule-soft); }
-.jy-notifications-mailsample h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--jy-ink-2); }
-.jy-notifications-mailsample p { margin: 0 0 8px; }
-
 /* 「用户」一组的小标题行：占满整行，下面两行灰字说明这一组管谁 */
 .jy-notifications-rules tr.jy-notifications-group td { padding-top: 20px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); }
 .jy-notifications-group h3 { margin: 0 0 4px; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
