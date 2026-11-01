@@ -15,12 +15,14 @@ import { ERROR_REASONS, MAX_ATTEMPT, OWN_ERROR_SLOT_MS } from "../lib/own-error-
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, zonedParts } from "../lib/business-time.js";
 
 const emptyRejected = () => ({ ...Object.fromEntries(ERROR_REASONS.map((reason) => [reason, 0])), total: 0 });
-const emptyAgg = () => ({ rejected: emptyRejected(), rejectedRequests: 0, success: 0 });
+// sampled：这里面有几个窗口的被拒数是按样本估的（错误太多的窗口只读 300 条，按窗口总条数摊；0 = 都是实数）
+const emptyAgg = () => ({ rejected: emptyRejected(), rejectedRequests: 0, success: 0, sampled: 0 });
 const emptyAttempts = () => ({ retryable: new Array(MAX_ATTEMPT).fill(0), nonRetryable: new Array(MAX_ATTEMPT).fill(0) });
 function addError(agg, bucket) {
   agg.rejected[bucket.reason] = (agg.rejected[bucket.reason] || 0) + bucket.count;
   agg.rejected.total += bucket.count;
   if (bucket.attempt === 1) agg.rejectedRequests += bucket.count;
+  agg.sampled += bucket.sampled || 0;
 }
 const addAttempts = (attempts, bucket) => { attempts[bucket.retryable ? "retryable" : "nonRetryable"][Math.min(MAX_ATTEMPT, Math.max(1, bucket.attempt)) - 1] += bucket.count; };
 
@@ -76,10 +78,11 @@ export function wallHourOf(slotMs, tz = DEFAULT_BUSINESS_TIME_ZONE) {
  * errors、consume：两个桶存取（OwnLogStore，错误日志 spec 和消费日志 spec 各一个）；stationId：自营站点；fromMs、toMs：时间范围（按小时对齐：from 向下、to 向上取整点）；
  * channelUpstream：channelUpstreamMap 的结果；渠道不在里面的归到「没对上上游」（upstreamStationId 是 null）；
  * tz：业务时区（算每个小时是哪一天的几点）；retry：站点的重试设置 { retryTimes }（读不到是 null，F 退回「最大档」）。
+ * 被拒的数里有按样本估的（sampled > 0）：错误太多的窗口只读最晚的 300 条，按窗口总条数摊上去，页面该写「约」。
  * 返回 {
  *   fromSlotMs, toSlotMs, tz, cursor（错误日志读到哪儿了，没读过是 null）, retry: { retryTimes, method },
  *   total, byModel, byUpstream, byChannel, byHour, byModelHour, cells
- * }；agg = { rejected: { rate_limit, upstream, auth_quota, bad_request, other, total }, rejectedRequests, success }（byModel / byHour / byModelHour / total 另有 finalFailures）：
+ * }；agg = { rejected: { rate_limit, upstream, auth_quota, bad_request, other, total }, rejectedRequests, success, sampled }（byModel / byHour / byModelHour / total 另有 finalFailures）：
  *   byModel: [{ model, ...agg, finalFailures }]（被拒多的在前）；byUpstream: [{ upstreamStationId, channelIds, ...agg }]；
  *   byChannel: [{ channelId, ruleId, upstreamStationId, ...agg, hours: [{ slotMs, ...agg }] }]——这个渠道所有模型加起来的成交和被拒，按小时，测上限用；
  *   byHour: [{ slotMs, dayKey, hour, repeated, ...agg, finalFailures }]（每个小时都有，没有的是 0）；
@@ -121,7 +124,7 @@ export async function queryErrorSupply({ errors, consume, stationId, fromMs, toM
   for (let slotMs = fromSlotMs; slotMs < toSlotMs; slotMs += OWN_ERROR_SLOT_MS) hours.set(slotMs, { slotMs, ...wallHourOf(slotMs, tz), ...emptyAgg(), finalFailures: 0 });
   const merge = (target, source) => {
     for (const reason of [...ERROR_REASONS, "total"]) target.rejected[reason] += source.rejected[reason];
-    target.rejectedRequests += source.rejectedRequests; target.success += source.success;
+    target.rejectedRequests += source.rejectedRequests; target.success += source.success; target.sampled += source.sampled;
   };
   const infoOf = (channelId) => channelUpstream.get(channelId) || null;
   for (const cell of cells.values()) {
@@ -171,10 +174,10 @@ export async function queryRejectedUsers({ errors, stationId, fromMs, toMs, mode
   for (const bucket of await errors.listBuckets(stationId, fromSlotMs, toSlotMs, { table: "user" })) {
     if (wanted && !wanted.has(bucket.model)) continue;
     let user = users.get(bucket.userId);
-    if (!user) users.set(bucket.userId, user = { userId: bucket.userId, rejected: emptyRejected(), rejectedRequests: 0, models: new Map() });
+    if (!user) users.set(bucket.userId, user = { userId: bucket.userId, rejected: emptyRejected(), rejectedRequests: 0, sampled: 0, models: new Map() });
     let model = user.models.get(bucket.model);
-    if (!model) user.models.set(bucket.model, model = { model: bucket.model, rejected: emptyRejected(), rejectedRequests: 0 });
-    for (const target of [user, model]) { target.rejected[bucket.reason] = (target.rejected[bucket.reason] || 0) + bucket.count; target.rejected.total += bucket.count; target.rejectedRequests += bucket.firstCount; }
+    if (!model) user.models.set(bucket.model, model = { model: bucket.model, rejected: emptyRejected(), rejectedRequests: 0, sampled: 0 });
+    for (const target of [user, model]) { target.rejected[bucket.reason] = (target.rejected[bucket.reason] || 0) + bucket.count; target.rejected.total += bucket.count; target.rejectedRequests += bucket.firstCount; target.sampled += bucket.sampled || 0; }
   }
   const sorted = [...users.values()].map(({ models: byModel, ...user }) => ({ ...user, byModel: [...byModel.values()].sort((a, b) => b.rejected.total - a.rejected.total || a.model.localeCompare(b.model)) }))
     .sort((a, b) => b.rejected.total - a.rejected.total || a.userId - b.userId);

@@ -23,7 +23,7 @@
 // 落后不到 minAdvanceMs（5 分钟）不读（没有新窗口、也没有没读完的窗口就不发请求）。
 import { createHash } from "node:crypto";
 import { OWN_LOG_SLOT_MS, accumulateBuckets, bucketKeyOf } from "../lib/own-log-bucket.js";
-import { OWN_ERROR_SLOT_MS, accumulateErrorBuckets, errorBucketKeyOf } from "../lib/own-error-bucket.js";
+import { OWN_ERROR_SLOT_MS, accumulateErrorBuckets, errorBucketKeyOf, scaleErrorBuckets } from "../lib/own-error-bucket.js";
 import { ingestAllowance, noteIngestUsage, ownRequestState } from "../lib/own-request-budget.js";
 import { queryOwnLogWindow, queryOwnRetrySettings } from "../lib/providers.js";
 import { businessTimeZone, dayStartInTz, dayKeyInTz, shiftedDayStartInTz } from "../lib/business-time.js";
@@ -79,8 +79,11 @@ export const CONSUME_KIND = Object.freeze({
 });
 export const ERROR_KIND = Object.freeze({
   name: "error", type: 5, tag: "own-error-ingest", slotMs: OWN_ERROR_SLOT_MS, accumulate: accumulateErrorBuckets, keyOf: errorBucketKeyOf, needsAdmins: false,
+  // 第一次只从现在往后读（不补历史：冷数据随机回表不划算）；窗口不跨小时；一个窗口最多读 3 页（300 条）当样本，总条数用每个请求自带的 total（站点的 COUNT）摊，
+  // 所以不管错误多少，每个窗口最多 3 页，游标不会落后
+  firstFromMs: (at) => Math.floor((at - INGEST.LAG_MS) / 1000) * 1000, alignToSlot: true, samplePages: INGEST.PAGES_PER_WINDOW, finalize: scaleErrorBuckets,
   prepare: async ({ rt, own, now }) => { const settings = await readRetrySettings(rt, own, { now }); return { retryRanges: settings?.retryRanges ?? null, key: JSON.stringify(settings?.retryRanges ?? null) }; },
-  limits: Object.freeze({ pagesPerRound: 3, pagesBehind: 6, windowStartMs: 5 * 60000, windowMaxMs: 15 * 60000, minAdvanceMs: 5 * 60000 }),
+  limits: Object.freeze({ pagesPerRound: 3, pagesBehind: 6, windowStartMs: 5 * 60000, windowMaxMs: 5 * 60000, minAdvanceMs: 5 * 60000 }),
 });
 
 const ownBase = (own) => String(own?.baseUrl || "").replace(/\/+$/, "");
@@ -93,7 +96,7 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
   let lastPruneAt = 0;
 
   // 第一次：从昨天 0 点（业务时区）起读
-  const firstFromMs = (at) => shiftedDayStartInTz(dayStartInTz(dayKeyInTz(at, businessTimeZone()), businessTimeZone()), -1, businessTimeZone());
+  const firstFromMs = (at) => (kind.firstFromMs ? kind.firstFromMs(at) : shiftedDayStartInTz(dayStartInTz(dayKeyInTz(at, businessTimeZone()), businessTimeZone()), -1, businessTimeZone()));
 
   async function ingestOnce(own, { justTurnedOn = false } = {}) {
     if (!own?.isOwn || own.type !== "newapi") return { skipped: "not-own" };
@@ -117,7 +120,7 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
     // 这一行跑到了（不管后面读不读得到日志），就算真的判断过了：skipChecked 给 true
     if (justTurnedOn && cursor && cursor.coveredToMs < firstFromMs(at)) {
       cursor = await store.skipCursor(own.id, firstFromMs(at), at);
-      log(kind.tag, own.id, "off->on, skipped stale progress to yesterday");
+      log(kind.tag, own.id, "off->on, skipped stale progress");
     }
     cursor ??= await store.startCursor(own.id, firstFromMs(at), at);
     const horizon = wholeSecond(at - INGEST.LAG_MS);
@@ -169,7 +172,9 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
         }
         if (!mayRequest()) break;
         const fromMs = pending?.fromMs ?? coveredTo;
-        const toMs = pending?.toMs ?? Math.max(fromMs + 1000, wholeSecond(Math.min(fromMs + windowMs, horizon)));
+        // alignToSlot：窗口不跨小时（桶按小时，摊样本时一个窗口的数要落在同一个小时里）
+        const slotEnd = kind.alignToSlot ? (Math.floor(fromMs / kind.slotMs) + 1) * kind.slotMs : Infinity;
+        const toMs = pending?.toMs ?? Math.max(fromMs + 1000, wholeSecond(Math.min(fromMs + windowMs, horizon, slotEnd)));
         const page = pending?.nextPage ?? 1;
         let response;
         // 失败的请求也占额度；finally 保证提前返回和数据库写失败时同样记账。
@@ -180,7 +185,8 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
         const total = response.total;
         const needPages = total == null ? (items.length < INGEST.PAGE_SIZE ? 1 : INGEST.PAGES_PER_WINDOW + 1) : Math.ceil(total / INGEST.PAGE_SIZE);
         // 只在窗口尚未暂存时缩小；接受第一页后窗口固定，页数再多也分轮读完。
-        if (!pending && needPages > INGEST.PAGES_PER_WINDOW && toMs - fromMs > INGEST.WINDOW_MIN_MS) {
+        // 采样的流水线（错误日志）不切窗口：一个窗口最多读 samplePages 页当样本，总条数用请求自带的 total 摊
+        if (!pending && !kind.samplePages && needPages > INGEST.PAGES_PER_WINDOW && toMs - fromMs > INGEST.WINDOW_MIN_MS) {
           windowMs = Math.max(INGEST.WINDOW_MIN_MS, wholeSecond((toMs - fromMs) / 2));
           windowSizes.set(own.id, windowMs);
           continue;
@@ -202,13 +208,16 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
         if (items.length && !fresh.length) throw invalid("pending-page-not-advancing");
         if (total != null && (seen.size > total || (items.length < INGEST.PAGE_SIZE && seen.size !== total)))
           throw invalid("pending-count-mismatch");
-        const complete = total == null ? items.length < INGEST.PAGE_SIZE : seen.size === total;
+        const sampleDone = !!kind.samplePages && total != null && page >= kind.samplePages;
+        const complete = total == null ? items.length < INGEST.PAGE_SIZE : seen.size === total || sampleDone;
         // 已翻完 total 指定的页数还缺编号，不能靠空页把漏掉的记录当作已采完。
         if (total != null && !complete && page >= Math.ceil(total / INGEST.PAGE_SIZE)) throw invalid("pending-count-mismatch");
         const buckets = new Map((pending?.buckets || []).map((bucket) => [kind.keyOf(bucket), bucket]));
         kind.accumulate(fresh, { adminSet, resoldKeys, ...context }, buckets);
+        // 只读了样本（窗口里的条数比读到的多）：窗口读完时把样本里的比例摊到 total 上，桶标成估算；不满 samplePages 页读完的是实数
+        const finalBuckets = complete && sampleDone && seen.size < total ? kind.finalize(buckets, { total, sample: seen.size }) : buckets;
         const saved = await store.savePending(own.id, { fromMs, toMs, nextPage: page + 1, total,
-          seenIds: [...seen], buckets: [...buckets.values()], complete, classificationKey },
+          seenIds: [...seen], buckets: [...finalBuckets.values()], complete, classificationKey },
           { expectedRevision: pending?.revision ?? null }, now());
         if (!saved) return result({ error: "cursor-moved" });
         pending = saved;
@@ -243,4 +252,15 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
   }
 
   return { ingestOnce, pruneIfDue, windowSizes };
+}
+
+// 错误日志「连续 24 小时一条都没读到」：设置里「读取错误日志」下面写一句提示（可能你的站没开 ERROR_LOG_ENABLED）。不放慢读取——放大窗口反而更贵、拉长间隔会漏数。
+// 判断：读了至少 24 小时（进度的两头相隔），而且最近一个有数的小时是 24 小时以前（一个都没有就从开始读那一刻算）；没有进度是 false
+export const ERROR_QUIET_MS = 24 * 3600000;
+export async function errorLogQuiet(store, stationId) {
+  const cursor = await store.getCursor(stationId);
+  if (!cursor) return false;
+  const latest = await store.latestSlot(stationId);
+  const lastSignal = Math.max(cursor.coveredFromMs, latest == null ? -Infinity : latest + OWN_ERROR_SLOT_MS);
+  return cursor.coveredToMs - lastSignal >= ERROR_QUIET_MS;
 }

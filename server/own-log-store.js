@@ -24,17 +24,18 @@ export const bucketFromRow = (row) => ({ slotMs: Number(row.slot_ms), channelId:
 // 错误日志的两种桶（同一个暂存、同一个窗口事务，用 table 分开）：
 //   own_error_buckets（渠道桶）：（站点、小时、渠道、模型、分组、原因、状态码、第几次尝试 1–10、能不能重试）→ 次数 count
 //   own_error_user_buckets（用户桶）：（站点、小时、用户 ID、模型、原因）→ 次数 count、第 1 次尝试的次数 first_count；只存用户 ID，不存用户名
-export const OWN_ERROR_BUCKET_COLUMNS = Object.freeze(["count"]);
-export const OWN_ERROR_USER_BUCKET_COLUMNS = Object.freeze(["count", "first_count"]);
+// sampled：这个桶的数里有几个窗口是按样本估的（0 = 都是实数）
+export const OWN_ERROR_BUCKET_COLUMNS = Object.freeze(["count", "sampled"]);
+export const OWN_ERROR_USER_BUCKET_COLUMNS = Object.freeze(["count", "first_count", "sampled"]);
 const int = (value, min = 0) => Math.max(min, Math.trunc(Number(value)) || min);
 export const errorBucketRowOf = (stationId, bucket) => ({ station_id: stationId, slot_ms: bucket.slotMs, channel_id: int(bucket.channelId), model: clip(bucket.model, 128),
   grp: clip(bucket.group, 64), reason: clip(bucket.reason, 12), status_code: int(bucket.status), attempt: Math.min(10, int(bucket.attempt, 1)), retryable: bucket.retryable ? 1 : 0,
-  count: Math.round(Number(bucket.count) || 0) });
+  count: Math.round(Number(bucket.count) || 0), sampled: Math.round(Number(bucket.sampled) || 0) });
 export const errorBucketFromRow = (row) => ({ table: "channel", slotMs: Number(row.slot_ms), channelId: Number(row.channel_id), model: row.model, group: row.grp, reason: row.reason, status: Number(row.status_code),
-  attempt: Number(row.attempt), retryable: Number(row.retryable), count: Number(row.count) });
+  attempt: Number(row.attempt), retryable: Number(row.retryable), count: Number(row.count), sampled: Number(row.sampled) });
 export const errorUserRowOf = (stationId, bucket) => ({ station_id: stationId, slot_ms: bucket.slotMs, user_id: int(bucket.userId), model: clip(bucket.model, 128), reason: clip(bucket.reason, 12),
-  count: Math.round(Number(bucket.count) || 0), first_count: Math.round(Number(bucket.firstCount) || 0) });
-export const errorUserFromRow = (row) => ({ table: "user", slotMs: Number(row.slot_ms), userId: Number(row.user_id), model: row.model, reason: row.reason, count: Number(row.count), firstCount: Number(row.first_count) });
+  count: Math.round(Number(bucket.count) || 0), first_count: Math.round(Number(bucket.firstCount) || 0), sampled: Math.round(Number(bucket.sampled) || 0) });
+export const errorUserFromRow = (row) => ({ table: "user", slotMs: Number(row.slot_ms), userId: Number(row.user_id), model: row.model, reason: row.reason, count: Number(row.count), firstCount: Number(row.first_count), sampled: Number(row.sampled) });
 
 // spec.tables：这条流水线写的桶表（第一张是默认的）；owns 判断一个桶进哪张表
 export const CONSUME_SPEC = Object.freeze({
@@ -199,6 +200,12 @@ export class OwnLogStore {
     if (!spec) throw new Error(`unknown bucket table: ${table}`);
     const [rows] = await this.pool.query(`SELECT * FROM ${spec.table} WHERE station_id = ? AND slot_ms >= ? AND slot_ms < ?`, [stationId, fromSlotMs, toSlotMs]);
     return rows.map(spec.fromRow);
+  }
+
+  // 这个站点最近有数的那个小时（第一张桶表里最大的 slot_ms）；一个桶都没有是 null。设置里「这 24 小时没读到错误日志」的提示用
+  async latestSlot(stationId) {
+    const [[row]] = await this.pool.query(`SELECT MAX(slot_ms) AS slot FROM ${this.spec.tables[0].table} WHERE station_id = ?`, [stationId]);
+    return row?.slot == null ? null : Number(row.slot);
   }
 
   // 每小时清一批：beforeSlotMs 以前的桶，每张表一次最多 limit 行；返回删了几行（各表加起来）

@@ -4,8 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const bucket = (extra = {}) => ({ table: "channel", slotMs: 3600000 * 10, channelId: 1, model: "m", group: "g", reason: "rate_limit", status: 429, attempt: 1, retryable: 1, count: 2, ...extra });
-const userBucket = (extra = {}) => ({ table: "user", slotMs: 3600000 * 10, userId: 7, model: "m", reason: "rate_limit", count: 3, firstCount: 1, ...extra });
+const bucket = (extra = {}) => ({ table: "channel", slotMs: 3600000 * 10, channelId: 1, model: "m", group: "g", reason: "rate_limit", status: 429, attempt: 1, retryable: 1, count: 2, sampled: 0, ...extra });
+const userBucket = (extra = {}) => ({ table: "user", slotMs: 3600000 * 10, userId: 7, model: "m", reason: "rate_limit", count: 3, firstCount: 1, sampled: 0, ...extra });
 
 export function defineOwnErrorStoreContract({ name, create, createConsume = null }) {
   test(`own error store contract: ${name}`, { timeout: 60000 }, async (t) => {
@@ -25,7 +25,7 @@ export function defineOwnErrorStoreContract({ name, create, createConsume = null
       assert.equal(listed.length, 8);
       const one = listed.find((b) => b.channelId === 1 && b.model === "m" && b.group === "g" && b.reason === "rate_limit" && b.status === 429 && b.attempt === 1 && b.retryable === 1);
       assert.equal(one.count, 5, "2 + 3");
-      assert.deepEqual(Object.keys(one).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "retryable", "slotMs", "status", "table"]);
+      assert.deepEqual(Object.keys(one).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "retryable", "sampled", "slotMs", "status", "table"]);
       assert.deepEqual(listed.map((b) => b.attempt).sort(), [1, 1, 1, 1, 1, 1, 1, 2]);
       assert.deepEqual(listed.map((b) => b.retryable).sort(), [0, 1, 1, 1, 1, 1, 1, 1], "不能重试的失败另算一个桶");
       assert.equal(await store.applyWindow(id("none"), { fromMs: 0, toMs: 1, buckets: [] }), false, "没有进度的站点不写");
@@ -48,11 +48,30 @@ export function defineOwnErrorStoreContract({ name, create, createConsume = null
       assert.equal((await store.listBuckets(station, 0, 99999999)).length, 1, "默认读渠道桶，用户桶不混进去");
       const users = await store.listBuckets(station, 0, 99999999, { table: "user" });
       assert.equal(users.length, 4);
-      assert.deepEqual(users.find((b) => b.userId === 7 && b.model === "m" && b.reason === "rate_limit"), { table: "user", slotMs: 3600000 * 10, userId: 7, model: "m", reason: "rate_limit", count: 5, firstCount: 3 });
-      assert.deepEqual(Object.keys(users[0]).sort(), ["count", "firstCount", "model", "reason", "slotMs", "table", "userId"]);
+      assert.deepEqual(users.find((b) => b.userId === 7 && b.model === "m" && b.reason === "rate_limit"), { table: "user", slotMs: 3600000 * 10, userId: 7, model: "m", reason: "rate_limit", count: 5, firstCount: 3, sampled: 0 });
+      assert.deepEqual(Object.keys(users[0]).sort(), ["count", "firstCount", "model", "reason", "sampled", "slotMs", "table", "userId"]);
       await assert.rejects(store.listBuckets(station, 0, 99999999, { table: "nope" }), /unknown bucket table/);
       await store.pruneBuckets(3600000 * 100);
       assert.deepEqual([(await store.listBuckets(station, 0, 99999999)).length, (await store.listBuckets(station, 0, 99999999, { table: "user" })).length], [0, 0], "清理两张表一起清");
+    });
+
+    await t.test("估算标记（sampled）：摊过的窗口写 1，和实数的窗口落在同一个桶里时加起来（>0 就表示这个桶里有估算）；渠道桶和用户桶都有", async () => {
+      const station = id("s");
+      await store.startCursor(station, 0);
+      await store.applyWindow(station, { fromMs: 0, toMs: 10, buckets: [bucket({ count: 100, sampled: 1 }), userBucket({ count: 100, firstCount: 90, sampled: 1 })] });
+      await store.applyWindow(station, { fromMs: 10, toMs: 20, buckets: [bucket({ count: 4 }), userBucket({ count: 4, firstCount: 4 })] });
+      const [one] = await store.listBuckets(station, 0, 99999999);
+      const [user] = await store.listBuckets(station, 0, 99999999, { table: "user" });
+      assert.deepEqual([one.count, one.sampled, user.count, user.firstCount, user.sampled], [104, 1, 104, 94, 1]);
+    });
+
+    await t.test("latestSlot：这个站点最近一个有数的小时（渠道桶），没有桶是 null；别的站点不算", async () => {
+      const a = id("l"), b = id("m");
+      await store.startCursor(a, 0); await store.startCursor(b, 0);
+      assert.equal(await store.latestSlot(a), null);
+      await store.applyWindow(a, { fromMs: 0, toMs: 1, buckets: [bucket({ slotMs: 3600000 }), bucket({ slotMs: 3 * 3600000 }), bucket({ slotMs: 2 * 3600000 })] });
+      await store.applyWindow(b, { fromMs: 0, toMs: 1, buckets: [bucket({ slotMs: 9 * 3600000 })] });
+      assert.equal(await store.latestSlot(a), 3 * 3600000);
     });
 
     await t.test("别的站点、别的小时的桶分开；按小时范围读；清理只删早的", async () => {

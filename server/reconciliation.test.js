@@ -8488,7 +8488,7 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
 // ---- 模型供需第 1 步：错误日志（type=5）跟着整站日志读 ----
 test("错误日志计数跟着轮询读：设置里「读取错误日志」默认开、关着一个请求都不发；用户站没打开错误日志（0 条）一切正常；只存次数；和「算应付成本」两个开关各管各的", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
-  const yesterdayStart = Date.parse("2026-10-07T16:00:00Z") / 1000;
+  const startedAt = now;
   resetOwnRequestBudget();
   const ownLogStore = new MemoryOwnLogStore(), ownErrorStore = new MemoryOwnLogStore(ERROR_SPEC);
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000, ownLogStore, ownErrorStore, ownLogIngest: true } });
@@ -8499,10 +8499,13 @@ test("错误日志计数跟着轮询读：设置里「读取错误日志」默�
   // 用户站没打开错误日志：一条都没有。默认开（settings 里没有 ownErrorLog），整站消费日志的开关关着也照读（两个开关各管各的）
   f.rt.store.settings = { expectedCost: false };
   await f.module.refreshDue(now);
-  assert.ok(errorReads() > 0 && errorReads() <= 6, `落后 35 小时：错误日志每轮最多 6 页，读了 ${errorReads()}`);
+  assert.equal(errorReads(), 0, "第一次只从现在往后读：不补过去，落后不到 5 分钟也不读");
   const cursor = await ownErrorStore.getCursor("own");
-  assert.equal(cursor.coveredFromMs, yesterdayStart * 1000, "从昨天 0 点起");
-  assert.ok(cursor.coveredToMs > cursor.coveredFromMs, "0 条也往前走");
+  assert.equal(cursor.coveredFromMs, startedAt - 120000, "从 现在−120 秒 起");
+  now += 6 * 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.ok(errorReads() > 0 && errorReads() <= 2, `满 5 分钟读第一个窗口：${errorReads()} 个请求`);
+  assert.ok((await ownErrorStore.getCursor("own")).coveredToMs > cursor.coveredToMs, "0 条也往前走");
   assert.deepEqual(await f.module.ownErrorBuckets("own", 0, Number.MAX_SAFE_INTEGER), [], "用户站没记错误日志：没有桶");
   assert.equal(await ownLogStore.getCursor("own"), null, "整站消费日志关着没读");
   // 关着：一个请求都不发
@@ -8515,8 +8518,8 @@ test("错误日志计数跟着轮询读：设置里「读取错误日志」默�
   // 打开：关着那段不补，进度挪到昨天 0 点（已经比它新，就不动）；接着读，读到的只存次数
   f.rt.store.settings = { expectedCost: false, ownErrorLog: true, ownErrorLogWasOff: true };
   f.state.errorLogs = [
-    { id: 1, created_at: now / 1000 - 3 * 3600, channel: 1, model_name: "m", group: "g", username: "alice", token_name: "secret-key", content: "用户的内容 sk-xxxx", other: JSON.stringify({ status_code: 429, error_code: "bad_response_status_code", admin_info: { use_channel: ["1"] } }) },
-    { id: 2, created_at: now / 1000 - 3 * 3600, channel: 2, model_name: "m", group: "g", username: "bob", token_name: "k2", content: "x", other: JSON.stringify({ status_code: 503, admin_info: { use_channel: ["1", "2"] } }) },
+    { id: 1, created_at: startedAt / 1000 + 600, channel: 1, model_name: "m", group: "g", username: "alice", token_name: "secret-key", content: "用户的内容 sk-xxxx", other: JSON.stringify({ status_code: 429, error_code: "bad_response_status_code", admin_info: { use_channel: ["1"] } }) },
+    { id: 2, created_at: startedAt / 1000 + 600, channel: 2, model_name: "m", group: "g", username: "bob", token_name: "k2", content: "x", other: JSON.stringify({ status_code: 503, admin_info: { use_channel: ["1", "2"] } }) },
   ];
   for (let i = 0; i < 40; i += 1) { now += 5 * 60000; resetOwnRequestBudget(); await f.module.refreshDue(now); }
   assert.equal(f.rt.store.settings.ownErrorLogWasOff, false, "判断过了，标记清掉");

@@ -362,34 +362,62 @@ const errorReads = (requests) => requests.filter((r) => r.path === "/api/log/");
 const total = (buckets) => buckets.reduce((sum, bucket) => sum + bucket.count, 0);
 const wholeSecondMs = (ms) => Math.floor(ms / 1000) * 1000;
 
-test("错误日志：读 type=5，按原因、状态码、第几次尝试分桶；不读管理员名单；第一次从昨天 0 点起；消费日志的进度和桶不受影响", async (t) => {
+// 漏了好几天（停机、站点读不到）才追：测试里直接把进度放在昨天 0 点，模拟「落后 35 小时」；第一次启动是从现在往后读，见下面「第一次只从现在往后读」
+const startBehind = async (store, fromMs = YESTERDAY_START) => store.startCursor("own", fromMs, NOW);
+const catchUp = async (ingest, own, { rounds = 200, each } = {}) => {
+  for (let i = 0; i < rounds; i += 1) { resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); each?.(r); if (r.skipped === "caught-up") return i + 1; }
+  throw new Error("追不平");
+};
+const sameHour = (r) => Math.floor(r.start / 3600) === Math.floor(r.end / 3600);
+
+test("错误日志：读 type=5，按原因、状态码、第几次尝试分桶；不读管理员名单；窗口最长 5 分钟、不跨小时；消费日志的进度和桶不受影响", async (t) => {
   resetOwnRequestBudget();
   const logs = [];
   logs.push(errRow(1, YESTERDAY_START + 3600000), errRow(2, YESTERDAY_START + 3600000 + 1000, {}, { status_code: 503, admin_info: { use_channel: ["1", "2"] } }), errRow(3, YESTERDAY_START + 7200000, { channel: 2 }, { status_code: 502, admin_info: { use_channel: ["2"] } }));
   logs.push(row(10, YESTERDAY_START + 3600000)); // 一条消费日志：错误日志那条流水线不该读到
   const { own, rt, requests } = await fakeSite(t, logs);
   const store = new MemoryOwnLogStore(ERROR_SPEC), consumeStore = new MemoryOwnLogStore();
+  await startBehind(store);
   const ingest = errorIngest(rt, store, () => NOW);
-  for (let i = 0; i < 60; i += 1) { resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); if (r.skipped === "caught-up") break; }
+  await catchUp(ingest, own);
   assert.ok(errorReads(requests).length > 0 && errorReads(requests).every((r) => r.type === "5"), "每个请求都带 type=5");
   assert.equal(requests.filter((r) => r.path === "/api/user/").length, 0, "错误日志不分管理员，不读用户列表");
-  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START, "从昨天 0 点起");
+  assert.ok(errorReads(requests).every((r) => (r.end - r.start + 1) * 1000 <= ERROR_KIND.limits.windowMaxMs && sameHour(r)), "窗口不超过 5 分钟、不跨小时");
+  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START);
   assert.equal((await store.getCursor("own")).coveredToMs, NOW - INGEST.LAG_MS);
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
-  assert.deepEqual(buckets.map((b) => [b.channelId, b.reason, b.status, b.attempt, b.count]).sort(), [[1, "rate_limit", 429, 1, 1], [1, "upstream", 503, 2, 1], [2, "upstream", 502, 1, 1]]);
+  assert.deepEqual(buckets.map((b) => [b.channelId, b.reason, b.status, b.attempt, b.count, b.sampled]).sort(), [[1, "rate_limit", 429, 1, 1, 0], [1, "upstream", 503, 2, 1, 0], [2, "upstream", 502, 1, 1, 0]], "条数少于 300 的窗口读全了，是实数（sampled 0）");
   assert.ok(buckets.every((b) => b.slotMs % 3600000 === 0 && b.model === "m" && b.group === "g"));
   assert.equal(await consumeStore.getCursor("own"), null, "另一份进度，消费日志的不动");
-  assert.deepEqual(Object.keys(buckets[0]).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "retryable", "slotMs", "status", "table"], "只有次数，没有用户名、令牌名、原文");
+  assert.deepEqual(Object.keys(buckets[0]).sort(), ["attempt", "channelId", "count", "group", "model", "reason", "retryable", "sampled", "slotMs", "status", "table"], "只有次数，没有用户名、令牌名、原文");
   // 用户桶：日志里的 user_id（夹具里没写，记 0）；前两条在同一个小时（429 第 1 次、503 第 2 次），第三条在下一个小时（502 第 1 次）
   const userBuckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER, { table: "user" });
   assert.deepEqual(userBuckets.map((b) => [b.userId, b.model, b.reason, b.count, b.firstCount]).sort(), [[0, "m", "rate_limit", 1, 1], [0, "m", "upstream", 1, 0], [0, "m", "upstream", 1, 1]]);
 });
 
+test("第一次只从现在往后读：没有进度时进度从 现在−120 秒 起，不补过去的日志（站点里再老的错误也不读），第一轮一个请求都不发；满 5 分钟才读第一个窗口", async (t) => {
+  resetOwnRequestBudget();
+  let now = NOW;
+  const { own, rt, requests } = await fakeSite(t, [errRow(1, YESTERDAY_START + 3600000), errRow(2, NOW - 3600000), errRow(3, NOW + 60000)]);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  const ingest = errorIngest(rt, store, () => now);
+  const first = await ingest.ingestOnce(own);
+  assert.equal(first.skipped, "caught-up");
+  assert.equal(errorReads(requests).length, 0, "第一轮不发请求");
+  const cursor = await store.getCursor("own");
+  assert.equal(cursor.coveredFromMs, wholeSecondMs(NOW - INGEST.LAG_MS));
+  assert.equal(cursor.coveredToMs, cursor.coveredFromMs);
+  now += 5 * 60000; resetOwnRequestBudget();
+  assert.ok(!(await ingest.ingestOnce(own)).skipped);
+  assert.deepEqual((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).map((b) => b.count), [1], "只读到启动以后的那一条");
+  assert.ok(errorReads(requests).every((r) => r.start * 1000 >= wholeSecondMs(NOW - INGEST.LAG_MS)), "没有一个请求从启动以前开始");
+});
+
 test("错误日志：暂存和桶里不留错误原文、用户名、令牌名（读到一半停下时看暂存）", async (t) => {
   resetOwnRequestBudget();
-  // 落后不到 1 小时（每轮 3 页）：最近 40 分钟的 20 分钟里每秒 3 条（3600 条），一个窗口一轮读不完时暂存里留着没读完的窗口
+  // 落后不到 1 小时（每轮 3 页）：第一个 5 分钟窗口是空的（1 页），第二个窗口每秒 3 条（900 条）要读 3 页，这一轮只剩 2 页：停在窗口中间，暂存里留着没读完的窗口
   const start = NOW - 40 * 60000, logs = []; let id = 1;
-  for (let at = start; at < start + 1200000; at += 1000) for (let k = 0; k < 3; k += 1) logs.push(errRow(id++, at));
+  for (let at = start + 300000; at < start + 600000; at += 1000) for (let k = 0; k < 3; k += 1) logs.push(errRow(id++, at));
   const { own, rt } = await fakeSite(t, logs);
   const store = new MemoryOwnLogStore(ERROR_SPEC);
   await store.startCursor("own", wholeSecondMs(start), NOW);
@@ -401,16 +429,18 @@ test("错误日志：暂存和桶里不留错误原文、用户名、令牌名�
   for (const secret of ["alice", "secret-key", "sk-xxxx", "用户的内容"]) assert.ok(!text.includes(secret), `暂存和桶里不能有 ${secret}`);
 });
 
-test("错误日志每轮页数更少：落后 1 小时内最多 3 页、落后更多最多 6 页；窗口最大 15 分钟；落后不到 5 分钟又没有读到一半的窗口就不发请求；追平以后每 5 分钟才读一次", async (t) => {
+test("错误日志每轮页数更少：落后 1 小时内最多 3 页、落后更多最多 6 页；窗口最长 5 分钟；落后不到 5 分钟又没有读到一半的窗口就不发请求；追平以后每 5 分钟才读一次", async (t) => {
   resetOwnRequestBudget();
   const logs = []; let id = 1;
   for (let at = YESTERDAY_START; at < NOW; at += 600000) logs.push(errRow(id++, at));
   let now = NOW;
   const { own, rt, requests } = await fakeSite(t, logs);
   const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await startBehind(store);
   const ingest = errorIngest(rt, store, () => now);
+  resetOwnRequestBudget();
   const first = await ingest.ingestOnce(own);
-  assert.ok(first.pages > ERROR_KIND.limits.pagesPerRound && first.pages <= ERROR_KIND.limits.pagesBehind, `落后 35 小时：最多 6 页：${first.pages}`);
+  assert.equal(first.pages, ERROR_KIND.limits.pagesBehind, `落后 35 小时：最多 6 页：${first.pages}`);
   let rounds = 1;
   for (; rounds < 200; rounds += 1) {
     const behind = now - INGEST.LAG_MS - (await store.getCursor("own")).coveredToMs;
@@ -419,38 +449,40 @@ test("错误日志每轮页数更少：落后 1 小时内最多 3 页、落后�
     if (r.skipped === "caught-up") break;
     assert.ok((r.pages || 0) <= (behind > INGEST.BEHIND_MS ? ERROR_KIND.limits.pagesBehind : ERROR_KIND.limits.pagesPerRound), `这轮 ${r.pages} 页，落后 ${Math.round(behind / 60000)} 分钟`);
   }
-  assert.ok(errorReads(requests).every((r) => (r.end - r.start + 1) * 1000 <= ERROR_KIND.limits.windowMaxMs), "窗口不超过 15 分钟（窗口里 COUNT 要扫这段时间的全部日志）");
-  assert.equal(ingest.windowSizes.get("own"), ERROR_KIND.limits.windowMaxMs);
+  assert.ok(errorReads(requests).every((r) => (r.end - r.start + 1) * 1000 <= ERROR_KIND.limits.windowMaxMs && sameHour(r)), "窗口不超过 5 分钟、不跨小时（窗口里 COUNT 要扫这段时间的全部日志）");
+  assert.equal(ERROR_KIND.limits.windowMaxMs, 5 * 60000);
   assert.equal(total(await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)), logs.filter((log) => log.created_at <= Math.floor((now - INGEST.LAG_MS) / 1000) - 1).length, "每条进且只进一次");
-  // 追平了：之后每分钟轮询一次，落后不到 5 分钟都不发请求；满 5 分钟读一次
+  // 追平了：之后每分钟轮询一次，落后不到 5 分钟都不发请求；满 5 分钟读一次（跨整点时窗口按整点切，这一次是 2 个窗口）
   const before = errorReads(requests).length;
   for (let minute = 1; minute <= 4; minute += 1) { now += 60000; resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); assert.equal(r.skipped, "caught-up", `第 ${minute} 分钟`); }
   assert.equal(errorReads(requests).length, before, "不到 5 分钟一个请求都不发");
   now += 60000; resetOwnRequestBudget();
   const r5 = await ingest.ingestOnce(own);
-  assert.ok(!r5.skipped && r5.pages === 1, "满 5 分钟读一次，只用 1 页");
-  assert.equal(errorReads(requests).length, before + 1);
+  assert.ok(!r5.skipped && r5.pages >= 1 && r5.pages <= 2, `满 5 分钟读一次：${r5.pages} 页（跨整点时 2 页）`);
+  assert.equal(errorReads(requests).length, before + r5.pages);
 });
 
-test("用户站没开错误日志（读到 0 条）：照常往前走、没有桶、请求很少（窗口长到 15 分钟）；追平以后每 5 分钟 1 个请求", async (t) => {
+test("用户站没开错误日志（读到 0 条）：照常往前走、没有桶；落后 35 小时一次性追平也只 420 个请求（每个窗口 1 个）；追平以后每 5 分钟 1 个请求", async (t) => {
   resetOwnRequestBudget();
   let now = NOW;
   const { own, rt, requests } = await fakeSite(t, [row(1, YESTERDAY_START + 3600000)]); // 只有消费日志，没有错误日志
   const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await startBehind(store);
   const ingest = errorIngest(rt, store, () => now);
-  for (let i = 0; i < 100; i += 1) { resetOwnRequestBudget(); const r = await ingest.ingestOnce(own); assert.ok(!r.error, r.error); if (r.skipped === "caught-up") break; }
+  await catchUp(ingest, own, { each: (r) => assert.ok(!r.error, r.error) });
   assert.equal((await store.getCursor("own")).coveredToMs, now - INGEST.LAG_MS);
   assert.deepEqual(await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER), []);
-  // 35 小时 ÷ 15 分钟 = 140 个窗口，加上起步时 5、10 分钟的窗口，不会超过 150 个请求（一次性）
-  assert.ok(errorReads(requests).length <= 150, `读了 ${errorReads(requests).length} 个请求`);
+  // 35 小时 ÷ 5 分钟 = 420 个窗口，每个 1 个请求（空窗口也是 1 页）
+  assert.ok(errorReads(requests).length >= 420 && errorReads(requests).length <= 422, `读了 ${errorReads(requests).length} 个请求`);
   const before = errorReads(requests).length;
   for (let minute = 1; minute <= 30; minute += 1) { now += 60000; resetOwnRequestBudget(); await ingest.ingestOnce(own); }
-  assert.ok(errorReads(requests).length - before <= 6 && errorReads(requests).length - before >= 5, `追平以后 30 分钟只读 5～6 次：${errorReads(requests).length - before}`);
+  assert.ok(errorReads(requests).length - before <= 7 && errorReads(requests).length - before >= 5, `追平以后 30 分钟只读 5～7 次（跨整点多一个窗口）：${errorReads(requests).length - before}`);
 });
 
-test("错误日志续采、去重、限页：一个密集的窗口（5 秒内 700 条，同一秒几十条）一轮读不完，下一轮从暂存接着读；窗口超过 3 页就对半切；每条只进一次桶", async (t) => {
+test("错误日志采样：一个窗口最多读 3 页（300 条）当样本，总条数用请求自带的 total，样本里「渠道 × 模型 × 原因 × 状态码 × 第几次」的比例摊到 total 上，桶标成估算；读到一半停下下一轮接着读；每条只算一次", async (t) => {
   resetOwnRequestBudget();
-  // 落后不到 1 小时（每轮 3 页）：最近 40 分钟里，第 5 分钟起 10 秒每秒 70 条（700 条，同一秒的 70 条各有各的 id），前后各有零星几条
+  // 落后不到 1 小时（每轮 3 页）：第 1 个 5 分钟窗口只有 1 条（1 页）；第 2 个窗口 10 秒里每秒 70 条（700 条，同一秒的 70 条各有各的 id，429 和 503 各一半）：
+  // 这一轮只剩 2 页，停在窗口中间，下一轮读第 3 页；后面再有零星 1 条
   const start = NOW - 40 * 60000, logs = []; let id = 1;
   logs.push(errRow(id++, start + 1000));
   for (let at = start + 300000; at < start + 310000; at += 1000) for (let k = 0; k < 70; k += 1) logs.push(errRow(id++, at, {}, k % 2 ? { status_code: 503 } : {}));
@@ -459,22 +491,44 @@ test("错误日志续采、去重、限页：一个密集的窗口（5 秒内 70
   const store = new MemoryOwnLogStore(ERROR_SPEC);
   await store.startCursor("own", wholeSecondMs(start), NOW);
   const ingest = errorIngest(rt, store, () => NOW);
-  let maxPages = 0, resumed = 0;
-  for (let i = 0; i < 200; i += 1) {
-    resetOwnRequestBudget();
-    const r = await ingest.ingestOnce(own);
-    maxPages = Math.max(maxPages, r.pages || 0);
-    if ((await store.getPending("own"))?.nextPage > 1) resumed += 1;
-    if (r.skipped === "caught-up") break;
-  }
-  assert.ok(maxPages <= ERROR_KIND.limits.pagesPerRound, `落后不到 1 小时每轮最多 3 页：${maxPages}`);
-  assert.ok(resumed > 0, "有过读到一半、下一轮接着读的窗口（5 秒的窗口也有 4 页，一轮只读 3 页）");
+  let maxPages = 0;
+  await catchUp(ingest, own, { each: async (r) => { maxPages = Math.max(maxPages, r.pages || 0); } });
   const perWindow = new Map();
-  for (const r of errorReads(requests)) perWindow.set(`${r.start}-${r.end}`, { pages: Math.max(perWindow.get(`${r.start}-${r.end}`)?.pages || 0, r.p), seconds: r.end - r.start + 1 });
-  assert.ok([...perWindow.values()].every((w) => w.pages <= INGEST.PAGES_PER_WINDOW || w.seconds <= INGEST.WINDOW_MIN_MS / 1000), "窗口超过 3 页就切小，只有切到 5 秒不能再小的才会超过");
+  for (const r of errorReads(requests)) perWindow.set(`${r.start}-${r.end}`, Math.max(perWindow.get(`${r.start}-${r.end}`) || 0, r.p));
+  assert.ok(maxPages <= ERROR_KIND.limits.pagesPerRound, `落后不到 1 小时每轮最多 3 页：${maxPages}`);
+  assert.ok([...perWindow.values()].every((pages) => pages <= INGEST.PAGES_PER_WINDOW), "每个窗口最多读 3 页，没有第 4 页，窗口也没有被切小");
+  assert.equal(Math.max(...[...perWindow.values()]), 3);
+  assert.ok(errorReads(requests).every((r) => (r.end - r.start + 1) * 1000 <= 300000), "窗口没被切小，也没被放大");
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
-  assert.equal(total(buckets), logs.length, "同一秒的几十条各算各的，每条只进一次（续读不重不漏）");
-  assert.deepEqual([buckets.filter((b) => b.status === 429).reduce((sum, b) => sum + b.count, 0), buckets.filter((b) => b.status === 503).reduce((sum, b) => sum + b.count, 0)], [352, 350]);
+  assert.equal(total(buckets), logs.length, "摊完以后加起来正好是窗口的总条数（含样本没读到的）：每条只算一次（续读不重不漏）");
+  const by = (status) => buckets.filter((b) => b.status === status).reduce((sum, b) => sum + b.count, 0);
+  assert.deepEqual([by(429), by(503)], [352, 350], "样本里 429 和 503 各一半，摊回 700 条：350 + 350，加上两条零星的 429");
+  assert.ok(buckets.some((b) => b.sampled > 0), "摊过的桶标成估算");
+  const sampledCount = buckets.filter((b) => b.sampled > 0).reduce((sum, b) => sum + b.count, 0);
+  assert.ok(sampledCount >= 700, "估算的桶装的是那 700 条");
+  // 用户桶也是摊过的：user_id 夹具里没写记 0，一共 702 条、第 1 次尝试 702 条
+  const userBuckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER, { table: "user" });
+  assert.equal(userBuckets.reduce((sum, b) => sum + b.count, 0), logs.length);
+  assert.equal(userBuckets.reduce((sum, b) => sum + b.firstCount, 0), logs.length);
+  assert.ok(userBuckets.some((b) => b.sampled > 0));
+});
+
+test("错误日志采样：窗口里不到 300 条（样本读全了）是实数；刚好 300 条也是实数；301 条就按样本摊成估算", async (t) => {
+  resetOwnRequestBudget();
+  const start = NOW - 30 * 60000, logs = []; let id = 1;
+  for (let k = 0; k < 250; k += 1) logs.push(errRow(id++, start + 1000 + k)); // 窗口 1：250 条
+  for (let k = 0; k < 300; k += 1) logs.push(errRow(id++, start + 301000 + k * 100, {}, { status_code: 503 })); // 窗口 2：刚好 300 条
+  for (let k = 0; k < 301; k += 1) logs.push(errRow(id++, start + 601000 + k * 100, {}, { status_code: 502 })); // 窗口 3：301 条
+  const { own, rt } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await store.startCursor("own", wholeSecondMs(start), NOW);
+  const ingest = errorIngest(rt, store, () => NOW);
+  await catchUp(ingest, own);
+  const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
+  const of = (status) => buckets.find((b) => b.status === status);
+  assert.deepEqual([of(429).count, of(429).sampled], [250, 0]);
+  assert.deepEqual([of(503).count, of(503).sampled], [300, 0], "刚好 3 页读全了：实数");
+  assert.deepEqual([of(502).count, of(502).sampled], [301, 1], "301 条只读了 300 条样本：摊回 301，标估算");
 });
 
 test("错误日志共用请求额度和断路：额度被别的读取用掉时只走保底、断路期间一个请求都不发；断路好了接着读；出事的窗口下一轮从同一处接着读", async (t) => {
@@ -483,6 +537,7 @@ test("错误日志共用请求额度和断路：额度被别的读取用掉时�
   let fail = null;
   const { own, rt, requests } = await fakeSite(t, logs, { failAt: () => fail });
   const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await startBehind(store);
   const ingest = errorIngest(rt, store, () => NOW);
   for (let i = 0; i < OWN_RATE_LIMIT - INGEST_RESERVE; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 200, elapsedMs: 10, now: NOW });
   const starved = await ingest.ingestOnce(own);
@@ -500,21 +555,23 @@ test("错误日志共用请求额度和断路：额度被别的读取用掉时�
   assert.ok((await ingest.ingestOnce(own)).windows >= 1, "恢复后接着读");
 });
 
-test("上游大面积出错（每秒 50 条）：每轮最多 3 页、落后超过 1 小时最多 6 页，宁可落后也不多读", async (t) => {
+test("上游大面积出错（每秒 50 条）：一个窗口只读 3 页样本、总数摊上去，进度不会被一场事故拖在原地；每轮最多 6 页", async (t) => {
   resetOwnRequestBudget();
-  // 昨天 0 点起 5 分钟里每秒 50 条 = 15000 条（150 页）
+  // 昨天 0 点起 5 分钟里每秒 50 条 = 15000 条（150 页）：只读 3 页，总数用 total（15000）
   const logs = []; let id = 1;
   for (let at = YESTERDAY_START; at < YESTERDAY_START + 300000; at += 1000) for (let k = 0; k < 50; k += 1) logs.push(errRow(id++, at, {}, { status_code: 529 }));
   const { own, rt, requests } = await fakeSite(t, logs);
   const store = new MemoryOwnLogStore(ERROR_SPEC);
+  await startBehind(store);
   const ingest = errorIngest(rt, store, () => NOW);
   const perRound = [];
-  for (let i = 0; i < 12; i += 1) { resetOwnRequestBudget(); perRound.push((await ingest.ingestOnce(own)).pages || 0); }
+  await catchUp(ingest, own, { each: (r) => perRound.push(r.pages || 0) });
   assert.ok(perRound.every((pages) => pages <= ERROR_KIND.limits.pagesBehind), `每轮页数：${perRound.join(",")}`);
-  assert.ok(errorReads(requests).length <= 12 * ERROR_KIND.limits.pagesBehind);
+  assert.ok(Math.max(...errorReads(requests).filter((r) => r.start === YESTERDAY_START / 1000).map((r) => r.p)) === 3, "事故的那个窗口只读 3 页");
+  assert.equal((await store.getCursor("own")).coveredToMs, NOW - INGEST.LAG_MS, "追平了，没有被拖在原地");
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
-  assert.ok(buckets.every((b) => b.reason === "upstream" && b.status === 529), "529 是上游故障");
-  assert.ok(total(buckets) < logs.length, "12 轮读不完 150 页：落后了，没有多读");
+  assert.ok(buckets.every((b) => b.reason === "upstream" && b.status === 529 && b.sampled === 1), "529 是上游故障、估算");
+  assert.equal(total(buckets), logs.length, "摊上去的总数正好是 15000");
 });
 
 test("错误日志清理 35 天前的桶；关→开传 justTurnedOn：进度比昨天 0 点还旧就挪到昨天 0 点，桶不删", async (t) => {
@@ -593,8 +650,9 @@ test("错误日志的「能不能重试」跟着站点的重试范围走：读�
     resetOwnRequestBudget();
     const site = await fakeSite(t, logs, { options });
     const store = new MemoryOwnLogStore(ERROR_SPEC);
+    await startBehind(store);
     const ingest = errorIngest(site.rt, store, () => NOW);
-    for (let i = 0; i < 60; i += 1) { resetOwnRequestBudget(); if ((await ingest.ingestOnce(site.own)).skipped === "caught-up") break; }
+    await catchUp(ingest, site.own);
     return (await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).map((b) => [b.status, b.retryable]).sort();
   };
   assert.deepEqual(await run(optionsReply(retryOptions(3, "429"))), [[429, 1], [503, 0]], "站点只重试 429：503 不能重试");
@@ -606,7 +664,7 @@ test("错误日志的「能不能重试」跟着站点的重试范围走：读�
 test("重试设置变了（口径指纹变了）：这一窗口没读完的暂存丢掉，下一轮从同一处重读", async (t) => {
   resetOwnRequestBudget();
   const start = NOW - 40 * 60000, logs = []; let id = 1;
-  for (let at = start; at < start + 300000; at += 1000) for (let k = 0; k < 5; k += 1) logs.push(errRow(id++, at, {}, { status_code: 503 }));
+  for (let at = start + 300000; at < start + 600000; at += 1000) for (let k = 0; k < 5; k += 1) logs.push(errRow(id++, at, {}, { status_code: 503 }));
   let ranges = "429,500-599";
   const { own, rt } = await fakeSite(t, logs, { options: (send) => send(200, { success: true, data: retryOptions(3, ranges) }) });
   const store = new MemoryOwnLogStore(ERROR_SPEC);
@@ -620,9 +678,9 @@ test("重试设置变了（口径指纹变了）：这一窗口没读完的暂�
   const changed = await ingest.ingestOnce(own);
   assert.equal(changed.error, "pending-classification-changed");
   assert.equal(await store.getPending("own"), null, "没读完的暂存丢了");
-  for (let i = 0; i < 80; i += 1) { resetOwnRequestBudget(); if ((await ingest.ingestOnce(own)).skipped === "caught-up") break; }
+  await catchUp(ingest, own, { rounds: 80 });
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
-  assert.equal(total(buckets), logs.length, "重读以后每条只进一次");
+  assert.equal(total(buckets), logs.length, "重读以后每条只进一次（窗口里 1500 条，读 300 条样本摊回 1500）");
   const olderRows = logs.filter((log) => log.created_at * 1000 < partial.fromMs).length;
   assert.equal(buckets.filter((b) => b.retryable === 1).reduce((sum, b) => sum + b.count, 0), olderRows, "口径变之前已经读完入桶的窗口留着旧口径，没读完的窗口全按新口径（503 不能重试）重读");
   assert.ok(buckets.some((b) => b.retryable === 0));

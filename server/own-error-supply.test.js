@@ -5,8 +5,8 @@ import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { channelUpstreamMap, dedupeChannels, estimateFinalFailures, queryErrorSupply, queryRejectedUsers, wallHourOf } from "./own-error-supply.js";
 
 const H = 3600000;
-const errorBucket = (slotMs, extra = {}) => ({ table: "channel", slotMs, channelId: 1, model: "gpt-4o", group: "g", reason: "rate_limit", status: 429, attempt: 1, retryable: 1, count: 1, ...extra });
-const userBucket = (slotMs, extra = {}) => ({ table: "user", slotMs, userId: 7, model: "gpt-4o", reason: "rate_limit", count: 1, firstCount: 1, ...extra });
+const errorBucket = (slotMs, extra = {}) => ({ table: "channel", slotMs, channelId: 1, model: "gpt-4o", group: "g", reason: "rate_limit", status: 429, attempt: 1, retryable: 1, count: 1, sampled: 0, ...extra });
+const userBucket = (slotMs, extra = {}) => ({ table: "user", slotMs, userId: 7, model: "gpt-4o", reason: "rate_limit", count: 1, firstCount: 1, sampled: 0, ...extra });
 const consumeBucket = (slotMs, extra = {}) => ({ slotMs, channelId: 1, model: "gpt-4o", upstreamModel: "", group: "g", semantic: "openai", requests: 10, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 0, adminQuota: 0, testQuota: 0, ...extra });
 const attempts = (retryable = {}, nonRetryable = {}) => ({ retryable: Array.from({ length: 10 }, (_, i) => retryable[i + 1] || 0), nonRetryable: Array.from({ length: 10 }, (_, i) => nonRetryable[i + 1] || 0) });
 
@@ -16,13 +16,13 @@ async function seeded() {
   await errors.applyWindow("own", { fromMs: 0, toMs: 50 * H, buckets: [
     errorBucket(10 * H, { count: 4 }),                                              // gpt-4o 渠道 1：429 第 1 次 4 条
     errorBucket(10 * H, { attempt: 2, count: 3 }),                                  // 重试后又被拒 3 次（第 2 次）
-    errorBucket(10 * H, { reason: "upstream", status: 503, count: 2 }),             // 503 第 1 次 2 条
+    errorBucket(10 * H, { reason: "upstream", status: 503, count: 2, sampled: 1 }),  // 503 第 1 次 2 条（这个桶里有一个窗口是按样本估的）
     errorBucket(10 * H, { channelId: 2, attempt: 3, count: 1, reason: "upstream", status: 503 }), // 渠道 2 上第 3 次尝试被拒 1 条
     errorBucket(11 * H, { channelId: 2, model: "claude", reason: "auth_quota", status: 402, count: 5 }),
     errorBucket(11 * H, { channelId: 9, model: "claude", reason: "upstream", status: 529, count: 1 }), // 渠道 9 没有绑定
     errorBucket(11 * H, { channelId: 2, model: "claude", reason: "bad_request", status: 400, retryable: 0, count: 2 }), // 400 不能重试：第 1 次就是最终失败
     errorBucket(30 * H, { count: 100 }),                                            // 范围之外
-    userBucket(10 * H, { count: 7, firstCount: 4 }), userBucket(10 * H, { userId: 8, count: 2, firstCount: 2 }), userBucket(11 * H, { model: "claude", reason: "auth_quota", count: 5, firstCount: 5 }),
+    userBucket(10 * H, { count: 7, firstCount: 4, sampled: 1 }), userBucket(10 * H, { userId: 8, count: 2, firstCount: 2 }), userBucket(11 * H, { model: "claude", reason: "auth_quota", count: 5, firstCount: 5 }),
     userBucket(10 * H, { userId: 9, model: "other", count: 50, firstCount: 50 }), userBucket(30 * H, { count: 999, firstCount: 999 }),
   ] });
   await consume.applyWindow("own", { fromMs: 0, toMs: 50 * H, buckets: [
@@ -77,8 +77,8 @@ test("渠道 × 模型 × 小时拼起来：成交、被拒（五类）、被拒
   const result = await queryErrorSupply({ errors, consume, stationId: "own", fromMs: 10 * H + 600000, toMs: 12 * H - 1, channelUpstream: channelUpstreamMap(rules, "own"), tz: "UTC" });
   assert.deepEqual([result.fromSlotMs, result.toSlotMs], [10 * H, 12 * H], "from 向下、to 向上取整点");
   const cell = (slotMs, channelId, model) => result.cells.find((item) => item.slotMs === slotMs && item.channelId === channelId && item.model === model);
-  assert.deepEqual(cell(10 * H, 1, "gpt-4o"), { slotMs: 10 * H, channelId: 1, model: "gpt-4o", rejected: { rate_limit: 7, upstream: 2, auth_quota: 0, bad_request: 0, other: 0, total: 9 }, rejectedRequests: 6, success: 45, attempts: attempts({ 1: 6, 2: 3 }) });
-  assert.deepEqual(cell(10 * H, 2, "gpt-4o"), { slotMs: 10 * H, channelId: 2, model: "gpt-4o", rejected: { rate_limit: 0, upstream: 1, auth_quota: 0, bad_request: 0, other: 0, total: 1 }, rejectedRequests: 0, success: 3, attempts: attempts({ 3: 1 }) }, "渠道 2 上只有第 3 次尝试被拒：前两次在别的渠道");
+  assert.deepEqual(cell(10 * H, 1, "gpt-4o"), { slotMs: 10 * H, channelId: 1, model: "gpt-4o", rejected: { rate_limit: 7, upstream: 2, auth_quota: 0, bad_request: 0, other: 0, total: 9 }, rejectedRequests: 6, success: 45, sampled: 1, attempts: attempts({ 1: 6, 2: 3 }) });
+  assert.deepEqual(cell(10 * H, 2, "gpt-4o"), { slotMs: 10 * H, channelId: 2, model: "gpt-4o", rejected: { rate_limit: 0, upstream: 1, auth_quota: 0, bad_request: 0, other: 0, total: 1 }, rejectedRequests: 0, success: 3, sampled: 0, attempts: attempts({ 3: 1 }) }, "渠道 2 上只有第 3 次尝试被拒：前两次在别的渠道");
   assert.deepEqual(cell(11 * H, 2, "claude").attempts, attempts({ 1: 5 }, { 1: 2 }), "400 不能重试，另记");
   assert.equal(cell(30 * H, 1, "gpt-4o"), undefined, "范围之外");
   assert.deepEqual(result.cells.map((item) => [item.slotMs, item.channelId, item.model]), [[10 * H, 1, "gpt-4o"], [10 * H, 2, "gpt-4o"], [11 * H, 2, "claude"], [11 * H, 9, "claude"]], "有数的格子才有，按小时、渠道、模型排");
@@ -94,8 +94,9 @@ test("汇总：按模型、按上游、按渠道（所有模型加起来、按�
   assert.deepEqual([known.total.rejectedRequests, known.total.success], [6 + 5 + 1 + 2 + 0, 40 + 5 + 3 + 7 + 2], "被拒过的请求只数第 1 次的条数；成功 = 消费桶的请求数");
   // gpt-4o 10 点：第 1 档 6、第 2 档 3、第 3 档 1（都能重试）；R=2 时 F = 第 3 档 1；最大档法也是第 3 档 1
   const gpt = (result) => result.byModel.find((item) => item.model === "gpt-4o");
+  const claude0 = (result) => result.byModel.find((item) => item.model === "claude").sampled;
   assert.deepEqual([gpt(known).finalFailures, gpt(unknown).finalFailures], [1, 1]);
-  assert.deepEqual([gpt(known).rejected.total, gpt(known).rejectedRequests, gpt(known).success], [10, 6, 48]);
+  assert.deepEqual([gpt(known).rejected.total, gpt(known).rejectedRequests, gpt(known).success, gpt(known).sampled, claude0(known)], [10, 6, 48, 1, 0], "有一个窗口是按样本估的：页面该写「约」");
   // claude 11 点：402 第 1 档 5（能重试：402 在默认范围里）、529 第 1 档 1、400 不能重试 2；R=2：F = 不能重试 2 + 第 3 档 0 = 2；最大档法：2 + 第 1 档能重试 6 = 8
   const claude = (result) => result.byModel.find((item) => item.model === "claude");
   assert.deepEqual([claude(known).finalFailures, claude(unknown).finalFailures], [2, 8], "读不到 R 时取最大档：这个小时只见到第 1 档，当成 R = 0，第 1 档的都算最终失败（下限的另一头：R 实际更大时会多算）");
@@ -108,7 +109,7 @@ test("汇总：按模型、按上游、按渠道（所有模型加起来、按�
   const channel = known.byChannel.find((item) => item.channelId === 2);
   assert.deepEqual([channel.ruleId, channel.upstreamStationId, channel.success, channel.rejected.total, channel.hours.map((hour) => [hour.slotMs, hour.success, hour.rejected.total])], ["r2", "up-b", 10, 8, [[10 * H, 3, 1], [11 * H, 7, 7]]]);
   assert.deepEqual(known.byChannel.map((item) => item.channelId), [1, 2, 9]);
-  assert.deepEqual(known.byChannel.find((item) => item.channelId === 9), { channelId: 9, ruleId: null, upstreamStationId: null, rejected: { rate_limit: 0, upstream: 1, auth_quota: 0, bad_request: 0, other: 0, total: 1 }, rejectedRequests: 1, success: 2, hours: [{ slotMs: 11 * H, rejected: { rate_limit: 0, upstream: 1, auth_quota: 0, bad_request: 0, other: 0, total: 1 }, rejectedRequests: 1, success: 2 }] });
+  assert.deepEqual(known.byChannel.find((item) => item.channelId === 9), { channelId: 9, ruleId: null, upstreamStationId: null, rejected: { rate_limit: 0, upstream: 1, auth_quota: 0, bad_request: 0, other: 0, total: 1 }, rejectedRequests: 1, success: 2, sampled: 0, hours: [{ slotMs: 11 * H, rejected: { rate_limit: 0, upstream: 1, auth_quota: 0, bad_request: 0, other: 0, total: 1 }, rejectedRequests: 1, success: 2, sampled: 0 }] });
   assert.deepEqual(known.byHour.map((item) => [item.slotMs, item.rejected.total, item.rejectedRequests, item.success, item.finalFailures]), [[10 * H, 10, 6, 48, 1], [11 * H, 8, 8, 9, 2]], "每个小时都有");
 });
 
@@ -162,8 +163,8 @@ test("谁被拒了：按用户 ID，被拒次数、被拒过的请求数（第 1
   const all = await queryRejectedUsers({ errors, stationId: "own", fromMs: 10 * H, toMs: 12 * H });
   assert.deepEqual(all.map((user) => [user.userId, user.rejected.total, user.rejectedRequests]), [[9, 50, 50], [7, 12, 9], [8, 2, 2]], "被拒多的在前");
   assert.deepEqual(all.find((user) => user.userId === 7).byModel, [
-    { model: "gpt-4o", rejected: { rate_limit: 7, upstream: 0, auth_quota: 0, bad_request: 0, other: 0, total: 7 }, rejectedRequests: 4 },
-    { model: "claude", rejected: { rate_limit: 0, upstream: 0, auth_quota: 5, bad_request: 0, other: 0, total: 5 }, rejectedRequests: 5 },
+    { model: "gpt-4o", rejected: { rate_limit: 7, upstream: 0, auth_quota: 0, bad_request: 0, other: 0, total: 7 }, rejectedRequests: 4, sampled: 1 },
+    { model: "claude", rejected: { rate_limit: 0, upstream: 0, auth_quota: 5, bad_request: 0, other: 0, total: 5 }, rejectedRequests: 5, sampled: 0 },
   ]);
   const claudeOnly = await queryRejectedUsers({ errors, stationId: "own", fromMs: 10 * H, toMs: 12 * H, models: ["claude"] });
   assert.deepEqual(claudeOnly.map((user) => [user.userId, user.rejected.total]), [[7, 5]]);

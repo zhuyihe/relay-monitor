@@ -57,6 +57,11 @@ export class MemoryOwnLogStore {
     if (!spec) throw new Error(`unknown bucket table: ${table}`);
     return [...this.tableBuckets.get(table).values()].filter((row) => row.station_id === stationId && row.slot_ms >= fromSlotMs && row.slot_ms < toSlotMs).map(spec.fromRow);
   }
+  async latestSlot(stationId) {
+    let latest = null;
+    for (const row of this.tableBuckets.get(this.spec.tables[0].name).values()) if (row.station_id === stationId && (latest == null || row.slot_ms > latest)) latest = row.slot_ms;
+    return latest;
+  }
   async pruneBuckets(beforeSlotMs, limit = 2000) {
     let n = 0;
     for (const into of this.tableBuckets.values()) {

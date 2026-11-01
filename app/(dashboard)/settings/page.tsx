@@ -156,6 +156,7 @@ export default function SettingsPage() {
     label: COPY.errorLog,
     save: async (v) => (await putSettings({ ownErrorLog: v })).ownErrorLog !== false,
   });
+  const [errorLogQuiet, setErrorLogQuiet] = useState(false);
   const [ownLogCoveredTo, setOwnLogCoveredTo] = useState<number | null>(null);
   // 保留天数：缩短时先预览会删多少，再由确认框明确同意不可恢复的删除；取消就回到原来的天数
   const retention = useAutoSave<number | null>(null, {
@@ -180,6 +181,7 @@ export default function SettingsPage() {
       expectedCost.sync(result.settings.expectedCost !== false);
       userOps.sync(result.settings.userOpsEnabled !== false);
       errorLog.sync(result.settings.ownErrorLog !== false);
+      setErrorLogQuiet(result.errorLogQuiet === true);
       setOwnLogCoveredTo(Number.isFinite(Number(result.ownLog?.coveredToMs)) ? Number(result.ownLog.coveredToMs) : null);
       retention.sync(days);
       setCustomRetention((custom) => custom || !isPreset(days));
@@ -558,6 +560,7 @@ export default function SettingsPage() {
                         />
                       </div>
                       <span className="jy-caption" id={`${ids.errorLog}-desc`}>{COPY.errorLogHint}</span>
+                      {errorLog.value && errorLogQuiet ? <span className="jy-caption">{COPY.errorLogQuiet}</span> : null}
                     </div>
                     <p className="jy-caption">
                       {COPY.lowLineMovedBefore}

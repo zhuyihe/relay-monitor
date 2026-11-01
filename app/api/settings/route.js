@@ -4,7 +4,8 @@
 import { withAuth, json } from "../../../lib/api.js";
 import { businessTimeZone } from "../../../lib/business-time.js";
 import { restartPolling, refreshAll } from "../../../server/refresh.js";
-import { OwnLogStore } from "../../../server/own-log-store.js";
+import { ERROR_SPEC, OwnLogStore } from "../../../server/own-log-store.js";
+import { errorLogQuiet } from "../../../server/own-log-ingest.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../lib/business-time.js";
 
 function parseRetentionDays(value) {
@@ -30,8 +31,17 @@ async function ownLogProgress(rt, now = Date.now()) {
   } catch { return null; }
 }
 
+// 「读取错误日志」下面那句提示用：连续 24 小时一条错误都没读到（可能自营站点没开 ERROR_LOG_ENABLED）；没有自营站点、没有进度、读不到是 false
+async function ownErrorLogQuiet(rt) {
+  try {
+    const own = rt.store.list?.().find((station) => station.isOwn && station.type === "newapi");
+    if (!own || !rt.pool || rt.store.settings?.ownErrorLog === false) return false;
+    return await errorLogQuiet(rt._ownErrorStore ||= new OwnLogStore(rt.pool, ERROR_SPEC), own.id);
+  } catch { return false; }
+}
+
 export const GET = withAuth(async (request, rt) => {
-  return json({ settings: rt.store.settings, history: await rt.history.getSummary(), tz: businessTimeZone(), secretsEncrypted: rt.store.secretsEncrypted, ownLog: await ownLogProgress(rt) });
+  return json({ settings: rt.store.settings, history: await rt.history.getSummary(), tz: businessTimeZone(), secretsEncrypted: rt.store.secretsEncrypted, ownLog: await ownLogProgress(rt), errorLogQuiet: await ownErrorLogQuiet(rt) });
 });
 
 export const PUT = withAuth(async (request, rt) => {
