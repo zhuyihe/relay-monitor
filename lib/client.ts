@@ -85,37 +85,15 @@ export type BatchResult = {
   retryInput: BatchRecoveryIntent;
 };
 export type RuleEditPreview = { previewId: string; groupId: string; expiresAtMs: number; existingRule?: any; basis: GroupBasis; preview: GroupPreview };
-export type ConfirmedHistoryWindow = { preset: string; startMs: number; endMs: number; timezone: string | null };
-export type ConfirmedHistoryBilling = {
-  state: "complete" | "partial" | "unavailable" | "pending" | null; quotaUnits: number | null; quotaPerUnit: number | null;
-  amountUsd: number | null; knownAmountUsd: number | null; countedAmountUsd: number | null;
-  successfulCount: number | null; expectedCount: number | null; observedAt: number | null; window: ConfirmedHistoryWindow;
-};
-export type ConfirmedHistoryRecord = {
-  historyId: string; confirmedAt: string; window: ConfirmedHistoryWindow; ownSource: OwnSource | null;
-  upstreamSource: { provider: string | null; baseUrl: string | null; accountId: string | null; tokenId: number | null; tokenName: string | null };
-  scopeVersion: number | null; scopeFingerprint: string | null; billingEffectiveFromMs: number | null; accountingStartMs: number | null; accountedToMs: number | null; channels: { channelId: number; name: string | null }[];
-  amountBasis: { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };
-  upstream: ConfirmedHistoryBilling; downstream: ConfirmedHistoryBilling & { channels: { channelId: number; name: string | null; billingState: string | null; quotaUnits: number | null; amountUsd: number | null; knownAmountUsd: number | null }[] };
-  calculation: { differenceUsd: number | null; profitUsd: number | null; riskDifferenceUsd: number | null; marginRate: number | null };
-  sourceCompleteness: "complete" | "legacy_partial";
-  // 结账账本：自然日、版本（重新结账 +1）、来源、结账时配置的汇率（没配置为 null）和成本计法。
-  // 迁移的旧账成本计法为 null：历史里按原记录（Key 用量）显示，当前核算按现在的配置算，与第 3b 阶段一致。
-  billDate?: string; revision?: number; settlementSource?: "settle" | "resettle" | "migrated";
-  settledRates?: { income: number | null; cost: number | null }; costBasis?: "usage" | "fixed" | null;
-};
-export type ConfirmedHistoryResponse = { ruleId: string; readOnly: true; records: ConfirmedHistoryRecord[]; nextCursor: string | null };
 // 金额默认按系统原值（USD）显示；自营站点和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
 // ---- 每日利润页（POST /api/reconciliation/profit、GET …/profit/detail；字段名照设计稿 daily-profit-a.md §9）----
 // 一行一天的小格：fixed 已固定 / reading 还在读取 / today 今天 / attention 需处理 / notStarted 还没开始算 / future 还没到
-export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" | "attention" | "notStarted" | "future"; gapUsd: number | null; gapState: "over" | "under" | "within" | null; reason: string | null; tokens: number | null;
+export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" | "attention" | "notStarted" | "future";
   // 这天的收入、上游成本、毛利（美元原币）：已固定的取账本，今天取这一行整段的数，其余是 null
   incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null;
   // 同一天的人民币数：已固定的天按那天结账时记下的汇率，今天按现在的汇率；没有汇率是 null
   incomeCny?: number | null; actualCostCny?: number | null };
-// 差额的状态：over / under 对不上（多扣 / 少扣）、within 门槛以内、today 明天出、reading 还在读取、uncomputable 算不了（reason 给原因）、attention 需处理、notStarted 还没开始算
-export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" | "none";
 // 一行（一个渠道）范围里用过的每把 Key（用户 10-30 定）：收入是读的时候分的（只有一把全归它；几把按原价用量比例；读不到倍率按成本比例），不存
 export type ProfitKeyRow = {
   tokenId: number; name: string;
@@ -143,10 +121,9 @@ export type ProfitRow = {
   // 今天这一格后台还没读到（还没轮到、读还在路上）：页面写「还在读取」，读到会自己补上；和「读不到」（notice UPSTREAM_COST_UNREAD_TODAY，真读过、读失败）不是一回事
   reading: boolean;
   // 一个渠道一行（rowKey `ch:<自营站点>:<渠道>`）：bound 在绑着的，unboundOn 已解绑的那天（整天算，之后不算）；毛利率 = 毛利 ÷ 收入，没收入是 null
-  incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
+  incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null;
   // 按人民币显示时用：范围里每天按那天（那个上游）结账时记下的汇率换了再加，今天按现在的；算不出（没有汇率、和美元合计对不上）是 null，页面退回按这一行现在的汇率换
   incomeCny?: number | null; actualCostCny?: number | null;
-  gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };
   // 提示类的感叹号（今天提醒换 Key）：这一行照读到的数算、进合计，不是需处理
   notice: { code: string; text: string; detail: string | null; action: WorkflowAction | null; diagnostic?: string } | null;
   attention: { diagnostic?: string; code: string | null; title: string | null; detail: string | null; action: WorkflowAction | null; fromDay: string | null; moreCount: number;
@@ -157,18 +134,15 @@ export type ProfitRow = {
   bound: boolean; unboundOn: string | null; grossMarginRate: number | null; activeNow: boolean | null; lastSaleAt: number | null;
   // 这段时间用过的每把 Key，在用的排最前
   keys: ProfitKeyRow[];
-  latestSettledGap: { day: string; usd: number | null; state: "over" | "under" | "within" | null; reason: string | null } | null;
 };
 export type ProfitPageResponse = {
   range: { preset: string | null; startMs: number; endMs: number; timezone: string }; today: string;
   dayCounts: { fixed: number; reading: number; today: number };
   pageTotals: { incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; grossMarginRate: number | null };
-  gap: { days: { first: string | null; last: string | null; count: number; contiguous: boolean }; expectedCostUsd: number | null; actualCostUsd: number | null; usd: number | null; overUsd: number; underUsd: number; withinUsd: number; rowCount: number };
-  latestSettledGap: { day: string; usd: number | null; mismatchedRowCount: number } | null;
-  counts: { channels: number; countedChannels: number; mismatchedChannels: number; attentionChannels: number; uncomputable: Record<string, number>; mismatchedDays: { over: number; under: number } };
+  counts: { channels: number; countedChannels: number; attentionChannels: number };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
   asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
-  ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number; notCountedDays?: { count: number }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
+  ownIncomeUnavailable: { code: string } | null; unlinkedChannelCount: number; notCountedDays?: { count: number }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
   // 每天的实付成本合计（成本估算「每天的上游成本」用）：美元原值和按各行汇率折的人民币
   dailyCost?: { day: string; actualCostUsd: number; actualCostCny?: number }[];
@@ -197,7 +171,7 @@ export type ProfitDetailResponse = {
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）
   id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict"
-    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "fix_agent_url" | "fix_agent_token" | "go_swap_key" | "add_upstream" | "recheck_consume_log";
+    | "edit_binding" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "fix_agent_url" | "fix_agent_token" | "go_swap_key" | "add_upstream" | "recheck_consume_log";
   label: string; title?: string; detail?: string; code?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string | null;
 };

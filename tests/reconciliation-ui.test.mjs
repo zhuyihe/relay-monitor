@@ -118,21 +118,16 @@ const PROFIT_TZ = "Asia/Shanghai", PROFIT_TODAY = "2026-10-09", PROFIT_YESTERDAY
 const profitDayStart = (label) => Date.parse(`${label}T00:00:00+08:00`);
 function profitRow(id, name, o = {}) {
   const channels = o.channels || [{ channelId: Number(id.slice(-1)), name }];
-  const income = o.income ?? 2.5, cost = o.cost ?? 1, gapUsd = o.gapUsd ?? null;
-  const dayState = gapUsd == null ? null : Math.abs(gapUsd) > 0.05 && (!o.expected || Math.abs(gapUsd / o.expected) > 0.02) ? (gapUsd > 0 ? "over" : "under") : "within";
-  const state = o.attention ? "attention" : o.state || dayState || (o.reason ? "uncomputable" : "today");
+  const income = o.income ?? 2.5, cost = o.cost ?? 1;
   return {
     rowKey: `upstream-1:${id}`, ruleIds: [id], channels, upstream: { stationId: "upstream-1", name: "Fixture upstream", provider: "newapi" },
     key: { name, groupName: "default", groupRatio: 1, upstreamKeyUrl: null }, rates: { income: null, cost: null, costBasis: "usage" },
     startedOn: o.startedOn ?? null, startedAt: null, counted: !o.attention,
     incomeUsd: o.attention ? null : income, actualCostUsd: o.attention ? null : cost, grossProfitUsd: o.attention ? null : income - cost, uncountedIncomeUsd: o.attention ? income : null,
-    expectedCostUsd: o.expected ?? null,
-    gap: { usd: gapUsd, rate: gapUsd != null && o.expected ? gapUsd / o.expected : null, state, mismatchedDays: o.mismatchedDays || (dayState && dayState !== "within" ? [{ day: o.day || PROFIT_YESTERDAY, usd: gapUsd, state: dayState }] : []), days: o.days ?? (gapUsd != null ? 1 : 0), reason: o.reason || null, missingPriceModels: o.missing || [] },
     attention: o.attention || null, excludedDays: o.attention ? 1 : 0,
-    daily: o.daily || (gapUsd != null ? [{ day: PROFIT_YESTERDAY, state: "fixed", gapUsd, gapState: dayState, reason: null, tokens: 720000, incomeUsd: income, actualCostUsd: cost, grossUsd: income - cost }]
-      // 看今天：近 7 天——前 6 天已固定（只有昨天有差额，用 latest 的），最后一格今天
-      : [...["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", PROFIT_YESTERDAY].map((day) => ({ day, state: "fixed", gapUsd: day === PROFIT_YESTERDAY ? o.latest?.usd ?? null : null, gapState: day === PROFIT_YESTERDAY ? o.latest?.state ?? null : null, reason: null, tokens: 720000, incomeUsd: o.dayIncome ?? 2, actualCostUsd: o.dayCost ?? 1, grossUsd: (o.dayIncome ?? 2) - (o.dayCost ?? 1) })), { day: PROFIT_TODAY, state: "today", gapUsd: null, gapState: null, reason: null, tokens: null, incomeUsd: o.attention ? null : income, actualCostUsd: o.attention ? null : cost, grossUsd: o.attention ? null : income - cost }]),
-    latestSettledGap: "latest" in o ? o.latest : gapUsd != null ? { day: PROFIT_YESTERDAY, usd: gapUsd, state: dayState, reason: null } : null,
+    // 每天的小格：近 7 天——前 6 天已固定，最后一格今天
+    daily: o.daily || [...["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", PROFIT_YESTERDAY].map((day) => ({ day, state: "fixed", incomeUsd: o.dayIncome ?? 2, actualCostUsd: o.dayCost ?? 1, grossUsd: (o.dayIncome ?? 2) - (o.dayCost ?? 1) })),
+      { day: PROFIT_TODAY, state: "today", incomeUsd: o.attention ? null : income, actualCostUsd: o.attention ? null : cost, grossUsd: o.attention ? null : income - cost }],
   };
 }
 // preset：today（默认）/ yesterday / 7d；整页的数由各行加出来，和接口一样只加算进来的行、算得出差额的行
@@ -141,23 +136,16 @@ function profitPage(rows, o = {}) {
   const range = preset === "yesterday" ? { preset, startMs: profitDayStart(PROFIT_YESTERDAY), endMs: profitDayStart(PROFIT_TODAY), timezone: PROFIT_TZ }
     : preset === "7d" ? { preset, startMs: profitDayStart("2026-10-03"), endMs: Date.parse(PROFIT_AS_OF), timezone: PROFIT_TZ }
     : { preset: o.customPreset || preset, startMs: o.startMs ?? profitDayStart(PROFIT_TODAY), endMs: o.endMs ?? Date.parse(PROFIT_AS_OF), timezone: PROFIT_TZ };
-  const counted = rows.filter((row) => row.counted), judged = rows.filter((row) => row.gap.usd != null);
+  const counted = rows.filter((row) => row.counted);
   const sum = (list, pick) => list.reduce((total, item) => total + (pick(item) || 0), 0);
   const channelCount = (list) => sum(list, (row) => row.channels.length);
   const incomeUsd = counted.length ? sum(counted, (row) => row.incomeUsd) : null, actualCostUsd = counted.length ? sum(counted, (row) => row.actualCostUsd) : null;
-  const overUsd = sum(judged, (row) => row.gap.state === "over" ? row.gap.usd : 0), underUsd = -sum(judged, (row) => row.gap.state === "under" ? row.gap.usd : 0), gapUsd = judged.length ? sum(judged, (row) => row.gap.usd) : null;
-  const latestRows = rows.filter((row) => row.latestSettledGap);
-  const uncomputable = {}; for (const row of rows) if (row.gap.reason) uncomputable[row.gap.reason] = (uncomputable[row.gap.reason] || 0) + row.channels.length;
   return {
     range, today: PROFIT_TODAY, dayCounts: preset === "yesterday" ? { fixed: 1, reading: 0, today: 0 } : preset === "7d" ? { fixed: 6, reading: 0, today: 1 } : { fixed: 0, reading: 0, today: 1 },
     pageTotals: { incomeUsd, actualCostUsd, grossProfitUsd: incomeUsd == null ? null : incomeUsd - actualCostUsd, grossMarginRate: incomeUsd ? (incomeUsd - actualCostUsd) / incomeUsd : null },
-    gap: preset === "today" ? { days: { first: null, last: null, count: 0, contiguous: false }, expectedCostUsd: null, actualCostUsd: null, usd: null, overUsd: 0, underUsd: 0, withinUsd: 0, rowCount: 0 }
-      : { days: preset === "7d" ? { first: "2026-10-03", last: PROFIT_YESTERDAY, count: 6, contiguous: true } : { first: PROFIT_YESTERDAY, last: PROFIT_YESTERDAY, count: 1, contiguous: true }, expectedCostUsd: judged.length ? sum(judged, (row) => row.expectedCostUsd) : null, actualCostUsd: judged.length ? sum(judged, (row) => row.actualCostUsd) : null,
-        usd: gapUsd, overUsd, underUsd, withinUsd: gapUsd == null ? 0 : gapUsd - overUsd + underUsd, rowCount: judged.length },
-    latestSettledGap: preset === "today" && latestRows.length ? { day: PROFIT_YESTERDAY, usd: sum(latestRows, (row) => row.latestSettledGap.usd), mismatchedRowCount: latestRows.filter((row) => ["over", "under"].includes(row.latestSettledGap.state)).length } : null,
-    counts: { channels: channelCount(rows), countedChannels: channelCount(counted), mismatchedChannels: channelCount(rows.filter((row) => ["over", "under"].includes(preset === "today" ? row.latestSettledGap?.state : row.gap.state))), attentionChannels: channelCount(rows.filter((row) => row.attention)), uncomputable, mismatchedDays: { over: judged.filter((row) => row.gap.state === "over").length, under: judged.filter((row) => row.gap.state === "under").length } },
+    counts: { channels: channelCount(rows), countedChannels: channelCount(counted), attentionChannels: channelCount(rows.filter((row) => row.attention)) },
     gapThreshold: { usd: 0.05, rate: 0.02 }, rows, asOf: o.asOf || PROFIT_AS_OF, tz: PROFIT_TZ, displayCurrency: "USD", fixedCostUsd: o.fixedCostUsd ?? 0.5, netProfitUsd: incomeUsd == null ? null : incomeUsd - actualCostUsd - (o.fixedCostUsd ?? 0.5),
-    ownIncomeUnavailable: o.ownIncomeUnavailable || null, unaccountedUpstreamCostUsd: o.unaccounted ?? null, unlinkedChannelCount: o.unlinked ?? 0, rateUnset: o.rateUnset || [], fixedOffProfitStations: [],
+    ownIncomeUnavailable: o.ownIncomeUnavailable || null, unlinkedChannelCount: o.unlinked ?? 0, rateUnset: o.rateUnset || [], fixedOffProfitStations: [],
   };
 }
 function profitDetail(o = {}) {
@@ -165,11 +153,11 @@ function profitDetail(o = {}) {
     expected: { usd: 1, reason: null, groupName: "default", groupRatio: 1, segments: [], byModel: [{ model: "gpt-4o", upstreamModel: null, requests: 3, inputTokens: 600000, outputTokens: 120000, cacheReadTokens: 0, cacheWriteTokens: 0, pricesPerMillion: { input: 2.5, output: 10, cacheRead: null, cacheWrite: null }, beforeRatioUsd: 1, usd: 1 }], missingPriceModels: [], byChannel: [], tokens: 720000 },
     actual: { usd: 1.2, keyName: "Rule A" }, gap: { usd: 0.2, rate: 0.2, state: "over" }, grossProfitUsd: 1.3, fixedAt: "2026-10-09T00:05:00.000Z", revisions: 1, ...o };
 }
-// 昨天（全固定）的三行：Rule A 多扣对不上、Rule B 门槛以内、Rule C 少扣对不上
-const yesterdayRows = () => [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { expected: 1, cost: 1.01, gapUsd: 0.01 }), profitRow("rule-3", "Rule C", { expected: 1, cost: 0.9, gapUsd: -0.1 })];
-const todayRows = () => [profitRow("rule-1", "Rule A", { latest: { day: PROFIT_YESTERDAY, usd: 0.2, state: "over", reason: null } }), profitRow("rule-2", "Rule B", { latest: { day: PROFIT_YESTERDAY, usd: 0.01, state: "within", reason: null } }),
+// 昨天（全固定）的三行（差额对不对得上在计算明细里看，见 profitDetail）
+const yesterdayRows = () => [profitRow("rule-1", "Rule A", { cost: 1.2 }), profitRow("rule-2", "Rule B", { cost: 1.01 }), profitRow("rule-3", "Rule C", { cost: 0.9 })];
+const todayRows = () => [profitRow("rule-1", "Rule A"), profitRow("rule-2", "Rule B"),
   // 今天 9:30 才开始算的新渠道：昨天还没开始算
-  { ...profitRow("rule-3", "Rule C", { latest: null }), startedOn: PROFIT_TODAY, startedAt: Date.parse("2026-10-09T01:30:00.000Z") }];
+  { ...profitRow("rule-3", "Rule C"), startedOn: PROFIT_TODAY, startedAt: Date.parse("2026-10-09T01:30:00.000Z") }];
 const profitConfiguration = (rows) => ({ ...configuration, ownStation: { id: "own-1", cnyPerUsd: 7 }, rules: rows.map((row) => ({ id: row.ruleIds[0], tokenName: row.key.name, upstreamStationId: "upstream-1", ownStationId: "own-1", enabled: true, archivedAt: null, timezone: PROFIT_TZ, channels: row.channels })) });
 // 打开每日利润页：记下整页请求的 body（profitReads）、/query 的 body（queries）、计算明细的参数（detailReads）；pageOf(body) 按请求的范围给整页
 async function openDailyPage(t, options = {}) {
@@ -184,8 +172,6 @@ async function openDailyPage(t, options = {}) {
     if (url.pathname === "/api/reconciliation" && method === "GET") return fulfill(route, { actions: [] });
     if (url.pathname === "/api/reconciliation/profit") { const body = route.request().postDataJSON(); profitReads.push(body); return options.profit ? options.profit(route, body, profitReads.length) : fulfill(route, pageOf(body)); }
     if (url.pathname === "/api/reconciliation/query") { const body = route.request().postDataJSON(); queries.push(body); return options.query ? options.query(route, body) : fulfill(route, { results: [] }); }
-    // 计算明细里「改时间」读倍率变化记录（options.segments）
-    if (/^\/api\/reconciliation\/rules\/[^/]+\/segments$/.test(url.pathname) && method === "GET") return fulfill(route, { segments: options.segments || [] });
     if (url.pathname === "/api/reconciliation/profit/detail") { const params = Object.fromEntries(url.searchParams); detailReads.push(params); return options.detail ? options.detail(route, params) : fulfill(route, profitDetail({ day: params.day })); }
     // 手动选 Key：默认没有（目录没读到），用例里传 channelOptions 才出下拉框
     if (url.pathname === "/api/reconciliation/channels/options") return fulfill(route, options.channelOptions || { ok: false, code: "CHANNEL_CATALOGUE_STALE" });
@@ -264,7 +250,7 @@ test("近 7 天：每天的毛利小柱状图（今天浅色、悬停看那天�
 test("需处理的渠道：名字后面一个感叹号（点它不打开计算明细），点开写原因加按钮，按钮和文案从问题码来；收入照写、别的写「—」、不进合计；页顶一句点出有几个渠道没算进来；「重新读取」只读这一行再读整页", async (t) => {
   const attention = { code: "KEY_INVALID_OR_DENIED", title: reconciliationIssue("KEY_INVALID_OR_DENIED").title, detail: reconciliationIssue("KEY_INVALID_OR_DENIED").detail, action: workflowAction("update_authorization", { stationId: "upstream-1" }), fromDay: "2026-10-01", moreCount: 1 };
   const retryable = { ...attention, code: "OWN_BILLING_UNAVAILABLE", title: reconciliationIssue("OWN_BILLING_UNAVAILABLE").title, detail: "", action: workflowAction("retry_bill", { ruleId: "rule-3", window }, { code: "WAITING_FOR_BILL" }), moreCount: 0 };
-  const rows = [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { attention }), profitRow("rule-3", "Rule C", { attention: retryable })];
+  const rows = [profitRow("rule-1", "Rule A", { cost: 1.2 }), profitRow("rule-2", "Rule B", { attention }), profitRow("rule-3", "Rule C", { attention: retryable })];
   const { page, queries, profitReads } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }) });
   await pickPreset(page, PROFIT_COPY.presets.yesterday);
   await page.locator(".jy-profit-caption").getByText("10月8日 周四 · " + PROFIT_COPY.fixed + " · " + PROFIT_COPY.caption.attention(2), { exact: true }).waitFor();
@@ -306,9 +292,9 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
   await rowOf(unread.page, "Rule A").getByText("$1.00", { exact: true }).waitFor(); assert.equal(await rowOf(unread.page, "Rule A").locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 3); // 收入读不到：收入、毛利、毛利率三格「—」
 });
 
-test("表下面一行：没算进利润的上游成本、还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
-  const { page } = await openDailyPage(t, { pageOptions: { unaccounted: 3.1, unlinked: 2, rateUnset: [{ id: "upstream-1", name: "Fixture upstream" }] }, ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 2 * 3600000, behindMs: 2 * 3600000 } });
-  const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unaccounted("$3.10") }).waitFor(); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); await notes.getByText(RATE_UNSET_USD, { exact: true }).waitFor();
+test("表下面一行：还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
+  const { page } = await openDailyPage(t, { pageOptions: { unlinked: 2, rateUnset: [{ id: "upstream-1", name: "Fixture upstream" }] }, ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 2 * 3600000, behindMs: 2 * 3600000 } });
+  const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); await notes.getByText(RATE_UNSET_USD, { exact: true }).waitFor();
   await notes.locator("span", { hasText: /自营站点的收费记录读得慢，只读到 (10月9日 )?9:00，这以后的应付成本还没算。/ }).waitFor(); assert.equal(await notes.getByRole("link", { name: PROFIT_COPY.notice.goSettings, exact: true }).getAttribute("href"), "/settings");
   const fresh = await openDailyPage(t, { ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 60000, behindMs: 60000 } }); await rowOf(fresh.page, "Rule A").waitFor(); assert.equal(await fresh.page.locator(".jy-profit-notes").count(), 0);
 });
@@ -553,7 +539,7 @@ test("计算明细：上面收入、上游成本、毛利三节；下面「核�
 
 test("每日利润 is read-only: no create or edit entry; the attention row's fix links back to 上游资源 and nothing is written", async (t) => {
   const attention = { code: "CANONICAL_KEY_CONFLICT", title: reconciliationIssue("CANONICAL_KEY_CONFLICT").title, detail: reconciliationIssue("CANONICAL_KEY_CONFLICT").detail, action: workflowAction("review_conflict", { ruleId: "rule-1" }), fromDay: null, moreCount: 0 };
-  const rows = [profitRow("rule-1", "Rule A", { attention }), profitRow("rule-2", "Rule B", { expected: 1, cost: 1.01, gapUsd: 0.01 })];
+  const rows = [profitRow("rule-1", "Rule A", { attention }), profitRow("rule-2", "Rule B", { cost: 1.01 })];
   const { page, queries } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }) }), writeLike = new RegExp(`^(添加|编辑|停止|更换|操作|${[EDIT_BINDING, CONNECT, workflowActionMeta("swap_key").label, workflowActionMeta("unbind").label].join("|")})`);
   const FIX = workflowActionMeta("review_conflict").label;
   await bangOf(rowOf(page, "Rule A"), "Rule A").click();
@@ -798,14 +784,13 @@ test("成本估算：只有「上游成本构成」和「每天的上游成本�
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
-    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows), unaccountedUpstreamCostUsd: 0.5,
+    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows),
       dailyCost: [{ day: "2026-10-07", actualCostUsd: 2 }, { day: PROFIT_TODAY, actualCostUsd: 1 }] });
     throw new Error("unexpected cost fixture API: " + path);
   }, undefined, false, null, "/analytics");
   await page.getByRole("region", { name: ANALYTICS_COPY.panel.mix, exact: true }).waitFor();
   await page.getByRole("region", { name: ANALYTICS_COPY.panel.daily, exact: true }).waitFor();
   assert.equal(await page.getByRole("region").filter({ hasText: ANALYTICS_COPY.panel.heat }).count(), 0, "花费时段已删");
-  await page.getByText(ANALYTICS_COPY.unaccounted, { exact: false }).first().waitFor();
   await page.getByText(ANALYTICS_COPY.todayLegend, { exact: false }).first().waitFor();
   await page.getByRole("link", { name: "每日利润", exact: true }).first().waitFor();
   assert.equal(await page.getByRole("button", { name: "近 90 天", exact: true }).count(), 0, "没有近 90 天");
@@ -2660,7 +2645,7 @@ test("这天重算的数比原来少了一半多（需处理）：点「重新�
 
 test("重新检查（R2）：点了才读一次自营站点的设置，读完提示结果，每日利润自己重读整页（不是打开页面就读）", async (t) => {
   const attention = { code: "OWN_CONSUME_LOG_OFF", title: reconciliationIssue("OWN_CONSUME_LOG_OFF").title, detail: "", action: workflowAction("recheck_consume_log", {}), fromDay: "2026-10-01", moreCount: 0 };
-  const rows = [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { attention })];
+  const rows = [profitRow("rule-1", "Rule A", { cost: 1.2 }), profitRow("rule-2", "Rule B", { attention })];
   let checks = 0;
   const { page, profitReads } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }),
     extraAPI(route, path) {

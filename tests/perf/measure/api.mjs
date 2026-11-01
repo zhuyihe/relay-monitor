@@ -14,7 +14,6 @@ const cookie = loginRes.headers.get("set-cookie").split(";")[0];
 
 const stations = (await api("/api/stations?includeUnmonitored=true&includeArchived=true")).stations;
 const config = await api("/api/reconciliation/configuration");
-const rule = (config.rules || []).find((r) => r.enabled) || config.rules?.[0];
 const upNa = stations.find((s) => s.type === "newapi" && !s.isOwn);
 const upS2 = stations.find((s) => s.type === "sub2api");
 const tz = "Asia/Shanghai";
@@ -45,11 +44,6 @@ const ENDPOINTS = [
   ["reconciliation/query 昨天（切换范围，不读缓存）", "/api/reconciliation/query", "POST", { preset: "yesterday" }],
   ["reconciliation/query 近 7 天（切换范围，不读缓存）", "/api/reconciliation/query", "POST", { preset: "7d" }],
   ["reconciliation/query 本月（切换范围，不读缓存）", "/api/reconciliation/query", "POST", { preset: "month" }],
-  ...(rule ? [
-    ["账本列表 一条绑定 默认 31 天 20 行", `/api/reconciliation/rules/${encodeURIComponent(rule.id)}/confirmed?limit=20`],
-    ["账本列表 一条绑定 90 天前那 31 天", `/api/reconciliation/rules/${encodeURIComponent(rule.id)}/confirmed?limit=20&startMs=${now - 90 * 86400000}&endMs=${now - 59 * 86400000}`],
-    ["绑定倍率时段", `/api/reconciliation/rules/${encodeURIComponent(rule.id)}/segments`],
-  ] : []),
   ...(upNa ? [["上游 Key 目录（New API）", `/api/reconciliation/upstreams/${encodeURIComponent(upNa.id)}/keys`]] : []),
   ...(upS2 ? [["上游 Key 目录（Sub2API）", `/api/reconciliation/upstreams/${encodeURIComponent(upS2.id)}/keys`]] : []),
   ["channel-onboarding/accounts", "/api/channel-onboarding/accounts"],

@@ -9,7 +9,6 @@ import { SETTLE_LOOKBACK_MAX_PER_ROUND } from "../lib/reconciliation-settlement.
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
 import { reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
-import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
@@ -4599,7 +4598,7 @@ test("U05历史请求31日默认/最大与数量cap，非法参数在数据库�
   }
 });
 
-test("U05真实withAuth历史/configuration opt-in：归档入口可发现、默认/非法flag不返回，错误安全可重试", async (t) => {
+test("U05真实withAuth configuration opt-in：归档入口可发现、默认/非法flag不返回", async (t) => {
   const f = confirmedHistoryFixture();
   t.mock.method(globalThis, "fetch", async () => { assert.fail("read-only history must not fetch upstream"); });
   const { registerHooks } = await import("node:module");
@@ -4614,25 +4613,13 @@ test("U05真实withAuth历史/configuration opt-in：归档入口可发现、默
     return next(url, context);
   } });
   try {
-    const { GET } = await import("../app/api/reconciliation/rules/[id]/confirmed/route.js");
     const { GET: CONFIGURATION } = await import("../app/api/reconciliation/configuration/route.js");
-    const url = `http://localhost/api/reconciliation/rules/old-rule/confirmed?startMs=${f.window.startMs}&endMs=${f.window.endMs}`;
-    const ctx = { params: Promise.resolve({ id: "old-rule" }) };
-    assert.equal((await GET(new Request(url), ctx)).status, 401);
     const request = (value) => new Request(value, { headers: { cookie: "rm_session=valid" } });
-    const response = await GET(request(url), ctx); assert.equal(response.status, 200);
-    assert.equal((await response.json()).records[0].upstreamSource.tokenName, "old-name");
     for (const suffix of ["", "?includeArchived=1", "?includeArchived=TRUE", "?includeArchived=false"]) {
       assert.deepEqual((await (await CONFIGURATION(request(`http://localhost/api/reconciliation/configuration${suffix}`))).json()).rules, []);
     }
     const archived = await (await CONFIGURATION(request("http://localhost/api/reconciliation/configuration?includeArchived=true"))).json();
     assert.equal(archived.rules[0].id, "old-rule"); assert.ok(archived.rules[0].archivedAt);
-    const invalid = await GET(request(`${url}&cursor=bad`), ctx); assert.equal(invalid.status, 400);
-    const missing = await GET(request(url), { params: { id: "missing" } }); assert.equal(missing.status, 404);
-    f.state.fail = true;
-    const failed = await GET(request(url), ctx); assert.equal(failed.status, 503);
-    const body = await failed.json(); assert.equal(body.code, "HISTORY_UNAVAILABLE"); assert.equal(body.retryable, true);
-    assert.doesNotMatch(JSON.stringify(body), /raw-secret|database failure/);
   } finally { hooks.deregister(); delete globalThis.__u05HistoryRuntime; }
 });
 
@@ -5606,15 +5593,13 @@ test("汇总和渠道那句同一个判断：今天照读到的数算——有�
       return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: 0 } }) };
     return prev(input, init);
   });
-  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: accountUsageStub({ upstream: 5 }).stationUsageCost });
-  const r = await module.queryRules({ preset: "today" }, { accountUsage: true });
+  const module = createReconciliationModule(f.rt, { repository: f.repository });
+  const r = await module.queryRules({ preset: "today" });
   const two = r.results.find((row) => row.rule.id === "rr_two");
   assert.deepEqual([two.displayStatus.state, two.health.code, two.calculation.profitUsd, two.calculation.marginRate], ["live", "READY", 2.5, 1], "今天读到什么算什么：成本 0，毛利 = 收入");
   const { display, attentionRuleIds, readingRuleIds } = r.commonSummary.totals;
   assert.deepEqual([display.knownIncome, display.knownCost, display.confirmedProfit, attentionRuleIds, readingRuleIds], [7.5, 2, 5.5, [], []]);
   assert.equal(reconciliationCoverageText(r.commonSummary.coverage), "10 个渠道里 3 个已算进利润");
-  // 没算进利润的上游成本：扣费 $5，其中算进利润 $2，没算进 $3
-  assert.deepEqual([r.unaccountedUpstream.accounts[0].accountedUsd, r.unaccountedUpstream.accounts[0].unaccountedUsd], [2, 3]);
 });
 
 test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试复用同窗有效事实且group仅选中金额", async (t) => {
@@ -5630,7 +5615,6 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, attentionRuleIds: [], heldRuleIds: [], notStartedRuleIds: [], readingRuleIds: [],
     display: { currency: "USD", knownIncome: 7.5, knownCost: 3, confirmedProfit: 4.5, confirmedMarginRate: 0.6 } });
   assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []]);
-  assert.equal(full.unaccountedUpstream, undefined, "没要求账号级对比时不附带");
   const selected = await f.module.queryRules({ ruleIds: ["rr_live"] });
   assert.equal(selected.results.length, 1);
   assert.equal(selected.windowGroups[0].totals.knownIncomeUsd, 2.5, "局部group totals仅含本次选中规则");
@@ -5640,26 +5624,11 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.ok(full.coverage.channels.find((channel) => channel.channelId === 9).actions.some((action) => action.href === "/stations?action=connect&ownStationId=own&channelIds=9"));
 });
 
-// 账号级用量替身：记录调用，按站点返回扣费。
-function accountUsageStub(usdByStation, { delayMs = 0 } = {}) {
-  const calls = [];
-  const stationUsageCost = async (rt, station, range) => {
-    calls.push({ stationId: station.id, ...range });
-    if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
-    const usd = usdByStation[station.id];
-    if (usd instanceof Error) throw usd;
-    return { usd, mode: "api", error: "should-not-leak" };
-  };
-  return { calls, stationUsageCost };
-}
-
-test("3b 核算按人民币：收入按本站汇率、成本按上游汇率；未纳入核算的上游消费 = 账号扣费 − 已核算成本", async (t) => {
+test("3b 核算按人民币：收入按本站汇率、成本按上游汇率", async (t) => {
   const f = await completedDayFixture(t);
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   f.stations.find((station) => station.id === "upstream").cnyPerUsd = 6;
-  const usage = accountUsageStub({ upstream: 5 });
-  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
-  const full = await module.queryRules({}, { accountUsage: true });
+  const full = await f.module.queryRules();
   assert.deepEqual(full.results[0].rates, { income: { stationId: "own", cnyPerUsd: 7, source: "configured" },
     cost: { stationId: "upstream", cnyPerUsd: 6, source: "configured" }, costBasis: "usage" });
   assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []]);
@@ -5667,90 +5636,37 @@ test("3b 核算按人民币：收入按本站汇率、成本按上游汇率；�
   assert.deepEqual([display.currency, display.knownIncome, display.knownCost, display.confirmedProfit], ["CNY", 52.5, 18, 34.5], "每条 $2.5×7 − $1×6");
   assert.ok(Math.abs(display.confirmedMarginRate - 34.5 / 52.5) < 1e-9);
   assert.equal(full.commonSummary.totals.confirmedProfitUsd, 4.5, "USD 原始口径不变");
-  const unaccounted = full.unaccountedUpstream;
-  assert.deepEqual([unaccounted.state, unaccounted.currency, unaccounted.total], ["complete", "CNY", 12], "账号扣费 $5 − 已核算 $3，按上游汇率 6");
-  assert.deepEqual(unaccounted.accounts.map((item) => [item.stationId, item.accountUsd, item.accountedUsd, item.unaccountedUsd, item.account, item.accounted, item.ruleIds.length]),
-    [["upstream", 5, 3, 2, 30, 18, 3]]);
-  assert.deepEqual(unaccounted.window, { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), timezone: "Asia/Shanghai", preset: "yesterday" });
-  assert.deepEqual([unaccounted.fixedStations, unaccounted.excludedStations], [[], []]);
-  assert.ok(!JSON.stringify(unaccounted).includes("should-not-leak"), "上游错误原文不进响应");
-  assert.deepEqual(usage.calls.map((call) => [call.stationId, call.startMs, call.endMs, call.tz, call.today]),
-    [["upstream", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z"), "Asia/Shanghai", false]], "同窗只取一次");
-  // 缓存期内重读不再取上游；只有页面「刷新」才重新读。
-  await module.queryRules({}, { accountUsage: true });
-  assert.equal(usage.calls.length, 1);
-  await module.queryRules({}, { accountUsage: "refresh", force: true });
-  assert.equal(usage.calls.length, 2);
-  // 按关联查询和没要求时都不附带，也不取上游。
-  const selected = await module.queryRules({ ruleIds: ["rr_live"] }, { accountUsage: true });
-  assert.equal(selected.unaccountedUpstream, undefined);
-  assert.equal(usage.calls.length, 2);
 });
 
-// 独立 Key 监控 + 专用账号授权：核算关联建在没开监控的授权站点上，按用量对比的是 Key 监控站点。
-test("3b 未开监控的站点上的核算关联：渠道接到 Key 监控站点时计入它的已核算，无法确认时标为部分", async (t) => {
-  const f = await completedDayFixture(t);
-  Object.assign(f.stations.find((station) => station.id === "upstream"), { monitorEnabled: false, includeInProfit: false });
-  f.stations.push({ id: "key", name: "Key 监控", type: "newapi-key", baseUrl: "https://upstream.test/", apiKey: "sk-test", authVersion: 1 });
-  const usage = accountUsageStub({ key: 5 });
-  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
-  let unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
-  assert.deepEqual(unaccounted.accounts.map((item) => [item.stationId, item.state, item.accountUsd, item.accountedUsd, item.unaccountedUsd, item.ruleIds]),
-    [["key", "partial", 5, 0, 5, []]], "地址相同不能确认是同一账号");
-  assert.deepEqual(unaccounted.accounts[0].notes, ["暂停监控的上游「上游」上的绑定还没确认属于哪个上游账号，没算进利润的上游成本可能偏高；到「渠道绑定」里把渠道对上这个上游后就能确认"]);
-  assert.deepEqual([unaccounted.state, unaccounted.excludedStations], ["partial", []], "授权站点没开监控，不算设为不计入成本的上游");
-  const links = [1, 2, 3].map((channelId) => ({ ownStationId: "own", channelId, stationId: "key", channelRevision: `r${channelId}` }));
-  f.rt.onboardingSource.getMonitorLinks = () => links;
-  unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
-  assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.unaccountedUsd, item.ruleIds, item.notes]),
-    [["complete", 3, 2, ["rr_live", "rr_two", "rr_three"], ["已算进利润的部分含暂停监控的上游「上游」上的绑定"]]]);
-  assert.deepEqual([unaccounted.state, unaccounted.total], ["complete", 2]);
-  links.splice(1);
-  unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
-  assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.ruleIds]), [["partial", 1, ["rr_live"]]], "只有接了监控的渠道上的关联才归属");
-  assert.deepEqual(unaccounted.accounts[0].notes, ["已算进利润的部分含暂停监控的上游「上游」上的绑定",
-    "暂停监控的上游「上游」上的绑定还没确认属于哪个上游账号，没算进利润的上游成本可能偏高；到「渠道绑定」里把渠道对上这个上游后就能确认"]);
-  assert.equal(usage.calls.length, 1);
-  // 监控关联不要求地址相同：Key 监控换成另一个地址，接了监控的渠道仍归属，其余没有同地址的候选，不再标出
-  f.stations.find((station) => station.id === "key").baseUrl = "https://api.upstream.test/";
-  unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
-  assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.ruleIds, item.notes]),
-    [["complete", 1, ["rr_live"], ["已算进利润的部分含暂停监控的上游「上游」上的绑定"]]]);
-  assert.equal(usage.calls.length, 2, "账号用量按缓存复用，站点地址变了才重新取");
-});
-
-test("3b 固定采购上游：核算成本记 0，不用它的汇率；账号级对比只列为固定采购", async (t) => {
+test("3b 固定采购上游：核算成本记 0，不用它的汇率", async (t) => {
   const f = await completedDayFixture(t);
   const upstream = f.stations.find((station) => station.id === "upstream");
   upstream.fixedPurchases = [{ amount: 300, days: 30 }];
-  const usage = accountUsageStub({ upstream: 5 });
-  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
-  let full = await module.queryRules({}, { accountUsage: true });
+  const module = f.module;
+  let full = await module.queryRules();
   assert.equal(full.results[0].rates.costBasis, "fixed");
   assert.deepEqual(full.commonSummary.totals.display, { currency: "USD", knownIncome: 7.5, knownCost: 0, confirmedProfit: 7.5, confirmedMarginRate: 1 });
-  assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total, full.unaccountedUpstream.accounts], ["complete", 0, []]);
-  assert.deepEqual(full.unaccountedUpstream.fixedStations, [{ id: "upstream", name: "上游" }]);
   assert.deepEqual(full.fixedOffProfitStations, [], "我的站点会摊销它的采购费");
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
-  full = await module.queryRules({}, { accountUsage: true });
+  full = await module.queryRules();
   assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []], "只需要本站汇率");
   assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [52.5, 52.5]);
   // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，成本照样记 0
   const offProfit = [
-    [{ includeInProfit: false }, [{ id: "upstream", name: "上游" }], [], "设为不计入成本的固定采购上游列在固定采购里"],
-    [{ monitorEnabled: false }, [], [], "没开监控的站点不做账号级对比"],
-    [{ archivedAt: "2026-10-01T00:00:00Z" }, [], [], "已归档"],
+    [{ includeInProfit: false }, "设为不计入成本的固定采购上游"],
+    [{ monitorEnabled: false }, "没开监控的站点"],
+    [{ archivedAt: "2026-10-01T00:00:00Z" }, "已归档"],
   ];
   // 测试桩的 list 不按归档和监控过滤，这里照真实 store 的选项过滤：默认不列出归档和没开监控的站点
   const list = f.rt.store.list;
   const filtered = t.mock.method(f.rt.store, "list", (options = {}) => list(options).filter((station) =>
     (options.includeArchived || !station.archivedAt) && (options.includeUnmonitored || station.monitorEnabled !== false)));
   try {
-    for (const [patch, fixedStations, excludedStations, message] of offProfit) {
+    for (const [patch, message] of offProfit) {
       const saved = { ...upstream };
       Object.assign(upstream, patch);
       try {
-        full = await module.queryRules({}, { accountUsage: true });
+        full = await module.queryRules();
       } finally {
         for (const key of Object.keys(patch)) delete upstream[key];
         Object.assign(upstream, saved);
@@ -5758,17 +5674,15 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率；账号级
       assert.deepEqual(full.results.map((row) => row.rates.costBasis), ["fixed", "fixed", "fixed"], message);
       assert.equal(full.commonSummary?.totals.display.knownCost, 0, message);
       assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }], `${message}：三条关联在同一站点上，只点名一次`);
-      assert.deepEqual([full.unaccountedUpstream?.fixedStations, full.unaccountedUpstream?.excludedStations], [fixedStations, excludedStations], message);
     }
   } finally {
     filtered.mock.restore();
   }
   // 测试桩不过滤时也按归档判断
   upstream.archivedAt = "2026-10-01T00:00:00Z";
-  full = await module.queryRules({}, { accountUsage: true });
+  full = await module.queryRules();
   delete upstream.archivedAt;
   assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }]);
-  assert.equal(usage.calls.length, 0);
 });
 
 test("3b 只设置了部分汇率：整页仍按 USD 原值显示，并列出还没设置的站点", async (t) => {
@@ -5779,85 +5693,6 @@ test("3b 只设置了部分汇率：整页仍按 USD 原值显示，并列出还
   assert.deepEqual(full.unconfiguredRateStations, [{ id: "upstream", name: "上游" }]);
   assert.equal(full.commonSummary.totals.display.currency, "USD");
   assert.equal(full.commonSummary.totals.display.confirmedProfit, 4.5);
-});
-
-test("3b 账号用量读取失败或超时：核算照常返回，失败记为不可用，超时记为读取中", async (t) => {
-  const f = await completedDayFixture(t);
-  const failing = accountUsageStub({ upstream: new Error("token sk-secret rejected") });
-  const failed = await createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: failing.stationUsageCost })
-    .queryRules({}, { accountUsage: true });
-  assert.equal(failed.results.length, 3);
-  assert.equal(failed.unaccountedUpstream.state, "partial");
-  assert.deepEqual([failed.unaccountedUpstream.accounts[0].state, failed.unaccountedUpstream.accounts[0].accountUsd], ["unavailable", null]);
-  assert.ok(!JSON.stringify(failed.unaccountedUpstream).includes("sk-secret"));
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const slow = accountUsageStub({ upstream: 5 }, { delayMs: 60000 });
-  const pending = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: slow.stationUsageCost }).queryRules({}, { accountUsage: true });
-  for (let i = 0; i < 50 && slow.calls.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  for (let i = 0; i < 200; i += 1) { await new Promise((resolve) => setImmediate(resolve)); t.mock.timers.tick(100); }
-  const response = await pending;
-  assert.deepEqual([response.unaccountedUpstream.state, response.unaccountedUpstream.total], ["pending", null]);
-  assert.equal(response.unaccountedUpstream.accounts[0].state, "pending");
-});
-
-test("3b 账号用量走真实取数：sk 密钥站点没有用量接口，余额历史不够时记为读不到，历史不全时金额只是下限", async (t) => {
-  const f = await completedDayFixture(t);
-  f.stations.find((station) => station.id === "upstream").includeInProfit = false;
-  f.stations.push({ id: "keyonly", type: "newapi-key", name: "密钥上游", baseUrl: "https://keyonly.test", apiKey: "sk-keyonly-secret" });
-  const history = { used: 0, covered: false, calls: [] };
-  f.rt.history = { usedBetween: (...args) => { history.calls.push(args); return history.used; }, covers: () => history.covered };
-  const read = () => createReconciliationModule(f.rt, { repository: f.repository }).queryRules({}, { accountUsage: true });
-  let full = await read();
-  assert.deepEqual(full.unaccountedUpstream.excludedStations, [{ id: "upstream", name: "上游" }]);
-  assert.equal(full.commonSummary.totals.knownCostUsd, 3, "设为不计入成本的上游，核算关联仍按 Key 用量计成本");
-  assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.stationId, item.state, item.accountUsd, item.notes]),
-    [["keyonly", "unavailable", null, ["上游暂时读不到，系统会自动再读"]]]);
-  assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 0]);
-  assert.deepEqual(history.calls[0], ["keyonly", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z")]);
-  history.used = 3;
-  full = await read();
-  assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
-    [["partial", 3, ["读不到用量，改按余额变化估算；历史数据不够，金额偏低"]]]);
-  assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 3]);
-  Object.assign(history, { used: 0, covered: true });
-  full = await read();
-  assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
-    [["estimated", 0, ["读不到用量，改按余额变化估算"]]], "历史覆盖整个时段时 0 就是真的没消耗");
-  assert.ok(!JSON.stringify(full).includes("sk-keyonly-secret") && !JSON.stringify(full).includes("sk 密钥模式"));
-});
-
-test("3b 账号用量预热：各关联时区解析出不同窗口时不取数，同一窗口只按一个时区取一次", async (t) => {
-  const f = await completedDayFixture(t);
-  const usage = accountUsageStub({ upstream: 4 });
-  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
-  f.rows[1].timezone = "UTC";
-  const split = await module.queryRules({}, { accountUsage: true });
-  assert.equal(split.commonSummary, null);
-  assert.equal(split.unaccountedUpstream ?? null, null);
-  assert.equal(usage.calls.length, 0, "没有共同汇总就不读账号用量");
-  f.rows[1].timezone = "Asia/Chongqing";
-  const aliased = await module.queryRules({}, { accountUsage: true });
-  assert.ok(aliased.unaccountedUpstream);
-  assert.deepEqual(usage.calls.map((call) => [call.stationId, call.startMs, call.endMs]), [["upstream", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z")]]);
-});
-
-test("3b 实时窗口：各关联截止点不同仍归同一组，共同汇总和账号级对比照常给出", async (t) => {
-  let tick = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => (tick += 1) });
-  const usage = accountUsageStub({ upstream: 4 });
-  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
-  const today = await module.queryRules({ preset: "today" }, { accountUsage: true });
-  assert.equal(today.results.length, 3);
-  assert.ok(new Set(today.results.map((row) => row.window.endMs)).size > 1, "截止点逐条不同");
-  assert.equal(today.windowGroups.length, 1);
-  assert.equal(today.windowGroups[0].window.preset, "today");
-  assert.equal(today.windowGroups[0].window.endMs, Math.min(...today.results.map((row) => row.window.endMs)));
-  assert.ok(today.commonSummary);
-  assert.equal(today.unaccountedUpstream.window.preset, "today");
-  assert.deepEqual(usage.calls.map((call) => [call.startMs, call.today]), [[Date.parse("2026-10-08T16:00:00Z"), true]]);
-  // 下一次轮询截止点后移，同一预设仍命中账号用量缓存。
-  await module.queryRules({ preset: "today" }, { accountUsage: true });
-  assert.equal(usage.calls.length, 1);
 });
 
 test("U05首次局部缺其余账单证据为unknown，0规则仍0/10；凭据/Key业务变化不能借旧cache变accounted", async (t) => {
@@ -7125,6 +6960,23 @@ test("C3 当天解除又绑回同一渠道：旧绑定那天照结、新绑定�
   assert.equal(Number(ledgerOf("rr_live", "2026-10-08").revenue_usd), 0, "那天的收入只记在后绑的新绑定上");
   assert.ok(Number(ledgerOf("rr_two", "2026-10-08").revenue_usd) > 0);
   assert.equal((await f.repository.listSettlementStates(["rr_live"])).length, 0, "没有被挡");
+});
+
+test("C3 审核二轮中-1：当天换绑两次（A→B→C），每条都按自己的核算起点判，不互相挡，三段首尾相接", async (t) => {
+  const a = Date.parse("2026-10-08T02:00:00Z"), b = Date.parse("2026-10-08T06:00:00Z"); // 上海 10:00 和 14:00 换绑
+  let now = b;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [1] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 1 : 0;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  row("rr_two").billing_effective_from_ms = a + 60000; row("rr_two").accounting_floor_ms = a; row("rr_two").archived_at = new Date(b); row("rr_two").archived_at_ms = b; row("rr_two").enabled = 0; row("rr_two").canonical_key = row("rr_two").canonical_key;
+  row("rr_live").archived_at = new Date(a); row("rr_live").archived_at_ms = a; row("rr_live").enabled = 0;
+  row("rr_three").billing_effective_from_ms = b + 60000; row("rr_three").accounting_floor_ms = b;
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  const days = (id) => f.state.ledger.filter((item) => item.rule_id === id && item.bill_date === "2026-10-08").length;
+  assert.deepEqual(["rr_live", "rr_two", "rr_three"].map(days), [1, 1, 1], "三条都结了，没有被挡");
+  assert.equal((await f.repository.listSettlementStates(["rr_live", "rr_two"])).length, 0);
 });
 
 test("整天结账迁移：以前被「解绑那一刻」切开的日子（31 天内），新旧两条绑定都写重结请求，程序自己重算（少一半以上也不挡）；只做一次；解绑得更早的旧绑定只在有没办完的请求时带进来", async (t) => {
@@ -8663,12 +8515,10 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   // 每日利润页 A（#118 §9）：看这一天的整页和一行一天的计算明细
   const page = await f.module.profitPage({ preset: "custom", startMs: dayStart, endMs: dayEnd });
   assert.deepEqual([page.dayCounts, page.range.preset, page.gapThreshold], [{ fixed: 1, reading: 0, today: 0 }, "custom", { usd: 0.05, rate: 0.02 }]);
-  // 三条绑定三把 Key：rr_three 这天没用量应付 0、实付 1 → 多扣（排最前）；rr_live 应付 7.2 实付 1、rr_two 应付 5 实付 1 → 少扣，差额大的在前
-  assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.expectedCostUsd, row.actualCostUsd, row.gap.state, Number(row.gap.usd.toFixed(2))]),
-    [["ch:own:3", [3], 0, 1, "over", 1], ["ch:own:1", [1], 7.2, 1, "under", -6.2], ["ch:own:2", [2], 5, 1, "under", -4]]);
+  // 三条绑定三把 Key：每条这天实付 1
+  assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.actualCostUsd]).sort(), [["ch:own:1", [1], 1], ["ch:own:2", [2], 1], ["ch:own:3", [3], 1]]);
   assert.deepEqual(page.pageTotals, { incomeUsd: 7.5, actualCostUsd: 3, grossProfitUsd: 4.5, grossMarginRate: 0.6 });
-  assert.deepEqual([page.gap.expectedCostUsd, page.gap.actualCostUsd, Number(page.gap.usd.toFixed(2)), page.gap.overUsd, Number(page.gap.underUsd.toFixed(2)), page.gap.rowCount, page.gap.days.count], [12.2, 3, -9.2, 1, 10.2, 3, 1], "underUsd 是正数");
-  assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, mismatchedChannels: 3, attentionChannels: 0, uncomputable: {}, mismatchedDays: { over: 1, under: 2 } });
+  assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, attentionChannels: 0 });
   assert.deepEqual([page.fixedCostUsd, page.netProfitUsd, page.unlinkedChannelCount, page.rateUnset, page.ownIncomeUnavailable, page.asOf != null, page.tz], [0, 4.5, 7, [], null, true, "Asia/Shanghai"], "固定成本 0（没有固定采购的上游）；渠道目录里 10 个渠道只绑了 3 个");
   const dayDetail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
   assert.deepEqual([dayDetail.settled, dayDetail.expected.usd, dayDetail.actual.usd, dayDetail.gap.state, dayDetail.income.adminUsage.deducted, dayDetail.revisions, dayDetail.expected.byModel.length, dayDetail.expected.byModel[0].pricesPerMillion != null],

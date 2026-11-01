@@ -2192,8 +2192,6 @@ async function onboardingFixture() {
   rt.reconciliation = {
     previewKeyScope: financialPreview,
     listRules: async () => structuredClone(state.rules),
-    findRuleForKey: async (stationId, tokenId) => state.rules.find((rule) => rule.upstreamStationId === stationId
-      && rule.tokenId === Number(tokenId)) || null,
     createRule: async (input, options) => saveRule(null, { ...input,
       ownStationId: own.id,
       channels: input.salesChannelIds.map((channelId) => ({ channelId, name: `Channel ${channelId}` })) }, options),

@@ -322,7 +322,6 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const page = await f.rt.reconciliation.profitPage({ preset: "since" });
     assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [expected, expectedIncome], "收入、上游成本和整段现读一样");
     assert.equal(page.range.preset, "since");
-    assert.equal(page.unaccountedUpstreamCostUsd, null, "这个范围下不显示「没算进利润的上游成本」（只读得到现读那一截，和别处对不上）");
     if (upstreamType === "newapi") {
       const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.host === "up.test" && url.pathname === "/api/log/self/stat")
         .map((url) => Number(url.searchParams.get("start_timestamp")) * 1000);
@@ -407,7 +406,6 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     assert.deepEqual([whole.pageTotals.actualCostUsd, whole.pageTotals.incomeUsd], [day10 + day11 + day13, income(3)], "10-12 不算进合计");
     const cell = (page, day) => page.rows[0].daily.find((item) => item.day === day);
     assert.deepEqual(["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"].map((day) => cell(whole, day).state), ["fixed", "fixed", "attention", "fixed"]);
-    assert.equal(cell(whole, "2026-10-12").reason, "KEY_IN_OTHER_UPSTREAM");
     // 头一天是半天：从 10-11 15:00 开始。只有今天是实时的：半天头不现读，是「—」、不进合计，只取 10-13 的账本；页面写「有 1 天还没固定」
     const half = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-11T15:00:00"), endMs: SH("2026-10-14T00:00:00") });
     assert.deepEqual([half.pageTotals.actualCostUsd, half.pageTotals.incomeUsd, half.notCountedDays.count], [day13, D * 2, 1]);
@@ -2105,7 +2103,6 @@ test("固定成本的上游：计算明细的实付按 0、不报差额，成本
   assert.deepEqual([detail.actual.usd, detail.gap, detail.grossProfitUsd], [0, null, detail.income.usd], "实付 0、不报差额、毛利 = 收入");
   const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-11T00:00:00") });
   assert.equal(page.rows[0].actualCostUsd, 0);
-  assert.deepEqual(page.rows[0].gap.state, "none");
   assert.equal(page.dailyCost.reduce((sum, day) => sum + day.actualCostUsd, 0), 0, "每日上游成本按 0");
 });
 
@@ -2156,7 +2153,7 @@ for (const count of [15, 20]) {
     await f.at("2026-10-30T10:10:00");
     const channelReads = () => f.requests.filter((item) => item === "own.test/api/channel/").length;
     const before = channelReads(), fromIndex = f.requests.length;
-    const refreshed = await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual", accountUsage: "refresh" });
+    const refreshed = await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual" });
     const reads = channelReads() - before;
     if (process.env.SHOW_COUNTS) console.log(`REFRESH-CHANNEL-READS ${count} ${reads} 自营站点共 ${f.requests.slice(fromIndex).filter((item) => item.startsWith("own.test")).length} 个 ${JSON.stringify(f.requests.slice(fromIndex).filter((item) => item.startsWith("own.test")).reduce((m, x) => ((m[x] = (m[x] || 0) + 1), m), {}))}`);
     assert.equal(reads, 1, "渠道列表一次刷新只读 1 次");
@@ -2200,15 +2197,10 @@ test("31 天里连着换两次 Key：第二次换 Key，D 到换的那天写「�
   assert.deepEqual(states.map((state) => state.manualReason), [], "没有被「少了一半以上」拦成需处理");
 });
 
-test("看一天（今天）点开那一行的近 7 天小格：更早已固定的天写已固定、带数，不写「还在读取」；整页的数只含今天", async (t) => {
+test("看一天（今天）：小格只有今天一格；整页的数只含今天（0 点到 9 点）", async (t) => {
   const f = await halfDayFixture(t);
-  const H = 3600, D = 24 * H;
+  const H = 3600;
   const page = await f.rt.reconciliation.profitPage({ preset: "today" });
-  const cells = page.rows[0].daily;
-  assert.equal(cells.length, 7);
-  const byDay = Object.fromEntries(cells.map((cell) => [cell.day, cell]));
-  for (const day of ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"]) assert.deepEqual([byDay[day].state, byDay[day].actualCostUsd], ["fixed", D], day);
-  assert.equal(byDay["2026-10-09"].state, "notStarted", "开始算以前的天不是还在读取");
-  assert.equal(byDay["2026-10-14"].state, "today");
+  assert.deepEqual(page.rows[0].daily.map((cell) => [cell.day, cell.state]), [["2026-10-14", "today"]]);
   assert.equal(page.rows[0].actualCostUsd, 9 * H, "整页的数只含今天（0 点到 9 点）");
 });

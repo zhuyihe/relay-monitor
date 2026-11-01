@@ -1,6 +1,6 @@
 "use client";
 // 成本估算：只留「上游成本构成」和「每天的上游成本」两块，数都取每日利润同一份
-// （/api/reconciliation/profit 的实付成本、「没算进利润的上游成本」和逐日成本 dailyCost）。
+// （/api/reconciliation/profit 的实付成本和逐日成本 dailyCost）。
 // 赚了多少钱只认每日利润那一个数，这里不算利润，也不再按余额变化估。
 import "../../styles/pages/analytics.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -18,7 +18,7 @@ import { Panel } from "../../components/panel";
 import { RangePicker } from "../../components/range-picker";
 import { useShellPage } from "../../components/shell-context";
 import { useUrlParams } from "../../components/use-url-state";
-import { fmtMoney, pageMoney, rowMoney } from "../reconciliation/profit-format";
+import { fmtMoney, rowMoney } from "../reconciliation/profit-format";
 import { COPY } from "./copy";
 import { DailyCostPanel } from "./daily-cost-chart";
 import { addDays, validDay } from "./derive";
@@ -143,7 +143,7 @@ export default function AnalyticsPage() {
     );
   }
 
-  if (!profit.rows.length && !profit.unaccountedUpstreamCostUsd) {
+  if (!profit.rows.length) {
     return (
       <div className="jy-page">
         <Panel title={COPY.panel.mix} extra={toDaily}>
@@ -195,9 +195,8 @@ function MixPanel({ profit, extra }: { profit: ProfitPageResponse; extra?: React
     entry.value += actual;
     byUpstream.set(id, entry);
   }
-  const items: HBarItem[] = [...byUpstream.entries()].map(([id, entry]) => ({ key: id, name: entry.name, value: r2(entry.value) }));
-  const unaccounted = pageMoney(profit, currency).unaccounted;
-  if (unaccounted) items.push({ key: "unaccounted", name: COPY.unaccounted, value: r2(unaccounted) });
+  // 按金额从大到小排，不看接口里行的顺序
+  const items: HBarItem[] = [...byUpstream.entries()].map(([id, entry]) => ({ key: id, name: entry.name, value: r2(entry.value) })).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   const total = items.reduce((sum, item) => sum + (item.value ?? 0), 0);
   return (
     <Panel title={COPY.panel.mix} caption={COPY.mixCaption} extra={extra}>
