@@ -158,6 +158,8 @@ const IDENTITY_TTL_MS = 30 * 60000;
 const TODAY_RESULT_GRACE_MS = 2 * 60000;
 // 浏览器和服务器的钟差、自选范围「到现在」的终点比服务器的现在早一点：这么多以内都当「到现在」（今天照样算）
 const CLOCK_SKEW_MS = 5 * 60000;
+// 后台读上游用量统计（轮询读今天、结账、回补过去的天）最多等多久：大渠道一天的用量上游可能要一两分钟才统计完；用户在页面前等着的读取（计算明细现读、换 Key 往前找 D）仍是 25 秒
+const BACKGROUND_STAT_TIMEOUT_MS = 120000;
 const LIVE_END_SLACK_MS = 2 * 60000;
 // 目录 / 身份读失败的上游，轮询重读的退避：第 n 次失败后等 min(60 秒 × 2^(n-1), 10 分钟) 才再读，读成功清零
 const METADATA_BACKOFF_BASE_MS = 60000;
@@ -868,6 +870,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 「还在读取」：这一行还没轮到读、读还在路上（页面用 todayReading 区分它和「读不到」，后者是真读过、读失败了，带原因）
   function readingResult(rule, window) {
     return { ...pendingResult(rule, window, issueText("PENDING")), todayReading: true };
+  }
+
+  // 后台读（轮询读今天、结账）的排队：每条绑定的读各自一条道，不等最慢的那条——
+  //   · 同时打到上游的后台读合起来不超过 MAX_CONCURRENT_RULES（6）条，跨轮也算在内（bgSlots）；
+  //   · 同一件事（一条绑定的今天、一次结账）还没读完，下一轮就不再起第二份，直接沿用在读的那份（bgInflight）；读完它自己写进缓存。
+  const bgInflight = (rt._reconciliationBgInflight ||= new Map());
+  const bgSlots = (rt._reconciliationBgSlots ||= { active: 0, queue: [] });
+  const acquireBgSlot = () => new Promise((resolve) => {
+    const go = () => { bgSlots.active += 1; resolve(); };
+    if (bgSlots.active < MAX_CONCURRENT_RULES) go(); else bgSlots.queue.push(go);
+  });
+  const releaseBgSlot = () => { bgSlots.active -= 1; bgSlots.queue.shift()?.(); };
+  const withBgSlot = async (work) => { await acquireBgSlot(); try { return await work(); } finally { releaseBgSlot(); } };
+  // key 在读着就返回在读的那份（不起新的）；work 里自己要吞掉错误
+  function runBackground(key, work, { slot = true } = {}) {
+    const existing = bgInflight.get(key);
+    if (existing) return existing;
+    const promise = (slot ? withBgSlot(work) : work()).finally(() => { if (bgInflight.get(key) === promise) bgInflight.delete(key); });
+    bgInflight.set(key, promise);
+    return promise;
   }
 
   function serializeWrite(write) {
@@ -2105,9 +2127,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // 只读查询不核验、不改写账单能力；观测（轮询、刷新）才会核验并保存。
-  async function upstreamWindowFor(upstream, metadata, token, window, { readOnly }) {
+  async function upstreamWindowFor(upstream, metadata, token, window, { readOnly, statTimeoutMs }) {
     return queryKeyReconciliationStat(upstream, {
-      token, metadata, timezone: window.timezone, capabilityStore: billingCapabilityStore, readOnly,
+      token, metadata, timezone: window.timezone, capabilityStore: billingCapabilityStore, readOnly, statTimeoutMs,
       startMs: window.startMs,
       endMs: window.endMs,
       // 元数据已用同一 PAT 读到身份和 /api/status（与 Key 校验同一份观察），各分段直接复用，不再逐段探测。
@@ -2118,7 +2140,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 一段的上游成本（K1c）：这一段里每把 Key 各取一次再相加（lib/reconciliation-keys.js）。每段只有绑定自己那把（或分段没带 Key）时，
   // 就是原来的单次取数，结果逐字不变；多把 Key、已删 Key 给 K2b 开段以后用。Key 在别的上游里（K2b 的事）这一版读不了，当 Key 身份对不上
-  async function upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId }) {
+  async function upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId, statTimeoutMs }) {
     let wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
     // Sub2API 已删 Key 按「总量减别的 Key」算（querySub2DeletedKeyStat）：传进来的 metadata 可能是这一轮缓存的（5 分钟内），
     // 「别的 Key」目录里刚建的、已经有用量的新 Key 还没进来，减法会把新 Key 的钱算进已删 Key。观测/结账（非只读）时强制重读一次
@@ -2129,15 +2151,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       metadata = await metadataFor(upstream, { force: true, timezone: window.timezone });
       wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
     }
-    if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly });
+    if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly, statTimeoutMs });
     if (wanted.some((item) => item.foreign)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，这一版读不了");
-    return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly }))));
+    return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly, statTimeoutMs }))));
   }
 
   // 上游成本（按 Key 整体取数的规则，生产的绑定都是）：每把 Key 只读它被记下的那些天（reconciliation_rule_day_keys，平时一把，换 Key 那天两把），
   // 连着的天合成一段、一段取一次，再相加。不切时刻、没有过渡段；Key 挪到别的渠道以后，旧 Key 不会在这个渠道没用它的日子里被算进来。
   // 没记过 Key 的天（还没装读取服务、读取服务第一次认出以前）用绑定现在的那把；窗口只有一把 Key 时一段、一次取数，和没有这张表时逐字相同
-  async function upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly }) {
+  async function upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly, statTimeoutMs }) {
     const first = dayKeyInTz(window.startMs, window.timezone), last = dayKeyInTz(Math.max(window.startMs, window.endMs - 1), window.timezone);
     const recorded = (await repository.listDayKeys([rule.id], first, last))[rule.id] || {};
     // 一把 Key 一天只算在一个渠道上：同一天同一把 Key 还在别的（后绑的）绑定里，这天这把 Key 不算在这条上（lostKeyDays，结账和今天现读都走这里）
@@ -2170,7 +2192,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       Object.defineProperty(zero, "keysLost", { value: true, enumerable: false, configurable: true }); // 这个窗口里的 Key 全算在别的绑定上（不是 Key 没用量）
       return zero;
     }
-    const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId })));
+    const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId, statTimeoutMs })));
     const total = results.length === 1 ? { ...results[0] } : sumKeyStats(results);
     // 每把 Key 各取了多少（每把 Key 分开记账，reconciliation_ledger_keys）：一把 Key 在窗口里分成几段连着的天时各段相加。
     // costUsd 是读到的扣费（读不全是 null），standardUsd 是 Sub2API 的标准计费（老部署没有就是 null）
@@ -2190,11 +2212,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 老绑定（legacy-v3，不是 isScopedBillingPolicy）的上游成本：这个窗口里有每天记下的 Key（手动选 Key、读取服务认出换 Key 都会记）就按它们读，
   // 换 Key 那天旧、新两把都算；没有记录的（没换过 Key、没装过读取服务）照旧按分段上的 Key 读，和以前逐字相同
-  async function upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, window, { readOnly }) {
+  async function upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, window, { readOnly, statTimeoutMs }) {
     const first = dayKeyInTz(window.startMs, window.timezone), last = dayKeyInTz(Math.max(window.startMs, window.endMs - 1), window.timezone);
     const recorded = await repository.listDayKeys([rule.id], first, last).then((all) => all[rule.id] || {}, () => ({}));
-    if (Object.keys(recorded).length) return upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly });
-    return upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId: rule.upstreamStationId });
+    if (Object.keys(recorded).length) return upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly, statTimeoutMs });
+    return upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId: rule.upstreamStationId, statTimeoutMs });
   }
 
   function tokenNameIsUnique(metadata, token) {
@@ -2610,6 +2632,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!observe && inflight.has(`${evaluateKey}:settle`)) return inflight.get(`${evaluateKey}:settle`);
 
     const inspectScope = async (rule, generation, billingSource, request) => {
+      // 后台读（轮询读今天、结账、回补，origin 都是 poll）等久一点；用户在页面前等着的读取（手动、页面、接入）保持 25 秒
+      const statTimeoutMs = origin === "poll" ? BACKGROUND_STAT_TIMEOUT_MS : undefined;
       if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
       const currentUpstream = upstreamStation(rule.upstreamStationId);
       const currentOwn = upstreamStation(rule.ownStationId);
@@ -2801,7 +2825,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const evidenceMetadata = upstreamProblem ? null : metadata, evidenceToken = upstreamProblem ? null : token;
       if (identityIssue) {
         const upstreamEvidence = !probe && evidenceToken && (!rule.canonicalKey || rule.canonicalKey === actualKey)
-          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe || settle }).catch(() => null) : null;
+          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe || settle, statTimeoutMs }).catch(() => null) : null;
         return unavailable(identityIssue, { metadata: evidenceMetadata, token: evidenceToken, upstream: upstreamEvidence }, false);
       }
       const canonicalKey = upstreamProblem ? rule.canonicalKey : canonicalBillingKey(upstream, metadata, token.id);
@@ -2979,8 +3003,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
-              ? upstreamWindowForDayKeys(rule, upstream, metadata, token, upstreamWindow, { readOnly: !observe })
-              : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe })).catch((error) => ({ error })),
+              ? upstreamWindowForDayKeys(rule, upstream, metadata, token, upstreamWindow, { readOnly: !observe, statTimeoutMs })
+              : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, statTimeoutMs })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
@@ -3949,7 +3973,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       // 重结请求在写账本的事务里按值消费（saveSnapshotsForScope）：结成了这条请求就办完了，取数期间才提的新请求留着；
       // 没结成按 settlementOutcome 记进状态行，退避由状态行管（请求本身保留，7 天不成就放弃）
-      return settleDay(rule, window, { origin: "poll", ownerRegistry, state, trigger }).catch(() => null);
+      return withBgSlot(() => settleDay(rule, window, { origin: "poll", ownerRegistry, state, trigger })).catch(() => null);
     };
     await mapWithConcurrency(yesterday, MAX_CONCURRENT_RULES, settle);
     if (!older.length) return;
@@ -4312,7 +4336,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
     },
     // 每轮观测今天；每条规则按自己的时区，在昨天结束 15 分钟后结账昨天，直到算出毛利为止。
-    async refreshDue(now = Date.now()) {
+    // background：轮询用——今天的读和结账都放到后台各走各的，这一轮不等最慢的那条（测试和脚本不带，照旧等全部读完）
+    async refreshDue(now = Date.now(), { background = false } = {}) {
       const startedAt = Date.now();
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
@@ -4338,18 +4363,22 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const registryRules = new Map([...rules, ...(archivedUsed ? archivedRules : []), ...archivedToday].map((rule) => [rule.id, rule]));
       const ownerRegistry = await ownerRegistryFor(allRules, [...registryRules.values()], { observe: true, poll: true });
       await markQuietOwnStations(rules, ownerRegistry);
-      await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
-        // 规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻。
-        const at = now + Math.max(0, Date.now() - startedAt);
-        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
-          .catch(() => null);
-      });
-      await mapWithConcurrency(archivedToday, MAX_CONCURRENT_RULES, async (rule) => {
-        const at = now + Math.max(0, Date.now() - startedAt);
-        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry }).catch(() => null);
-      });
+      // 每条绑定的今天各读各的（上一次还没读完就不再起第二份）；规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻
+      const todayReads = [
+        ...rules.map((rule) => runBackground(`today|${rule.id}`, async () => {
+          const at = now + Math.max(0, Date.now() - startedAt);
+          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry }).catch(() => null);
+        })),
+        ...archivedToday.map((rule) => runBackground(`today-archived|${rule.id}`, async () => {
+          const at = now + Math.max(0, Date.now() - startedAt);
+          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry }).catch(() => null);
+        })),
+      ];
+      if (!background) await Promise.all(todayReads);
       await syncOptionUnreadableSince(rules, { observe: true }); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
-      await settleDue(plan, ownerRegistry);
+      // 结账也放后台：上一次结账还没做完这一轮就不再起第二份，慢的那天接着在后台读，不挡这一轮
+      const settling = runBackground("settleDue", () => settleDue(plan, ownerRegistry).catch((error) => { console.error("结账失败:", error?.message || String(error)); }), { slot: false });
+      if (!background) await settling;
       await pruneSettlementStates(now);
       await autoStartRound();
       await settleFixedCostDays(now).catch((error) => console.error("固定成本按天固定失败:", error?.message || String(error)));
@@ -4421,7 +4450,7 @@ export function startReconciliationPolling(rt, options = {}) {
   const tick = async () => {
     running = true;
     lastStartAt = Date.now();
-    try { await module.refreshDue(); } catch { /* 下一轮重试 */ }
+    try { await module.refreshDue(undefined, { background: true }); } catch { /* 下一轮重试 */ }
     // 系统自己试读上游（身份、完整账单、时区）：到点的才读，失败按退避
     try { await (rt.autoVerify ||= createAutoVerifier(rt)).verifyDue(); } catch { /* 下一轮重试 */ }
     running = false;
