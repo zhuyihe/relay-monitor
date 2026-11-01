@@ -1,5 +1,6 @@
 // 模型供需第 1 步「高峰余量」的接口形状（设计 models-v4；算法在 lib/models-headroom.js，接口在 server/models-page.js）。
-// GET /api/models 多一个字段 headroom: HeadroomPage；GET /api/models/detail?name= 多一个字段 headroom: HeadroomDetail。
+// GET /api/models 多一个字段 headroom: HeadroomPage | null；GET /api/models/detail?name= 多一个字段 headroom: HeadroomDetail | null。
+// null = 这一次没算出来（没有数据库、读库出错、这个模型没有成交）：页面当「读不到」处理，老字段照常。
 // 老字段（rows、summary……）这一步不动、不删，页面换完以后再清；新页面只读 headroom。形状定了尽量别改，要改同时告诉做页面的人。
 //
 // 约定：
@@ -47,8 +48,9 @@ export type KeyUser = { userId: number; name: string; blocked: number }; // bloc
 export type HeadroomRow = {
   name: string;
   weekUsd: number; // 近 7 天消费（模型名下面那行小字），和老 rows 里的 week 同一个数
-  // short 缺（排最前）、thin 余量薄、ok 余量够、small 量很小不判（每天卖不到全站千分之一）。页面默认显示 short、thin，其余收起写「另外 N 个模型量很小或余量充足」
-  group: "short" | "thin" | "ok" | "small";
+  // short 缺（排最前）、thin 余量薄、unknown 判不了（上限没测到、数据积累中、没开错误日志，或上游撑不到今晚）、ok 余量够、small 量很小不判（每天卖不到全站千分之一）。
+  // 页面默认显示 short、thin、unknown，其余收起写「另外 N 个模型量很小或余量充足」
+  group: "short" | "thin" | "unknown" | "ok" | "small";
   peak: Peak | null;           // 这个模型的高峰时段；成交不到 7 天、读不到是 null
   need: Need | null;           // 不够 7 天或读不到是 null
   supply: Quantity;            // 能给
@@ -74,7 +76,9 @@ export type UpstreamHeadroom = {
 };
 
 export type HeadroomPage = {
-  // ok 都有；noErrorLog 没开错误日志（reason：switchOff 控制台里关了、noRecords 开着但读到现在一条错误都没有）；accumulating 错误日志读了不到 7 天
+  // ok 都有；accumulating 错误日志读了不到 7 天；
+  // noErrorLog 没有错误日志可用：switchOff 控制台里关了「读取错误日志」（能给、上限、余量、没买到、被挡都拿不到）；
+  //   noRecords 开着但读了 ≥1 天一条错误都没有（可能站没开，也可能真没出过错）：能给、上限照样是「至少 X」（最高成交量是真的），余量、没买到、被挡写「—」
   state: "ok" | "noErrorLog" | "accumulating";
   noErrorLogReason: "switchOff" | "noRecords" | null;
   errorLog: { coveredDays: number | null; needDays: number; daysLeft: number | null }; // 读了几天、要几天、还差几天
@@ -88,6 +92,8 @@ export type HeadroomPage = {
   rows: HeadroomRow[]; // 已经排好：缺的在前按缺口 × 每次卖多少排，余的在后余量越薄越靠前，量很小的最后
   upstreams: UpstreamHeadroom[];
   numbers: HeadroomNumbers; // 「怎么算的」里的数，读 lib/models-headroom.js 的 HEADROOM 同一处
+  // 动作链接要去的地方：只有公开地址，没有令牌和账号。own 是自营站点地址（去掉末尾斜杠）；upstreams 的 key 是上游 id，读不到是 null
+  links: { own: string | null; upstreams: Record<string, { baseUrl: string; type: string } | null> };
 };
 export type HeadroomNumbers = {
   needDays: number; minAttempts: number; minSuccessShare: number; minRateLimitShare: number; limitPercentile: number;

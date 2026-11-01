@@ -7,6 +7,8 @@ import { MODELS_VIEW } from "../lib/models-view.js";
 import { dayGrid } from "../lib/user-ops-view.js";
 import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { modelDetail, modelsPage, MODELS_FAIL_TTL_MS, MODELS_TTL_MS } from "./models-page.js";
+import { ERROR_SPEC } from "./own-log-store.js";
+import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 
 const H = 3600000;
 const NOW = Date.parse("2026-11-01T08:00:00Z");
@@ -225,4 +227,62 @@ test("找货帮手：价格按「倍率 × 你在那边的分组倍率」从低�
 test("抽屉：模型近 30 天没有消费（不在整页里）是 notFound", async (t) => {
   const { rt } = makeRt(t, world());
   assert.deepEqual(await modelDetail(rt, "never-sold", { now: NOW }), { notFound: true });
+});
+
+// ---- 高峰余量（模型供需第 1 步）：整页多 headroom，抽屉多 headroom；只读库里的计数，不多读自营站点 ----
+async function withStores(rt, { settings = {} } = {}) {
+  const errors = new MemoryOwnLogStore(ERROR_SPEC), consume = new MemoryOwnLogStore();
+  rt.pool = {}; rt._ownErrorStore = errors; rt._ownLogStore = consume;
+  rt.store.settings = { lowBalanceUsd: 5, expectedCost: true, ...settings };
+  const start = NOW - 10 * 24 * H;
+  await errors.startCursor("own1", start, start); await consume.startCursor("own1", start, start);
+  const slot = (day, hour) => Math.floor((grid.starts[N - 1 - day] + hour * H) / H) * H;
+  const buckets = [], errBuckets = [];
+  for (let day = 1; day <= 9; day += 1) {
+    buckets.push({ slotMs: slot(day, 10), channelId: 1, model: "gpt-5", upstreamModel: "", group: "g", semantic: "openai", requests: 20, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 0, adminQuota: 0, testQuota: 0 });
+    errBuckets.push({ table: "channel", slotMs: slot(day, 10), channelId: 1, model: "gpt-5", group: "g", reason: "rate_limit", status: 429, attempt: 1, retryable: 1, count: 5, sampled: 0 });
+  }
+  await consume.applyWindow("own1", { fromMs: start, toMs: NOW, buckets });
+  await errors.applyWindow("own1", { fromMs: start, toMs: NOW, buckets: errBuckets });
+  return { errors, consume };
+}
+
+test("高峰余量：整页多 headroom（读库里的小时计数，不多读自营站点），抽屉多这个模型的 headroom；老字段不变", async (t) => {
+  const { rt, requests } = makeRt(t, world());
+  await withStores(rt);
+  const page = await modelsPage(rt, { now: NOW });
+  assert.deepEqual(pathsOf(requests).sort(), ["/api/channel/", "/api/data/", "/api/data/flow", "/api/perf-metrics/summary"], "和没有高峰余量时读一样多的请求");
+  assert.equal(page.headroom.state, "ok", "错误日志读了 10 天");
+  assert.equal(page.headroom.consumeLog, true);
+  const row = page.headroom.rows.find((item) => item.name === "gpt-5");
+  assert.ok(row && row.peak && row.peak.hours.length >= 2, "有高峰时段");
+  assert.equal(row.supply.kind === "unavailable" || row.supply.kind === "accumulating", false);
+  assert.deepEqual(page.rows.map((item) => item.name), ["claude-x", "gpt-5", "glm", "deepseek-ai/DeepSeek-V3"], "老字段不变");
+  assert.equal(page.headroom.links.own, "https://own.test");
+  assert.deepEqual(Object.values(page.headroom.links.upstreams).every((link) => link == null || (/^https:\/\/up\d\.test$/.test(link.baseUrl) && link.type)), true, "只有公开地址和类型");
+  assert.equal(JSON.stringify(page.headroom.links).includes("accessToken") || JSON.stringify(page.headroom.links).includes("tok"), false);
+  const before = requests.length;
+  const detail = await modelDetail(rt, "gpt-5", { now: NOW });
+  assert.equal(detail.headroom.name, "gpt-5");
+  assert.equal(detail.headroom.hourly.last24.length, 24);
+  assert.deepEqual(pathsOf(requests.slice(before)), ["/api/perf-metrics"], "抽屉的 headroom 不多读自营站点");
+  assert.equal((await modelDetail(rt, "glm", { now: NOW })).headroom.channels[0].status, "off", "断货的模型：渠道手动停用不算");
+});
+
+test("高峰余量：没有数据库（或读库出错）时 headroom 是 null，整页照常；控制台里关了错误日志是 noErrorLog；没开整站消费日志能给不可用", async (t) => {
+  const plain = makeRt(t, world());
+  assert.equal((await modelsPage(plain.rt, { now: NOW })).headroom, null);
+  const off = makeRt(t, world());
+  await withStores(off.rt, { settings: { ownErrorLog: false } });
+  const page = await modelsPage(off.rt, { now: NOW });
+  assert.deepEqual([page.headroom.state, page.headroom.noErrorLogReason], ["noErrorLog", "switchOff"]);
+  const noConsume = makeRt(t, world());
+  await withStores(noConsume.rt, { settings: { expectedCost: false } });
+  const page2 = await modelsPage(noConsume.rt, { now: NOW });
+  assert.equal(page2.headroom.consumeLog, false);
+  assert.equal(page2.headroom.rows.find((item) => item.name === "gpt-5").supply.kind, "unavailable");
+  const broken = makeRt(t, world());
+  await withStores(broken.rt);
+  broken.rt._ownErrorStore.listBuckets = async () => { throw new Error("db down"); };
+  assert.equal((await modelsPage(broken.rt, { now: NOW })).headroom, null, "读库出错：老页面照常");
 });
