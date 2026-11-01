@@ -91,9 +91,10 @@ export default function ModelsPageRoute() {
   const kpis = kpisOf(page);
   const how = COPY.how, nums = howNumbers(page.rate);
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-models-page">
       {err && <RefreshFailedBanner asOf={page.asOf} tz={page.tz} error={err} onRetry={() => load()} />}
       <p className="jy-caption jy-models-note">{COPY.readNote(formatZonedTime(page.asOf, page.tz))}</p>
+      {page.perfEmpty && <p className="jy-caption jy-models-perf-empty" role="status">{COPY.perfEmpty}</p>}
       <Panel label={COPY.kpiLabel}>
         <dl className="jy-kpis jy-models-kpis">
           {kpis.map((kpi) => (
@@ -115,6 +116,8 @@ export default function ModelsPageRoute() {
           <li><b>{how.blindTitle}</b>{how.blind}</li>
           <li><b>{how.lostTitle}</b>{how.lost(nums.failPct)}</li>
           <li><b>{how.otherTitle}</b>{how.other(nums.soonDays, nums.ratio, nums.minPrev)}</li>
+          <li><b>{how.supplyTitle}</b>{how.supply}</li>
+          <li><b>{how.smallTitle}</b>{how.small(nums.minShare)}</li>
         </ul>
       </More>
       <p className="jy-models-foot"><Link className="jy-link" href={MY_LINK}>{COPY.toMy}</Link></p>

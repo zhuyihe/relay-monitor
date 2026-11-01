@@ -1,5 +1,6 @@
 /* 模型供需：只放本页独有的细节，布局和组件样式都在 jy.css */
 .jy-models-note { margin: 0; text-align: right; }
+.jy-models-perf-empty { margin: 0; color: var(--jy-warn-ink, var(--jy-ink-2)); }
 .jy-models-kpis dd.jy-caption { margin: 0; }
 .jy-models-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
 .jy-models-linkbtn:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
@@ -21,6 +22,24 @@
 /* 表里的跑道格靠左放（只在这一页的表，别的表的「约 N 天」照旧右对齐） */
 .jy-models-panel table.jy-data .jy-cell-runway, .jy-models-drawer table.jy-data .jy-cell-runway { justify-content: flex-start; }
 .jy-models-panel table.jy-data .jy-cell-runway .v, .jy-models-drawer table.jy-data .jy-cell-runway .v { min-width: 0; text-align: left; }
+
+.jy-models-rest { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
+.jy-models-rest:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
+/* 被自动停用的原因：一行放不下就截短，鼠标放上去（title）看全文 */
+.jy-models-reason { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-models-subcards .jy-models-reason { max-width: 100%; }
+
+/* 电脑：整页正好一屏——页高 = 视口 − 顶栏 − 内容区上下边距；主表那块占满剩下的高度，在框里自己滚，表头固定。
+   视口太矮时（表不到 220px）退回整页滚。手机照旧整页滚（下面 max-width: 767px 不设高度） */
+@media (min-width: 768px) {
+  .jy-models-page { height: calc(100vh - var(--jy-topbar-h) - 48px); min-height: 520px; gap: 12px; }
+  .jy-models-page > .jy-models-panel { flex: 1 1 0; min-height: 220px; }
+  .jy-models-panel > .jy-panel-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+  .jy-models-panel .jy-table-scroll { flex: 1 1 0; min-height: 0; max-height: none; border: 0; border-radius: 0; }
+  /* 段标题行也是 th：别吸在顶上盖住表头 */
+  .jy-models-panel table.jy-data tbody tr.jy-data-group th { position: static; }
+  .jy-models-panel > .jy-panel-foot { padding: 8px 24px; border-top: 1px solid var(--jy-rule-soft); }
+}
 
 /* 手机：一个模型一张卡片，三行；段标题在卡片上面 */
 .jy-models-cards { list-style: none; margin: 0; padding: 0; }
