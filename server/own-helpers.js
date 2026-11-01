@@ -183,6 +183,23 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
  * 对每个 (username, tokenName) 用日志统计接口取窗内消费额度（美元）后汇总。
  * 单个 Key 查询失败记为 0 并附带错误，不影响其余；返回调整后的两个口径 + 明细。
  */
+// 已经过完的窗口（终点离现在超过 RESOLD_SETTLED_AFTER_MS，晚写进来的日志早就到了）里一把 Key 的 stat 不会再变：留 RESOLD_CACHE_MS，
+// 自营业务页每 2 分钟算一次、看 30 天时不再每次都按「Key 数 × 天数」去问用户站（对用户站的每个请求都写一行审计日志）。今天和刚过完的窗口照旧现读
+const RESOLD_SETTLED_AFTER_MS = 2 * 3600000, RESOLD_CACHE_MS = 12 * 3600000;
+const resoldStatCache = new Map();
+export const resetResoldStatCache = () => resoldStatCache.clear();
+async function resoldKeyStat(own, k, startMs, endMs) {
+  const now = Date.now();
+  if (endMs > now - RESOLD_SETTLED_AFTER_MS) return queryLogStat(own, { username: k.username, tokenName: k.tokenName, startMs, endMs });
+  const key = JSON.stringify([ownChannelsKey(own), own.accessToken ?? "", k.username, k.tokenName, startMs, endMs]);
+  const hit = resoldStatCache.get(key);
+  if (hit && now - hit.at < RESOLD_CACHE_MS) return hit.usd;
+  const usd = await queryLogStat(own, { username: k.username, tokenName: k.tokenName, startMs, endMs });
+  resoldStatCache.set(key, { at: now, usd });
+  while (resoldStatCache.size > 2000) resoldStatCache.delete(resoldStatCache.keys().next().value);
+  return usd;
+}
+
 export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endMs, keys = resoldAdminKeysOf(own)) {
   if (!keys.length) return { incomeUsd, adminUsageUsd, resoldUsd: 0, breakdown: [] };
   const breakdown = [];
@@ -190,7 +207,7 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
   // 同一天的 Key 顺序读取；readOwnIncome 最多同时读四天，因此整个窗口最多四个 stat 请求。
   for (const k of keys) {
     try {
-      const usd = await queryLogStat(own, { username: k.username, tokenName: k.tokenName, startMs, endMs });
+      const usd = await resoldKeyStat(own, k, startMs, endMs);
       resoldUsd += usd;
       breakdown.push({ username: k.username, tokenName: k.tokenName, usd });
     } catch (err) {
@@ -383,15 +400,26 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
   };
 }
 
-// 自营站点的渠道列表，缓存 10 分钟（拉取开销不小）：利润和模型供需共用这一份，不各读各的
+// 自营站点的渠道列表，缓存 10 分钟（拉取开销不小）：利润、模型供需、对账、渠道目录同步共用这一份，不各读各的
+// （渠道目录同步每 5 分钟读一次，读完直接写进这里：seedOwnChannelList，别的读取基本不用再发请求）
 // beforeRead：缓存过期、真的要发请求之前问一下（额度紧、断路时抛错就不发）；命中缓存不问
-export async function ownChannelList(rt, own, { beforeRead = null } = {}) {
+const OWN_CHANNELS_TTL_MS = 10 * 60000;
+export const ownChannelsKey = (own) => [own.id, own.baseUrl, own.userId || "", own.authVersion ?? ""].join("|");
+export function seedOwnChannelList(rt, own, list) {
+  rt._ownChannelsCache = { at: Date.now(), stationId: own.id, key: ownChannelsKey(own), list };
+}
+// 缓存里还新鲜的列表（站点、地址、令牌版本都对得上）；没有是 null
+export function sharedOwnChannelList(rt, own) {
   const cc = rt._ownChannelsCache;
-  if (!cc?.list || cc.stationId !== own.id || Date.now() - cc.at > 600000) {
-    beforeRead?.();
-    rt._ownChannelsCache = { at: Date.now(), stationId: own.id, list: await queryOwnChannels(own) };
-  }
-  return rt._ownChannelsCache.list;
+  return cc?.list && cc.stationId === own.id && (cc.key == null || cc.key === ownChannelsKey(own)) && Date.now() - cc.at <= OWN_CHANNELS_TTL_MS ? cc.list : null;
+}
+export async function ownChannelList(rt, own, { beforeRead = null } = {}) {
+  const shared = sharedOwnChannelList(rt, own);
+  if (shared) return shared;
+  beforeRead?.();
+  const list = await queryOwnChannels(own);
+  seedOwnChannelList(rt, own, list);
+  return list;
 }
 
 /**

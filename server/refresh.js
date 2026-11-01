@@ -3,20 +3,22 @@
 // 全局 store/history → rt.store/rt.history，模块级状态改挂 rt 字段（多实例/HMR 安全）。
 import { queryStation } from "../lib/providers.js";
 import { evaluateStation } from "../lib/alerts.js";
+import { OWN_LOAD } from "../lib/own-load.js";
 
 // ---------------------------------------------------------------------------
 // 余额刷新 + 历史 + 告警
 // ---------------------------------------------------------------------------
 // 同一站点同时只允许一个刷新在途：定时器、手动刷新、保存后刷新可能重叠，
 // 并发会重复发告警、并让 Sub2API 轮换的 refresh_token 相互作废
-export function refreshStation(rt, station) {
+// options.background：后台定时轮询（自营站点按 OWN_LOAD.STATION_POLL_MS 才轮询一次，并和渠道目录同步、账号身份共用 /api/user/self 的读取）
+export function refreshStation(rt, station, options = {}) {
   station = station && rt.store.get(station.id);
   if (!station || station.archivedAt || station.monitorEnabled === false) return Promise.resolve(null);
   if (station.type === "fixed") return Promise.resolve(null); // 固定成本渠道不访问任何接口
   const inflight = rt._inflightRefresh || (rt._inflightRefresh = new Map());
   const running = inflight.get(station.id);
   if (running) return running;
-  const p = doRefreshOne(rt, station).finally(() => inflight.delete(station.id));
+  const p = doRefreshOne(rt, station, options).finally(() => inflight.delete(station.id));
   inflight.set(station.id, p);
   return p;
 }
@@ -47,8 +49,8 @@ function scheduleErrorRetry(rt, station) {
   timers.set(station.id, t);
 }
 
-async function doRefreshOne(rt, station) {
-  const { result } = await queryStation(station);
+async function doRefreshOne(rt, station, options = {}) {
+  const { result } = await queryStation(station, options.background && station.isOwn ? { shareOwnSelf: "write" } : undefined);
   // 查询在途期间站点可能已被删除：丢弃结果，避免复活历史记录或发幽灵告警
   const current = rt.store.get(station.id);
   if (!current || current.archivedAt || current.monitorEnabled === false) return result;
@@ -72,8 +74,17 @@ async function doRefreshOne(rt, station) {
   return result;
 }
 
-export async function refreshAll(rt) {
-  return Promise.all(rt.store.list({ includeArchived: false }).map((s) => refreshStation(rt, s)));
+// background：定时器来的。自营站点（只用来发现读不到、令牌失效）每 OWN_LOAD.STATION_POLL_MS 才读一次，别的站点每轮都读；
+// 手动刷新、保存设置后的刷新（background 不给）所有站点都读
+export async function refreshAll(rt, { background = false, now = Date.now() } = {}) {
+  const polledAt = (rt._ownPolledAt ||= new Map());
+  return Promise.all(rt.store.list({ includeArchived: false }).map((s) => {
+    if (background && s.isOwn) {
+      if (now - (polledAt.get(s.id) ?? -Infinity) < OWN_LOAD.STATION_POLL_MS) return null;
+      polledAt.set(s.id, now);
+    } else if (s.isOwn) polledAt.set(s.id, now);
+    return refreshStation(rt, s, { background });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +98,6 @@ export function restartPolling(rt) {
   rt._pollTimer = setInterval(() => {
     if (rt._pollRunning) return; // 上一轮还没结束（慢站点超时可达几十秒）就跳过本轮
     rt._pollRunning = true;
-    refreshAll(rt).catch(() => {}).finally(() => { rt._pollRunning = false; });
+    refreshAll(rt, { background: true }).catch(() => {}).finally(() => { rt._pollRunning = false; });
   }, sec * 1000);
 }

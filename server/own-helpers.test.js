@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStations, normalizeCostUrl,
@@ -7,6 +7,9 @@ import {
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
+import { computeResold, resetResoldStatCache } from "./own-helpers.js";
+
+beforeEach(() => resetResoldStatCache()); // 转售 Key 已过完的窗口的 stat 留 12 小时（server/own-helpers.js），测试之间不能互相带
 
 function incomeFixture() {
   const own = { id: "own", name: "自营", type: "newapi", baseUrl: "https://own.test", accessToken: "test", cnyPerUsd: 7 };
@@ -643,4 +646,33 @@ test("结账（带 fresh）读用户列表：转售 Key 的主人不是管理员
   t.mock.method(globalThis, "fetch", async () => { userReads += 1; return Response.json({ success: true, data: { items: f.users, total: f.users.length } }); });
   for (let i = 0; i < 5; i += 1) await readOwnAdminDirectory(f.rt, f.own, { fresh: true });
   assert.ok(userReads <= 5, `5 次各读一份新的，一共不超过 5 次（以前是 10 次）：${userReads}`);
+});
+
+test("转售 Key 的 stat：已经过完的窗口（终点离现在超过 2 小时）留 12 小时不再问用户站；今天和刚过完的窗口照旧现读；读失败的不留", async (t) => {
+  const own = { id: "own", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "tok", userId: "1" };
+  const keys = [{ username: "root", tokenName: "sale" }];
+  const H = 3600000, NOW = Date.parse("2026-10-20T12:00:00Z");
+  let at = NOW, calls = 0, fail = false;
+  t.mock.method(Date, "now", () => at);
+  t.mock.method(globalThis, "fetch", async () => { calls += 1; return fail ? Response.json({ success: false }, { status: 500 }) : Response.json({ success: true, data: { quota: 500000 } }); });
+  const settled = [NOW - 48 * H, NOW - 24 * H]; // 昨天之前的整天
+  assert.equal((await computeResold(own, 10, 5, settled[0], settled[1], keys)).resoldUsd, 1);
+  assert.equal(calls, 1);
+  await computeResold(own, 10, 5, settled[0], settled[1], keys);
+  assert.equal(calls, 1, "已过完的窗口：第二次不问");
+  await computeResold(own, 10, 5, NOW - 24 * H, NOW, keys); await computeResold(own, 10, 5, NOW - 24 * H, NOW, keys);
+  assert.equal(calls, 3, "今天（终点是现在）每次现读");
+  await computeResold(own, 10, 5, NOW - 24 * H, NOW - 1 * H, keys);
+  assert.equal(calls, 4, "刚过完不到 2 小时的窗口也现读");
+  at += 13 * H;
+  await computeResold(own, 10, 5, settled[0], settled[1], keys);
+  assert.equal(calls, 5, "留了 12 小时：到点重读");
+  resetResoldStatCache(); fail = true;
+  const failed = await computeResold(own, 10, 5, settled[0], settled[1], keys);
+  assert.equal(failed.breakdown[0].usd, 0);
+  fail = false;
+  await computeResold(own, 10, 5, settled[0], settled[1], keys);
+  assert.equal(calls, 7, "读失败的不留，下一次照读");
+  await computeResold({ ...own, accessToken: "other" }, 10, 5, settled[0], settled[1], keys);
+  assert.equal(calls, 8, "换了令牌是另一份");
 });

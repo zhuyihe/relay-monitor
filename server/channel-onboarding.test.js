@@ -2945,3 +2945,20 @@ test("K2c 开始算利润（真接入向导 + 真对账模块）：同一把 Key
   assert.deepEqual(again.alreadyRunning.map((item) => item.channelId), [2], "已经在算的不重复建");
   assert.equal((await f.rt.reconciliation.listRules()).length, 1);
 });
+
+test("给用户站减负：渠道目录同步（每 5 分钟）读到的渠道列表写进共用的渠道列表缓存，利润、模型供需、对账不再各读一遍；列表变了缓存里是最新的", async (t) => {
+  const f = await genuineBatchFixture(t);
+  const cached = f.rt._ownChannelsCache;
+  assert.equal(cached.stationId, f.own.id);
+  assert.deepEqual(cached.list.map((channel) => channel.id), f.rt.channelOnboarding.getSourceCatalogue().channels.map((channel) => channel.id));
+  const { ownChannelList, sharedOwnChannelList } = await import("./own-helpers.js");
+  assert.equal(sharedOwnChannelList(f.rt, f.own), cached.list, "对账、利润读的是同一份");
+  f.state.requests.length = 0;
+  assert.equal(await ownChannelList(f.rt, f.own), cached.list);
+  assert.equal(f.state.requests.length, 0, "命中缓存：不发请求");
+  f.state.channelBaseUrls[1] = "https://replacement.test"; await f.rt.channelOnboarding.sync();
+  assert.equal(f.rt._ownChannelsCache.list.find((channel) => channel.id === 1).baseUrl, "https://replacement.test", "同步后缓存里是最新的");
+  // 换了令牌（authVersion 变了）：旧的缓存不再算数
+  const changed = { ...f.own, authVersion: 99 };
+  assert.equal(sharedOwnChannelList(f.rt, changed), null);
+});

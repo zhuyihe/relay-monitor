@@ -5,10 +5,11 @@
 //   3. 第一次往回补 90 天（页面趋势图要画近 30 天和前 30 天，月留存要再往前 30 天）：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
 //   4. 算每个用户还能用几天（lib/user-balance.js）和重点用户（日均消费占全站八成），结果放在 rt._userOpsView 里（以后页面读）；
 //   5. 站长提醒：规则「重点用户余额用完」「重点用户快用完」（rules.onUserExhaust / onUserEta，告警中心「用户」一组）开着、数据新鲜、回补完成时，只推送重点用户，几位一起推一条。
-// 页面开着的时候（页面来取数就续 90 秒「有人在看」，做法同每日利润页）加一档「实时」：每分钟读一次用户列表和最近 3 小时的用量（回补没完也接着补），
-// 这一档不写余额快照、不重算还能用几天和重点用户、不推送（这些仍是每 10 分钟一次），页面上的余额、今天的消费、最近使用是每分钟的。没人看就只有 10 分钟那一档。
+// 页面开着的时候（页面来取数就续 90 秒「有人在看」，做法同每日利润页）加一档「实时」：每 5 分钟读一次用户列表和最近 3 小时的用量（回补没完也接着补），
+// 这一档不写余额快照、不重算还能用几天和重点用户、不推送（这些仍是每 10 分钟一次），页面上的余额、今天的消费、最近使用是每 5 分钟的。没人看就只有 10 分钟那一档。
 // 对用户自己 New API 的读取：每轮 1 个用户列表（每页 100 个）+ 1 个 data/users，回补期间再加最多 3 个；每个请求之前先问 lib/own-request-budget.js：
 // 断路、或者最近 180 秒已经发了太多就整轮不读。总开关：settings.userOpsEnabled（默认开），关了一个请求都不发。
+import { OWN_LOAD } from "../lib/own-load.js";
 import { QUOTA_PER_UNIT, queryOwnData } from "../lib/providers.js";
 import { channelsForEvent } from "../lib/alerts.js";
 import { broadcast } from "../lib/notify.js";
@@ -35,9 +36,9 @@ export const USER_OPS = Object.freeze({
   // 最近 180 秒这个站点已经发了这么多请求（共 360 个额度）就整轮不读：比整站日志读取的份额更保守，别的读取（运营总览、对账）优先
   BUDGET_MAX_USED: Math.floor(OWN_RATE_LIMIT * 0.6),
   PRUNE_EVERY_MS: 6 * HOUR_MS,
-  LIVE_INTERVAL_MS: 55000, // 有人在看：每分钟一次（留 5 秒的抖动余地）
+  LIVE_INTERVAL_MS: OWN_LOAD.USER_OPS_LIVE_MS - 5000, // 有人在看：每 5 分钟一次（留 5 秒的抖动余地；以前每分钟，给用户站减负）
   VIEW_HOLD_MS: 90000, // 页面来取一次数，「有人在看」续这么久（两次页面刷新的时间）
-  LIVE_USERS_MAX_AGE_MS: 50000, // 实时一档读用户列表，缓存超过这么久就重读
+  LIVE_USERS_MAX_AGE_MS: OWN_LOAD.USER_OPS_LIVE_MS - 10000, // 实时一档读用户列表，缓存超过这么久就重读
 });
 
 const ownStationOf = (rt) => rt.store?.list?.().find((station) => station.isOwn && station.type === "newapi" && !station.archivedAt) || null;
@@ -301,7 +302,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     // 同一时间只跑一轮；调用方不用等（轮询里不阻塞）
     runOnce(options) { return state.inflight ||= run(options).finally(() => { state.inflight = null; }); },
     getView: () => rt._userOpsView || null,
-    // 页面来取数：续「有人在看」90 秒（页面每分钟来一次，就一直是每分钟一次的实时一档）
+    // 页面来取数：续「有人在看」90 秒（页面每分钟来一次，就一直是每 5 分钟一次的实时一档）
     markViewing() { state.viewedAt = now(); },
     // 页面上数字最后更新的时刻：整轮或实时一档读完用户列表的那一刻
     getLiveAt: () => Math.max(rt._userOpsView?.at || 0, state.liveAt || 0),

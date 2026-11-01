@@ -9,7 +9,7 @@ import { churnResponse } from "../../../../server/user-ops-churn.js";
 
 export const GET = withAuth(async (request, rt) => {
   const { ops, store } = userOpsOf(rt);
-  // 和用户页同一个「有人在看」：页面来取数续 90 秒，后台每分钟读一次用户列表和最近的用量
+  // 和用户页同一个「有人在看」：页面来取数续 90 秒，后台每 5 分钟读一次用户列表和最近的用量
   ops.markViewing();
   ops.runOnce().catch(() => {});
   const page = await churnResponse(rt, ops, store, new URL(request.url).searchParams);
