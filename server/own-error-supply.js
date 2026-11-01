@@ -17,7 +17,7 @@
 //     逐档相减的原始数（retriedOrStopped）一并给出，要不要用由页面和审核定。
 // 站点没有选到渠道就停了的、用户自己重试、客户端放弃都看不到。按「模型 × 小时」算（一个请求的各次尝试都在同一个小时、同一个模型里，跨渠道），再往上加。
 import { ERROR_REASONS, MAX_ATTEMPT, OWN_ERROR_SLOT_MS } from "../lib/own-error-bucket.js";
-import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, zonedParts } from "../lib/business-time.js";
+import { DEFAULT_BUSINESS_TIME_ZONE, wallHourOfSlot } from "../lib/business-time.js";
 
 // 算「被拒」的原因：请求问题（bad_request）是用户自己的请求写错了，不算
 export const REJECTED_REASONS = Object.freeze(ERROR_REASONS.filter((reason) => reason !== "bad_request"));
@@ -77,12 +77,8 @@ export function estimateFinalFailures(attempts, retryTimes = null) {
   return { finalFailures: nonRetryable, method: "none", retriedOrStopped };
 }
 
-// 业务时区的墙上时钟：这个小时是哪一天的几点。夏令时那两天一天有 23 或 25 个小时：春天跳过的那个钟点没有这个小时；秋天重复的那个钟点有两个小时，
-// 第二个的 repeated 是 true（页面按「同一天同一个钟点」归并时，要把两个加在一起或只取一个，自己定）。半点时区（印度等）的小时桶横跨两个钟点，算它开始那个钟点。
-export function wallHourOf(slotMs, tz = DEFAULT_BUSINESS_TIME_ZONE) {
-  const here = zonedParts(slotMs, tz), before = zonedParts(slotMs - OWN_ERROR_SLOT_MS, tz);
-  return { dayKey: dayKeyInTz(slotMs, tz), hour: here.hour, repeated: before.hour === here.hour && before.day === here.day && before.month === here.month };
-}
+// 业务时区的墙上时钟（每个小时是哪一天的几点、夏令时那两天一天 23 / 25 个小时、重复的钟点第二个 repeated）：算法在 lib/business-time.js
+export const wallHourOf = (slotMs, tz = DEFAULT_BUSINESS_TIME_ZONE) => wallHourOfSlot(slotMs, tz, OWN_ERROR_SLOT_MS);
 
 /**
  * errors、consume：两个桶存取（OwnLogStore，错误日志 spec 和消费日志 spec 各一个）；stationId：自营站点；fromMs、toMs：时间范围（按小时对齐：from 向下、to 向上取整点）；
