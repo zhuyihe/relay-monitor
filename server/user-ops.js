@@ -3,8 +3,8 @@
 //   1. 读用户列表（server/own-helpers.js 的 getOwnUsers，10 分钟缓存），给每个非管理员用户记一条余额快照（变了才写，没变每天补一条）；
 //   2. 读 /api/data/users 最近 3 小时，按小时覆盖写进 user_usage_hours；
 //   3. 第一次往回补 30 天：每轮最多 3 个请求，一天一个，从最近的天往前；补完才算「回补完成」；
-//   4. 算每个用户还能用几天（lib/user-balance.js）和大客户（日均消费占全站八成），结果放在 rt._userOpsView 里（以后页面读）；
-//   5. 站长提醒：规则「用户余额」（rules.onUserBalance，默认关）开着、数据新鲜、回补完成时，只推送大客户，几位一起推一条。
+//   4. 算每个用户还能用几天（lib/user-balance.js）和重点用户（日均消费占全站八成），结果放在 rt._userOpsView 里（以后页面读）；
+//   5. 站长提醒：规则「用户余额」（rules.onUserBalance，默认关）开着、数据新鲜、回补完成时，只推送重点用户，几位一起推一条。
 // 对用户自己 New API 的读取：每轮 1 个用户列表（每页 100 个）+ 1 个 data/users，回补期间再加最多 3 个；每个请求之前先问 lib/own-request-budget.js：
 // 断路、或者最近 180 秒已经发了太多就整轮不读。总开关：settings.userOpsEnabled（默认开），关了一个请求都不发。
 import { QUOTA_PER_UNIT, queryOwnData } from "../lib/providers.js";
@@ -37,17 +37,38 @@ export const USER_OPS = Object.freeze({
 const ownStationOf = (rt) => rt.store?.list?.().find((station) => station.isOwn && station.type === "newapi" && !station.archivedAt) || null;
 const toUsd = (quota) => quota / QUOTA_PER_UNIT;
 
-// 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）：快照、用量、进度、提醒状态全清，从头来
+// 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）：快照、用量、进度、提醒状态全清，从头来。
+// 先把「代数」加一：正在跑的那一轮每次 await 回来都比一下代数，变了就不再写（不然迟到的写会把进度行写回来，回补目标是空的，一路往 1970 年读；
+// 删除站点以后用户名和用量又被写回去，永远留在库里）；下一轮开头发现代数变了，把内存里的快照缓存和用户列表也清掉
 export async function forgetUserOps(rt, stationId) {
   if (!rt?.pool) return;
-  await (rt._userOpsStore ||= new UserOpsStore(rt.pool)).deleteStation(stationId);
+  rt._userOpsGen = (rt._userOpsGen || 0) + 1;
   rt._userOpsView = null;
+  await (rt._userOpsStore ||= new UserOpsStore(rt.pool)).deleteStation(stationId);
+}
+
+const STALE = "USER_OPS_STALE";
+// 包一层存储：每次调用前后都比一下代数，变了抛 STALE（读到的是删除以前的数，写了会写回脏数据，都不要）
+function guardedStore(ops, alive) {
+  return new Proxy(ops, {
+    get(target, prop) {
+      const fn = target[prop];
+      if (typeof fn !== "function") return fn;
+      return async (...args) => {
+        alive();
+        const out = await fn.apply(target, args);
+        alive();
+        return out;
+      };
+    },
+  });
 }
 
 export function createUserOps(rt, { store = null, now = () => Date.now(), send = broadcast } = {}) {
   const opsStore = () => store || (rt.pool ? (rt._userOpsStore ||= new UserOpsStore(rt.pool)) : null);
   const lastPoints = new Map(); // 站点 id → Map(用户 id → { t, balanceUsd })，第一次从库里读，之后在内存里跟着写
-  const state = { lastRunAt: 0, lastPruneAt: 0, inflight: null, lastUsers: null };
+  const state = { lastRunAt: 0, lastPruneAt: 0, inflight: null, lastUsers: null, gen: 0 };
+  let alive = () => {}; // 这一轮的「站点没被删、没换地址」检查，run 开头换成这一轮自己的（同一时间只跑一轮）
 
   const budgetOk = (own, needed = 1) => {
     const at = now();
@@ -57,6 +78,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
 
   async function snapshotBalances(ops, own, at) {
     const list = await getOwnUsers(rt, own, { since: at - USER_OPS.USERS_MAX_AGE_MS });
+    alive();
     state.lastUsers = list;
     let known = lastPoints.get(own.id);
     if (!known) lastPoints.set(own.id, known = await ops.lastBalancePoints(own.id));
@@ -87,7 +109,8 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
   async function backfill(ops, own, at) {
     const tz = businessTimeZone();
     let progress = await ops.getProgress(own.id);
-    if (progress?.backfillCursorMs == null) {
+    // 进度行没有、或者只有半截（别的字段先写进去、回补目标是空的）：重新初始化，不然目标是空就一路往 1970 年读
+    if (progress?.backfillCursorMs == null || progress.backfillTargetMs == null) {
       progress = await ops.saveProgress(own.id, { backfillCursorMs: at, backfillStartedMs: at, backfillTargetMs: dayStartInTz(shiftDayLabel(dayKeyInTz(at, tz), -(USER_OPS.BACKFILL_DAYS - 1)), tz) }, at);
     }
     let cursor = progress.backfillCursorMs, steps = 0;
@@ -132,7 +155,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     return rt._userOpsView;
   }
 
-  // 站长提醒：只推送大客户；状态先写再推，一条都没送到就退回原状态，下一轮再试
+  // 站长提醒：只推送重点用户；状态先写再推，一条都没送到就退回原状态，下一轮再试
   async function alerts(ops, own, at, view) {
     const rules = rt.store?.rules || {};
     if (rules.onUserBalance !== true || !view.pushAllowed) return { pushed: 0 };
@@ -149,6 +172,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     for (const item of changed) await ops.saveAlertState(own.id, item.id, item.state, at);
     if (!due.length) return { pushed: 0 };
     for (const item of due) await ops.saveAlertState(own.id, item.user.id, item.decision.state, at);
+    alive();
     const channels = channelsForEvent(rt.store?.channels, { channelsFor: { userBalance: rules.userBalanceChannelIds } }, "userBalance");
     const { title, body } = userBalanceMessage(due.map(({ user }) => user), formatZonedDateTime(at, businessTimeZone()));
     let sent = [];
@@ -171,26 +195,41 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
 
   async function run({ force = false } = {}) {
     if (rt.store?.settings?.userOpsEnabled === false) return { skipped: "off" };
-    const own = ownStationOf(rt), ops = opsStore();
-    if (!own || !ops) return { skipped: "no-own" };
+    const own = ownStationOf(rt), rawOps = opsStore();
+    if (!own || !rawOps) return { skipped: "no-own" };
     const at = now();
     if (!force && at - state.lastRunAt < USER_OPS.INTERVAL_MS) return { skipped: "interval" };
     state.lastRunAt = at;
     if (!budgetOk(own, 2)) return { skipped: "budget" };
+    // 站点被删、换了地址（forgetUserOps 把代数加一）：内存里的快照缓存、用户列表是旧站的，清掉；这一轮从头记住自己的代数
+    const gen = rt._userOpsGen || 0;
+    if (state.gen !== gen) { lastPoints.clear(); state.lastUsers = null; state.gen = gen; }
+    alive = () => { if ((rt._userOpsGen || 0) !== gen) throw Object.assign(new Error("stale"), { code: STALE }); };
+    const ops = guardedStore(rawOps, alive);
+    // STALE 不记成错误，一路抛到最外面结束这一轮
+    const note = (out, tag, error) => { if (error?.code === STALE) throw error; out.errors.push(`${tag}:${error?.code || "ERROR"}`); };
     const out = { snapshots: 0, usageRows: 0, errors: [] };
-    try { out.snapshots = await snapshotBalances(ops, own, at); } catch (error) { out.errors.push(`users:${error?.code || "ERROR"}`); }
-    if (budgetOk(own)) { try { out.usageRows = await syncUsage(ops, own, at); } catch (error) { out.errors.push(`usage:${error?.code || "ERROR"}`); } }
-    let backfillState = { done: false, steps: 0, cursor: at, target: at, startedMs: at };
-    try { backfillState = await backfill(ops, own, at); } catch (error) { out.errors.push(`backfill:${error?.code || "ERROR"}`); }
     try {
-      const progress = await ops.getProgress(own.id);
-      const fresh = progress?.balanceSyncedMs != null && progress?.usageSyncedMs != null && at - progress.balanceSyncedMs <= USER_BALANCE.FRESH_MS && at - progress.usageSyncedMs <= USER_BALANCE.FRESH_MS;
-      const view = await evaluate(ops, own, at, { backfillState, fresh });
-      out.alerts = await alerts(ops, own, at, view);
-      await pruneIfDue(ops, own, at);
-    } catch (error) { out.errors.push(`evaluate:${error?.code || "ERROR"}`); }
-    out.backfill = backfillState;
-    return out;
+      try { out.snapshots = await snapshotBalances(ops, own, at); } catch (error) { note(out, "users", error); }
+      alive();
+      if (budgetOk(own)) { try { out.usageRows = await syncUsage(ops, own, at); } catch (error) { note(out, "usage", error); } }
+      alive();
+      let backfillState = { done: false, steps: 0, cursor: at, target: at, startedMs: at };
+      try { backfillState = await backfill(ops, own, at); } catch (error) { note(out, "backfill", error); }
+      try {
+        const progress = await ops.getProgress(own.id);
+        const fresh = progress?.balanceSyncedMs != null && progress?.usageSyncedMs != null && at - progress.balanceSyncedMs <= USER_BALANCE.FRESH_MS && at - progress.usageSyncedMs <= USER_BALANCE.FRESH_MS;
+        const view = await evaluate(ops, own, at, { backfillState, fresh });
+        alive();
+        out.alerts = await alerts(ops, own, at, view);
+        await pruneIfDue(ops, own, at);
+      } catch (error) { note(out, "evaluate", error); }
+      out.backfill = backfillState;
+      return out;
+    } catch (error) {
+      if (error?.code === STALE) return { skipped: "changed" };
+      throw error;
+    }
   }
 
   return {

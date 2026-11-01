@@ -1,7 +1,7 @@
 // 用户运营的后台（server/user-ops.js）：假的自营站点（用户列表、按小时用量），内存存储，假时钟；一步 10 分钟
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createUserOps } from "./user-ops.js";
+import { createUserOps, forgetUserOps } from "./user-ops.js";
 import { MemoryUserOpsStore } from "./test-support/user-ops-memory-store.js";
 import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
 
@@ -20,6 +20,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
     const url = new URL(String(input));
     if (url.host !== "own.test") return { status: 404, text: async () => "{}" };
     site.requests.push(`${url.pathname}${url.pathname === "/api/data/users" ? `?${Number(url.searchParams.get("end_timestamp")) - Number(url.searchParams.get("start_timestamp")) > 4 * 3600 ? "day" : "recent"}` : ""}`);
+    if (site.gate) await site.gate;
     if (site.hard) return { status: 500, text: async () => "{}" };
     const reply = (data) => ({ status: 200, text: async () => JSON.stringify({ success: true, data }) });
     const soft = { status: 200, text: async () => JSON.stringify({ success: false, message: "busy" }) };
@@ -122,12 +123,12 @@ test("余额快照：变了才写，没变的每天补一条", async (t) => {
   assert.equal(points.get(2).length, 2, "b 没变，满 24 小时补了一条");
 });
 
-test("端到端：两位大客户一起快用完 → 24 小时后一条推送、按日均消费从高到低；各自降到二级再推一次；小用户不是大客户不推送；没有重复", async (t) => {
+test("端到端：两位重点用户一起快用完 → 24 小时后一条推送、按日均消费从高到低；各自降到二级再推一次；小用户不是大客户不推送；没有重复", async (t) => {
   const f = makeSite(t, crowd(), { rules: { renotifyHours: 0 } }); // 0 = 同一级只提醒一次；每天重复提醒另有用例
   await f.stepsTo(72);
   assert.equal(f.sent.length, 3, f.sent.map((item) => `${item.title}\n${item.body}`).join("\n=====\n"));
   const [first, second, third] = f.sent;
-  assert.match(first.title, /2 位大用户/);
+  assert.equal(first.title, "【重点用户快用完】big1 等 2 位");
   assert.match(first.body.split("\n")[0], /^用户：big1 /);
   assert.match(first.body.split("\n")[1], /^用户：big2 /);
   assert.match(second.body, /用户：big1 .*余额用完|用户：big1 .*还够/);
@@ -167,7 +168,7 @@ test("重启以后不重复推：提醒状态在库里", async (t) => {
   assert.equal(f.sent.length, 1, "同一级 24 小时内不重复");
 });
 
-test("充值：余额涨了，这一级的提醒清零重新计数，这一刻不推送（余额已经够）", async (t) => {
+test("充到够用：预计天数回到一级线的 1.2 倍以上，这一级的提醒清零重新计数，这一刻不推送", async (t) => {
   const f = makeSite(t, crowd());
   await f.stepsTo(25);
   assert.equal(f.sent.length, 1);
@@ -229,4 +230,49 @@ test("一级提醒一直没好：按 renotifyHours（默认 24 小时）每天�
   assert.equal(f.sent.length, 1, "A 一级推过一次，23 小时后还没到再提醒的时候");
   await f.stepsTo(24 + 25);
   assert.equal(f.sent.length, 2, "过了 24 小时仍然在一级：再提醒一次");
+});
+
+test("删除自营站点（或改地址）时正在跑的那一轮：迟到的写不会把数据写回来，下一轮从头来", async (t) => {
+  const f = makeSite(t, crowd());
+  f.rt.pool = {};
+  f.rt._userOpsStore = f.store;
+  await f.step();
+  assert.ok((await f.store.listUsageHours("own1", 0)).length > 0);
+  let release;
+  f.site.gate = new Promise((resolve) => { release = resolve; });
+  const running = f.step(); // 对自营站点的第一个请求挂住
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await forgetUserOps(f.rt, "own1");
+  release();
+  assert.deepEqual(await running, { skipped: "changed" }, "站点没了，这一轮结束，不记成错误");
+  assert.equal((await f.store.listUsageHours("own1", 0)).length, 0);
+  assert.equal((await f.store.listBalancePoints("own1", 0)).size, 0);
+  assert.equal(await f.store.getProgress("own1"), null, "进度行没有被写回来（写回来的话回补目标是空的，一路往 1970 年读）");
+  assert.equal(f.ops.getView(), null);
+  f.site.gate = null;
+  const next = await f.step();
+  assert.equal(next.backfill.steps, 3, "下一轮从头回补");
+  assert.ok((await f.store.getProgress("own1")).backfillTargetMs > START - 31 * 24 * H);
+  assert.equal(f.ops._state.lastUsers.length, f.site.users.length, "用户列表是新读的");
+});
+
+test("回补进度行只有半截（回补目标是空的）：重新初始化，不会一路往 1970 年读", async (t) => {
+  const f = makeSite(t, crowd());
+  await f.store.saveProgress("own1", { backfillCursorMs: START, balanceSyncedMs: START });
+  const out = await f.step();
+  assert.equal(out.backfill.steps, 3);
+  const progress = await f.store.getProgress("own1");
+  assert.ok(progress.backfillTargetMs > START - 31 * 24 * H && progress.backfillTargetMs < START - 29 * 24 * H, String(progress.backfillTargetMs));
+  assert.equal(f.count("/api/data/users?day"), 3);
+});
+
+test("一直在充小额：余额每小时都在涨、预计天数一直在提醒线以内，不会每小时推一次", async (t) => {
+  const f = makeSite(t, crowd());
+  await f.stepsTo(25);
+  assert.equal(f.sent.length, 1);
+  for (let hour = 0; hour < 22; hour += 1) {
+    for (let n = 0; n < 6; n += 1) await f.step();
+    f.site.users[0].balance += 6; // big1 每小时花 5，充 6：余额涨，预计天数还在 3 天以内
+  }
+  assert.equal(f.sent.length, 1, f.sent.map((item) => item.title).join("\n"));
 });
