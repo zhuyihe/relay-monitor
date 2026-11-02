@@ -1277,15 +1277,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 所以解绑那天以后的天只写新 Key
     const archivedDay = reopen && rule.archivedAtMs != null ? dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) : null;
     // 原来那把 Key 在别的绑定那边某天让给了这条绑定（对方那天记着它、yielded）：这天原来那把 Key 留着，和新 Key 一起记——不然改过去的天把它拿掉，对方又让出去了，这把 Key 两边都不算
+    // 下面四处读库读不到就抛 KEY_CHANGE_FAILED、什么都不写（读失败当成「没有」往下算会写错：拿掉对方让出的 Key、丢掉第一次换下来的 Key、不写重结请求、被挡的天不重新排队）
+    const failed = () => codedError("KEY_CHANGE_FAILED", "没能换成这把 Key，请稍后再试");
     const yieldedToMe = new Set();
     if (days.length) {
       const peers = (await peerRules()).filter((other) => other.id !== rule.id && other.upstreamStationId === rule.upstreamStationId);
-      const theirs = peers.length ? await repository.listDayKeys(peers.map((other) => other.id), fromDay, today).catch(() => ({})) : {};
+      const theirs = peers.length ? await repository.listDayKeys(peers.map((other) => other.id), fromDay, today).catch(() => { throw failed(); }) : {};
       for (const other of peers) for (const [day, list] of Object.entries(theirs[other.id] || {})) if (list.some((key) => key.yielded && Number(key.tokenId) === Number(old.tokenId))) yieldedToMe.add(day);
     }
     // 这些天里已经记着的 Key（31 天里连着换两次：第一次换下来的旧 Key 在这几天也记着，不能因为这次换 Key 被丢掉）：每天写「已经记着的 + 新 Key」，
     // 这天没记录的按当前的旧 Key 算（上面先补成旧 Key 的那些天）
-    const recordedKeys = days.length ? ((await repository.listDayKeys([rule.id], fromDay, today).catch(() => ({})))[rule.id] || {}) : {};
+    const recordedKeys = days.length ? ((await repository.listDayKeys([rule.id], fromDay, today).catch(() => { throw failed(); }))[rule.id] || {}) : {};
     const dayRows = days.flatMap((billDate) => {
       const keep = (archivedDay == null || billDate <= archivedDay) || yieldedToMe.has(billDate);
       const known = keep ? (recordedKeys[billDate]?.length ? recordedKeys[billDate].map((key) => ({ upstreamStationId: key.upstreamStationId ?? old.upstreamStationId, tokenId: key.tokenId, tokenName: key.tokenName ?? null, ...(key.yielded ? { yielded: true } : {}) })) : [old]) : [];
@@ -1295,7 +1297,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // D 到昨天里已经固定（账本里有）的天：写重结请求重算；超过 31 天的不动
     const recomputed = new Set(), tooOldDays = [], resettleDates = [];
     if (fromDay < today) {
-      const fixed = await repository.listLedgerDayFacts([rule.id], fromDay, yesterday).catch(() => []);
+      const fixed = await repository.listLedgerDayFacts([rule.id], fromDay, yesterday).catch(() => { throw failed(); });
       for (const fact of fixed) {
         const endMs = dayStartInTz(shiftDayLabel(fact.billDate, 1), rule.timezone);
         if (now - endMs > RESETTLE_MAX_AGE_MS) tooOldDays.push(fact.billDate); else { resettleDates.push(fact.billDate); recomputed.add(fact.billDate); }
@@ -1304,7 +1306,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 被挡住的几天：Key 集合换成新的一把（D 以后的已经换好），状态行标成「原因没了」，下一轮轮询按新 Key 结账固定
     // 那天这把 Key 在同一个上游别的绑定的每天 Key 里（比如 Key 刚从别的渠道挪过来、控制台还没改，那边照常固定着）：这一天照样改成新 Key、重新排队结账，
     // 但这条绑定这天这把 Key 让出去（yielded）：成本记 0、收入照算，这把 Key 只在别的绑定那边算一次，不回头改别的绑定已经固定的天
-    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => [])).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
+    const blocked = (await repository.listSettlementStates([rule.id]).catch(() => { throw failed(); })).filter((state) => state.manualReason === "CHANNEL_KEY_NO_USAGE");
     const heldBlocked = blocked.length ? await keyHeldByOthers(rule, token.id, blocked.map((state) => state.billDate).sort()[0], today) : () => false;
     const before = blocked.filter((state) => state.billDate < fromDay);
     const recheckStates = blocked.map((state) => {

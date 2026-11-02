@@ -2422,3 +2422,38 @@ test("结账慢不挡今天的刷新：昨天的账在后台慢慢读，今天�
   t.mock.timers.tick(100000); await yieldTurns(120);
   assert.ok(f.costOn("2026-10-30").some((row) => row.rule_id === up2Rule.id), "读完自己固定了");
 });
+
+// 手动换 Key / 重新打开（changeRuleKeyManual）：先把要写的都算好、最后一个事务写。算的时候读库读不到，不能当成「没有」往下算再写：
+// 读不到对方让出的每天 Key（拿掉对方让出的旧 Key，两边都不算）、读不到这条绑定已记的每天 Key（丢掉第一次换下来的）、读不到账本的已固定天（不写重结请求）、
+// 读不到状态行（被挡的天不重新排队）——都抛 KEY_CHANGE_FAILED、什么都不写（repository.changeRuleKey 不调用）
+for (const failing of ["listDayKeys 读对方的", "listDayKeys 读自己的", "listLedgerDayFacts", "listSettlementStates"]) {
+  test(`手动选 Key：${failing}读不到时抛 KEY_CHANGE_FAILED、什么都不写`, async (t) => {
+    const f = await setup(t, { upstreamType: "newapi", keys: [9, 10, 30], channelKey: {}, noAgent: true });
+    await f.at("2026-10-10T10:00:00");
+    const mine = await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+    await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier.id, tokenId: 10 }); // 同一个上游别的绑定：有「对方」可读
+    await f.round("2026-10-10T23:00:00");
+    await f.at("2026-10-12T10:00:00");
+    const repo = f.repository;
+    const real = Object.fromEntries(["listDayKeys", "listLedgerDayFacts", "listSettlementStates", "changeRuleKey"].map((name) => [name, repo[name].bind(repo)]));
+    let wrote = 0;
+    repo.changeRuleKey = async (...args) => { wrote += 1; return real.changeRuleKey(...args); };
+    const method = failing.split(" ")[0];
+    // 「读对方的」：参数里的绑定编号不是自己；「读自己的」：就是自己这一条
+    // 找新 Key 第一次有用量那天时（keyHeldByOthers）已经读过一次对方的、读不到它自己就抛别的码（KEY_PROBE_UNAVAILABLE）；要测的是之后算「对方让出的」那次（第二次读对方的）
+    // 读自己的也一样：补没记录的天（missingDayKeyRows）先读过一次，它读不到本来就会抛；要测的是之后「已经记着的」那次（第二次）
+    let peerReads = 0, ownReads = 0;
+    repo.listDayKeys = async (ids, ...rest) => {
+      const own = ids.length === 1 && ids[0] === mine.ruleId;
+      if (own) ownReads += 1; else peerReads += 1;
+      if ((failing === "listDayKeys 读自己的" && own && ownReads >= 2) || (failing === "listDayKeys 读对方的" && !own && peerReads >= 2)) throw new Error("db down");
+      return real.listDayKeys(ids, ...rest);
+    };
+    if (method !== "listDayKeys") repo[method] = async () => { throw new Error("db down"); };
+    await assert.rejects(f.rt.reconciliation.changeRuleKeyManual(mine.ruleId, 30), (error) => error.code === "KEY_CHANGE_FAILED");
+    assert.equal(wrote, 0, "什么都没写：repository.changeRuleKey 没被调用");
+    // 读好了：同样的操作能换成（说明上面是因为读失败，不是别的原因）
+    Object.assign(repo, real);
+    assert.ok(await f.rt.reconciliation.changeRuleKeyManual(mine.ruleId, 30));
+  });
+}
