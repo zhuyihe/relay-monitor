@@ -582,7 +582,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 @media (max-width: 767px) { .jy-more__body, .jy-more-line .jy-more__body { margin-top: 12px; } }
 
 /* 余额趋势弹窗：四个读数 + 范围切换 + 折线 */
-.jy-trend { display: flex; flex-direction: column; gap: 16px; }
+.jy-trend { display: flex; flex-direction: column; gap: 12px; }
 .jy-trend-figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; border-top: 1px solid var(--jy-rule-soft); border-bottom: 1px solid var(--jy-rule-soft); }
 .jy-trend-figs > div { min-width: 0; padding: 12px 16px; border-left: 1px solid var(--jy-rule-soft); }
 .jy-trend-figs > div:first-child { padding-left: 0; border-left: 0; }
@@ -590,10 +590,17 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-trend-figs dd { margin: 2px 0 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
 .jy-trend-figs dd.fig { margin: 2px 0 4px; font-size: 20px; line-height: 28px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-trend-figs .jy-status .jy-sym { width: 10px; height: 10px; }
-.jy-trend-bar { display: flex; justify-content: flex-end; }
-.jy-trend-body { min-height: 268px; }
+.jy-trend-sub { display: flex; align-items: center; gap: 8px; }
+.jy-trend-sub h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
+.jy-trend-sub .jy-seg { margin-left: auto; }
+.jy-trend-rule { margin: 0; border: 0; border-top: 1px solid var(--jy-rule-soft); }
+.jy-trend-note { margin: -8px 0 0; }
+.jy-trend-daily { min-height: 148px; }
+.jy-trend-daily .jy-state--center { min-height: 148px; justify-content: center; }
+.jy-trend-daily[aria-busy="true"] .jy-chart-stack { opacity: .55; transition: opacity .15s; }
+.jy-trend-body { min-height: 240px; }
 .jy-trend-body[aria-busy="true"] .jy-chart-stack { opacity: .55; transition: opacity .15s; }
-.jy-trend-body .jy-state--center { min-height: 268px; justify-content: center; }
+.jy-trend-body .jy-state--center { min-height: 240px; justify-content: center; }
 .jy-legend .jy-sym { width: 10px; height: 10px; }
 
 /* ─── antd 适配 ──────────────────────────────────────── */
@@ -728,7 +735,6 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-trend-figs > div { padding: 10px 12px; }
   .jy-trend-figs > div:nth-child(odd) { padding-left: 0; border-left: 0; }
   .jy-trend-figs > div:nth-child(n+3) { border-top: 1px solid var(--jy-rule-soft); }
-  .jy-trend-bar { justify-content: flex-start; }
 }
 
 /* 减少动态效果：时长压到几乎为零而不是去掉过渡，antd 的进出场要等 transitionend 才收尾，去掉过渡会让加载图标等元素停在半路 */

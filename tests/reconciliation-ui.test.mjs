@@ -2092,6 +2092,88 @@ test("余额趋势按业务时区写时间：横轴刻度落在业务时区的 0
   assert.deepEqual(ticks, [formatDayKey("2026-10-10", TZ), ...[1, 2, 3].map((h) => formatZonedTime(T0 + h * HOUR, TZ))]);
 });
 
+// 余额趋势弹窗里「每天花了多少」（design trend-daily-v1）：夹具照接口的 dailySpend 形状（state、days、since、todayEstimate）
+async function openTrendDaily(t, dailySpend, { viewport } = {}) {
+  const TZ = "Asia/Shanghai", HOUR = 3_600_000, T0 = Date.parse("2026-11-02T08:00:00Z");
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { tz: TZ, stations: [{ id: "s1", name: "Alpha 上游", type: "newapi", baseUrl: "https://alpha.test", userId: "7", hasAccessToken: true, monitorEnabled: true, cnyPerUsd: 7,
+      balance: { ok: true, remaining: 10, checkedAt: new Date(T0 + 2 * HOUR).toISOString() }, prediction: null, spark: [[T0, 12], [T0 + 2 * HOUR, 10]], dailySpend }], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [], rules: {}, tz: TZ });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/stations/s1/history") return fulfill(route, { points: [[T0, 12], [T0 + HOUR, 11], [T0 + 2 * HOUR, 10]], prediction: { burnPerDay: 24, etaDays: 0.4, etaAt: new Date(T0 + 12 * HOUR).toISOString(), basis: "7d" }, dailySpend });
+    throw new Error("unexpected API: " + path);
+  }, viewport, MODELS_NOW, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-11-02T07:00:00.000Z" }), "/stations");
+  // 手机上没有那张小图，从「更多操作」菜单里打开
+  if (viewport) { await page.getByRole("button", { name: "Alpha 上游 的更多操作", exact: true }).first().click(); await page.getByRole("menuitem", { name: "余额趋势", exact: true }).click(); }
+  else await page.getByRole("button", { name: "Alpha 上游 的余额趋势", exact: true }).first().click();
+  const modal = page.getByRole("dialog", { name: "Alpha 上游 的余额趋势", exact: true }); await modal.waitFor();
+  return { page, modal };
+}
+const dayKeys30 = (today = "2026-11-02") => Array.from({ length: 30 }, (_, i) => { const d = new Date(`${today}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - (29 - i)); return d.toISOString().slice(0, 10); });
+
+test("余额趋势「每天花了多少」：余额小标题和查看范围在一行、细线、近 30 天的柱子（今天浅色、加进来那天一条虚线）、悬停写花费；电脑 1440×900 弹窗不用滚", async (t) => {
+  const keys = dayKeys30();
+  const dailySpend = { state: "ok", source: "upstream", since: "2026-10-20", todayEstimate: false, days: keys.map((day, i) => ({ day, usd: i === 29 ? 3 : i === 24 ? 10.2 : i % 3 === 0 ? 0 : 5 })) };
+  const { page, modal } = await openTrendDaily(t, dailySpend);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await modal.getByRole("heading", { name: "余额", exact: true }).waitFor();
+  await modal.getByRole("heading", { name: "每天花了多少", exact: true }).waitFor();
+  await modal.locator(".jy-trend-sub .jy-caption", { hasText: "近 30 天" }).waitFor();
+  // 「查看范围」在「余额」小标题右边（同一行）
+  const head = await modal.getByRole("heading", { name: "余额", exact: true }).boundingBox(), seg = await modal.getByRole("group", { name: "查看范围" }).boundingBox();
+  assert.ok(Math.abs((head.y + head.height / 2) - (seg.y + seg.height / 2)) < 12 && seg.x > head.x, "查看范围在余额小标题的右边");
+  assert.equal(await modal.locator("hr.jy-trend-rule").count(), 1, "一条细线");
+  const bars = modal.locator(".jy-trend-daily path.jy-chart-bar");
+  assert.ok((await bars.count()) > 15);
+  assert.equal(await bars.last().evaluate((node) => getComputedStyle(node).opacity), "0.45", "今天那根浅色");
+  assert.equal((await bars.first().evaluate((node) => getComputedStyle(node).fill)).includes("0, 0, 0)"), false, "不是黑色");
+  assert.equal(await modal.locator(".jy-trend-daily .day-rule").count(), 1, "加进来那天一条虚线");
+  await modal.getByText("10月20日 加进来", { exact: true }).waitFor();
+  const ticks = await modal.locator(".jy-trend-daily svg text.tick-label").allTextContents();
+  assert.ok(ticks.includes("今天") && ticks.includes("10月4日"), `横轴只标头尾：${ticks}`);
+  // 悬停一根柱子：标题是那一天，一行「花费 ¥71.40」（10.2 美元 × 7）
+  const box = await modal.locator(".jy-trend-daily .jy-chart-stack").boundingBox();
+  // 最高的一根是 10 月 28 日（10.2 美元）
+  const boxes = await bars.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { x: r.x, width: r.width, height: r.height }; }));
+  const barBox = boxes.reduce((best, item) => (item.height > best.height ? item : best));
+  await page.mouse.move(barBox.x + barBox.width / 2, box.y + 40);
+  await modal.getByText("花费", { exact: true }).waitFor();
+  assert.match(await modal.locator(".jy-tip").innerText(), /10月2[0-9]日[\s\S]*花费[\s\S]*¥71\.40/);
+  // 1440×900：弹窗不用滚（设计稿写高约 590，实际按现有的读数和余量图高度叠上来是下面这个数）
+  const wrapper = await modal.boundingBox();
+  assert.ok(wrapper.height < 800, `1440×900 上放得下：${wrapper.height}`);
+  assert.equal(await page.evaluate(() => document.querySelector(".ant-modal-wrap").scrollHeight <= document.querySelector(".ant-modal-wrap").clientHeight), true, "不出滚动条");
+  if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/trend-daily-1440x900.png` }); }
+});
+
+test("余额趋势「每天花了多少」：上游不给读以前的用量（小标题下一行灰字、柱子从加进来那天画起）、读不到（带重新读取）、近 30 天没花钱、这种上游没有这个数（不画这一块）", async (t) => {
+  const keys = dayKeys30();
+  const denied = await openTrendDaily(t, { state: "denied", source: "balance", since: "2026-10-27", todayEstimate: true, days: keys.slice(25).map((day) => ({ day, usd: 4 })) });
+  await denied.modal.getByText("这个上游不给读以前的用量，从加进来那天起算。", { exact: true }).waitFor();
+  await denied.modal.locator(".jy-trend-daily path.jy-chart-bar").first().waitFor();
+  assert.equal(await denied.modal.locator(".jy-trend-daily path.jy-chart-bar").count(), 5, "柱子只从加进来那天起画");
+  const failed = await openTrendDaily(t, { state: "pending", source: "balance", since: null, todayEstimate: false, days: [] });
+  await failed.modal.getByText("读不到每天花了多少", { exact: true }).waitFor();
+  await failed.modal.locator(".jy-trend-daily").getByRole("button").waitFor();
+  const none = await openTrendDaily(t, { state: "ok", source: "upstream", since: "2026-09-01", todayEstimate: false, days: keys.map((day) => ({ day, usd: 0 })) });
+  await none.modal.getByText("近 30 天没有花费。", { exact: true }).waitFor();
+  const absent = await openTrendDaily(t, { state: "none", source: null, since: null, todayEstimate: false, days: [] });
+  await absent.modal.getByRole("heading", { name: "余额", exact: true }).waitFor();
+  assert.equal(await absent.modal.getByText("每天花了多少", { exact: true }).count(), 0, "自营站点、固定成本这类没有这个数，不画");
+});
+
+test("余额趋势「每天花了多少」（手机 375）：弹窗整屏、柱子高 132、往下滚能看到", async (t) => {
+  const keys = dayKeys30();
+  const { page, modal } = await openTrendDaily(t, { state: "ok", source: "upstream", since: "2026-10-20", todayEstimate: false, days: keys.map((day, i) => ({ day, usd: i % 4 === 0 ? 0 : 6 })) }, { viewport: { width: 375, height: 812 } });
+  await modal.getByRole("heading", { name: "每天花了多少", exact: true }).scrollIntoViewIfNeeded();
+  await modal.locator(".jy-trend-daily .jy-chart svg").waitFor();
+  assert.equal(await modal.locator(".jy-trend-daily .jy-chart").evaluate((node) => Math.round(node.getBoundingClientRect().height)), 132);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "不横向滚动");
+  if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/trend-daily-375x812.png` }); }
+});
+
 test("编辑上游改了地址的站点：留空的令牌不带过去，测试读取说「换了地址…请重新填」", async (t) => {
   const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
   const tests = [];

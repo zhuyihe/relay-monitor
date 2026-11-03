@@ -4,15 +4,17 @@
 // 数据：GET /api/stations/:id/history?hours=；图和花费按上游设置的汇率折成 ¥，没设置时按 1 美元 = 1 元；当前余额和上游列表同一种写法（balanceMoneyOf）。
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { Modal } from "antd";
+import { Button, Grid, Modal } from "antd";
+import { workflowActionMeta } from "../../lib/workflow-actions";
 import { api } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
-  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatMoney, formatZonedDate, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatDayKey, formatMoney, formatZonedDate, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
 } from "../../lib/format";
-import { isDayStartInTz } from "../../lib/business-time";
+import { dayKeyInTz, isDayStartInTz, shiftDayLabel } from "../../lib/business-time";
 import { balanceDaysText, balanceViewOf, burnCellText, isSpending, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks, timeAxisTicks } from "../../lib/chart-math";
+import { Bars } from "../components/bars";
 import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
 import { useElementWidth } from "../components/use-width";
@@ -53,6 +55,18 @@ const COPY = Object.freeze({
   loading: "正在读取余额记录…",
   tooFew: (range: string) => `${range}还画不出余额趋势`,
   tooFewDesc: "至少读到两次余额，这里才会画出余额的变化。",
+  balanceTitle: "余额",
+  dailyTitle: "每天花了多少",
+  dailySub: "近 30 天",
+  dailyDenied: "这个上游不给读以前的用量，从加进来那天起算。",
+  dailyFailed: "读不到每天花了多少",
+  dailyLoading: "正在读取…",
+  dailyNone: "近 30 天没有花费。",
+  dailyAdded: (day: string) => `${day} 加进来`,
+  dailyCost: "花费",
+  dailyToday: "今天",
+  dailyTodayTip: "今天（到现在）",
+  dailyChart: (name: string) => `${name} 近 30 天每天花了多少`,
   chart: (name: string, range: string, emptyAt: string) => `${name} ${range}的余额趋势${emptyAt ? `，${emptyAt}` : ""}`,
 });
 
@@ -62,6 +76,15 @@ const T = 16;
 const B = 28;
 const H = 240;
 const HOUR = 3_600_000;
+
+// 每天花了多少：近 30 天的格子（最后一格是今天），没有数的天花费记 0（不画柱子，日期位置不变）
+const DAILY_DAYS = 30;
+function dailyGrid(spend: any, tz: string, now: number) {
+  const today = spend?.days?.length ? spend.days[spend.days.length - 1].day : dayKeyInTz(now, tz);
+  const byDay = new Map<string, number>((spend?.days || []).map((d: any) => [d.day, Number(d.usd) || 0]));
+  const keys = Array.from({ length: DAILY_DAYS }, (_, i) => shiftDayLabel(today, i - (DAILY_DAYS - 1)));
+  return { keys, byDay, today };
+}
 
 // 时间都按业务时区写（design/ui-copy-spec.md §6），和浏览器所在时区无关：「10月9日 14:30」
 const at = (ms: number, tz: string) => formatZonedDateTime(ms, tz);
@@ -259,6 +282,7 @@ export default function TrendModal({
   // 业务时区（接口返回的 tz）：图上的时刻、横轴刻度、预计用完的时间都按它写。必填，免得调用方漏传就退回默认时区
   tz: string;
 }) {
+  const phone = Grid.useBreakpoint().md === false;
   const [range, setRange] = useState<Range>("72");
   const [data, setData] = useState<any>(null);
   const [err, setErr] = useState<unknown>(null);
@@ -326,6 +350,16 @@ export default function TrendModal({
     station?.todayTokens != null ? COPY.todayTokens(formatCompact(station.todayTokens)) : null,
     station?.todayRequests != null ? COPY.todayRequests(station.todayRequests.toLocaleString("en-US")) : null,
   ].filter(Boolean);
+  // 每天花了多少：history 回包里带，没回来之前用上游列表里那一份
+  const spend = data?.dailySpend ?? station?.dailySpend ?? null;
+  const daily = useMemo(() => {
+    if (!spend || spend.state === "none" || spend.state === "pending") return null;
+    const grid = dailyGrid(spend, tz, Date.now());
+    const items = grid.keys.map((key) => ({ key, cost: (grid.byDay.get(key) ?? 0) * rate }));
+    // 加进来那天画一条竖虚线；30 天以前加进来的、或就在最左最右一根的不画（Bars 里头尾不画）
+    const index = spend.since ? grid.keys.indexOf(spend.since) : -1;
+    return { items, marker: index > 0 ? { index, text: COPY.dailyAdded(formatDayKey(spend.since, tz)) } : undefined };
+  }, [spend, tz, rate]);
   const rangeLabel = RANGES.find((r) => r.value === range)?.label;
 
   return (
@@ -378,7 +412,8 @@ export default function TrendModal({
             </div>
           </dl>
 
-          <div className="jy-trend-bar">
+          <div className="jy-trend-sub">
+            <h3>{COPY.balanceTitle}</h3>
             <Seg<Range> options={[...RANGES]} value={range} onChange={setRange} label={COPY.range} size="sm" />
           </div>
 
@@ -403,6 +438,42 @@ export default function TrendModal({
               />
             )}
           </div>
+
+          {spend && spend.state !== "none" && (
+            <>
+              <hr className="jy-trend-rule" />
+              <div className="jy-trend-sub">
+                <h3>{COPY.dailyTitle}</h3>
+                <span className="jy-caption">{COPY.dailySub}</span>
+              </div>
+              {spend.state === "denied" && <p className="jy-caption jy-trend-note">{COPY.dailyDenied}</p>}
+              <div className="jy-trend-daily" aria-busy={loading}>
+                {!data && err === null ? (
+                  <p className="jy-muted">{COPY.dailyLoading}</p>
+                ) : spend.state === "pending" ? (
+                  <div className="jy-state jy-state--center" role="alert">
+                    <h3><Sym kind="crit" className="jy-status--crit" />{COPY.dailyFailed}</h3>
+                    <div className="actions"><Button type="primary" loading={loading} onClick={() => setRetry((n) => n + 1)}>{workflowActionMeta("refresh").label}</Button></div>
+                  </div>
+                ) : daily && daily.items.every((item) => item.cost === 0) ? (
+                  <p className="jy-muted">{COPY.dailyNone}</p>
+                ) : daily ? (
+                  <Bars
+                    items={daily.items}
+                    valueLabel={COPY.dailyCost}
+                    tipTitle={(key, i) => (i === daily.items.length - 1 ? COPY.dailyTodayTip : formatDayKey(key, tz))}
+                    tipValue={(cost) => formatMoney(cost)}
+                    tickLabel={(key, i) => (i === daily.items.length - 1 ? COPY.dailyToday : formatDayKey(key, tz))}
+                    axis={axisMoney}
+                    light
+                    height={phone ? 132 : 148}
+                    label={COPY.dailyChart(stationDisplayName(station))}
+                    marker={daily.marker}
+                  />
+                ) : null}
+              </div>
+            </>
+          )}
         </div>
       )}
     </Modal>
