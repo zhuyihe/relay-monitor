@@ -2208,9 +2208,10 @@ test("上游资源：「渠道」一列写几个或「没有渠道」，不能�
 
 test("上游资源：绑定渠道选中一把 Key 时核用量：渠道有收入、Key 没用量 → 下拉框下面提醒一句，「绑定」照样能点；有用量、没查成（接口失败）都不提醒", async (t) => {
   const keys = [{ id: 9, name: "oai", status: 1, group: "default" }, { id: 30, name: "oai-07", status: 1, group: "default" }];
-  const hint = "可能选错了 Key";
+  const hint = "这把 Key 最近 24 小时在上游没有用量，但「云帆-claude4.6-1.5」这 24 小时有收入，可能选错了。到 New API 里看「云帆-claude4.6-1.5」填的是不是这把；如果是刚换上、还没开始用，就不用管。";
   const idle = await openBindModal(t, { upstream: "云帆", host: "api.yunfan-ai.com", matching: [100], keys, keyUsage: { checked: true, idle: true } });
-  await idle.bind.getByText(hint).waitFor();
+  await idle.bind.getByText(hint, { exact: true }).waitFor();
+  assert.equal(await idle.bind.getByText(hint, { exact: true }).locator("svg, img").count(), 0, "前面不加图标");
   assert.equal(await idle.bind.getByRole("button", { name: "绑定", exact: true }).isEnabled(), true, "提醒不拦「绑定」");
   assert.ok(idle.usageReads.length >= 1 && idle.usageReads.every((query) => /channelId=100/.test(query) && /upstreamStationId=up1/.test(query) && /tokenId=\d+/.test(query)), "问的是这个渠道和选中的这把 Key：" + idle.usageReads.join(" ");
   await shot(idle.page, "bind-key-idle-1440x900");
@@ -2218,7 +2219,7 @@ test("上游资源：绑定渠道选中一把 Key 时核用量：渠道有收入
     const quiet = await openBindModal(t, { upstream: "云帆", host: "api.yunfan-ai.com", matching: [100], keys, keyUsage });
     await quiet.page.waitForTimeout(400);
     assert.ok(quiet.usageReads.length >= 1, "选中 Key 后问过一次");
-    assert.equal(await quiet.bind.getByText(hint).count(), 0, "不该提醒：" + JSON.stringify(keyUsage));
+    assert.equal(await quiet.bind.getByText("可能选错了").count(), 0, "不该提醒：" + JSON.stringify(keyUsage));
     assert.equal(await quiet.bind.getByRole("button", { name: "绑定", exact: true }).isEnabled(), true);
   }
 });
@@ -2558,8 +2559,8 @@ test("上游资源：换 Key 小窗口选中新 Key 时核用量：渠道有收�
     await drawer.getByRole("button", { name: "换 Key 高速 A", exact: true }).click();
     const modal = page.getByRole("dialog", { name: "换 Key", exact: true }); await modal.waitFor();
     await modal.getByText("oai-16 · 分组 default", { exact: true }).waitFor();
-    if (shown) await modal.getByText("可能选错了 Key").waitFor();
-    else { await page.waitForTimeout(400); assert.equal(await modal.getByText("可能选错了 Key").count(), 0); }
+    if (shown) await modal.getByText("这把 Key 最近 24 小时在上游没有用量，但「高速 A」这 24 小时有收入，可能选错了。到 New API 里看「高速 A」填的是不是这把；如果是刚换上、还没开始用，就不用管。", { exact: true }).waitFor();
+    else { await page.waitForTimeout(400); assert.equal(await modal.getByText("可能选错了", { exact: false }).count(), 0); }
     assert.equal(await modal.getByRole("button", { name: "换 Key", exact: true }).isEnabled(), true, "提醒不拦「换 Key」");
   }
 });

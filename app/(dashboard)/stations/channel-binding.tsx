@@ -201,7 +201,7 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
     <label className="jy-bind-label">{M.key}</label>
     <KeySelect aria={M.key} placeholder={M.keyPlaceholder} value={tokenId} keys={keys} failed={failed} disabled={saving} onChange={(value) => { setTokenId(value); setHint(false); }} />
     {hint ? <p className="jy-caption jy-bind-hint">{M.onlyOne}</p> : null}
-    {idleHint ? <p className="jy-caption jy-bind-hint" role="status"><Sym kind="warn" /><span>{CHANNEL_BINDING.keyIdleHint}</span></p> : null}
+    {idleHint && channel ? <p className="jy-caption jy-bind-hint jy-bind-hint-warn" role="status">{CHANNEL_BINDING.keyIdleHint(channel.name)}</p> : null}
     {failed ? <p className="jy-caption jy-bind-hint">{M.keysFailed}</p> : null}
   </Modal>;
 }
@@ -252,7 +252,7 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
     <label className="jy-bind-label">{M.next}</label>
     <KeySelect aria={M.next} placeholder={M.nextPlaceholder} value={tokenId} keys={keys} failed={failed} disabled={saving} onChange={(value) => { setTokenId(value); setHint(false); }} />
     {hint ? <p className="jy-caption jy-bind-hint">{CHANNEL_BINDING.bindModal.onlyOne}</p> : null}
-    {idleHint ? <p className="jy-caption jy-bind-hint" role="status"><Sym kind="warn" /><span>{CHANNEL_BINDING.keyIdleHint}</span></p> : null}
+    {idleHint && channel ? <p className="jy-caption jy-bind-hint jy-bind-hint-warn" role="status">{CHANNEL_BINDING.keyIdleHint(channel.name)}</p> : null}
     <p className="jy-swap-note"><Sym kind="info" /><span>{M.note}</span></p>
     {saving ? <p className="jy-caption jy-swap-working" role="status">{M.working}</p> : null}
   </Modal>;
