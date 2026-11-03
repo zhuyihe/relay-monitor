@@ -147,30 +147,30 @@ export class History {
     this._removed = new Set(); // 待彻底删除的站点
     this._purged = new Set(); // 已彻底删除的站点不会被在途刷新或旧批次重新写回
     this.cleanup = cleanupState(null);
-    // { stationId: { rows: [{ day, usd }, ...], denied, failed } }：上游自己那边读到的每天花费（server/upstream-spend.js 读、存、推进来），predict 用；
-    // denied：对方不给读以前的用量；failed：上次读失败、会再试（都是没有 rows 时页面据此写「读不到」「不给读」）
+    // { stationId: { rows: [{ day, usd }, ...], denied } }：上游自己那边读到的每天花费（server/upstream-spend.js 读、存、推进来），predict 用；
+    // denied：对方不给读以前的用量（没有 rows 时页面据此写「读不到」）
     this.dailySpend = new Map();
     this._balanceDays = new Map(); // 站点 id → { key, days }：balanceDays 的缓存
   }
 
   // 一个上游每天花费的最新一份（按日期升序）；没读到就只记 denied，predict 退回余额快照的老办法
-  setDailySpend(stationId, rows, { denied = false, failed = false } = {}) {
+  setDailySpend(stationId, rows, { denied = false } = {}) {
     stationId = String(stationId);
-    if (rows?.length || denied || failed) this.dailySpend.set(stationId, { rows: (rows || []).map((row) => ({ day: row.day, usd: Number(row.usd) || 0 })), denied: !!denied, failed: !!failed });
+    if (rows?.length || denied) this.dailySpend.set(stationId, { rows: (rows || []).map((row) => ({ day: row.day, usd: Number(row.usd) || 0 })), denied: !!denied });
     else this.dailySpend.delete(stationId);
   }
 
   // 接口给页面（余额趋势的柱状图）的：近 30 天每天花了多少。
-  //   state：ok 读到了 / denied 对方不给读以前的用量 / failed 上次读失败、会再试 / pending 新上游还没读到、正在读
+  //   state：ok 读到了 / denied 对方不给读以前的用量 / pending 读不到（新上游正在读，或读失败后台会再试）
   //   days：[{ day, usd }] 按日期升序、业务时区；最后一个是今天（到现在，today 是调用方给的 { usd, estimate }；没有就不放）。
-  //         ok 时是上游自己那边读到的整天；denied / failed / pending 时是控制台自己的余额快照里每天下降的数（从开始监控那天起，没快照的天不出现），source 写 balance
+  //         ok 时是上游自己那边读到的整天；denied / pending 时是控制台自己的余额快照里每天下降的数（从开始监控那天起，没快照的天不出现），source 写 balance
   //   since：开始监控的日期（最早一个余额快照在业务时区是哪天；只留 30 天热数据，更早的就是窗口开头），没有快照是 null
   dailySpendView(stationId, today = null) {
     stationId = String(stationId);
     const tz = businessTimeZone();
     const todayKey = dayKeyInTz(Date.now(), tz);
     const entry = this.dailySpend.get(stationId);
-    const view = spendView(entry?.rows, { denied: entry?.denied, failed: entry?.failed, today: todayKey });
+    const view = spendView(entry?.rows, { denied: entry?.denied, today: todayKey });
     const snapshots = this.data[stationId] || [];
     const days = view.state === "ok" ? view.days : this.balanceDays(stationId, todayKey, tz);
     if (today && Number.isFinite(Number(today.usd))) days.push({ day: todayKey, usd: Math.round(Number(today.usd) * 10000) / 10000 });

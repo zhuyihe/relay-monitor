@@ -295,97 +295,18 @@ test("接口字段 dailySpend：{ state: ok | pending | denied | none, days: [{ 
   assert.equal((await (await GET(new Request("https://local.test/api/stations/c/history"), rt, { id: "c" })).json()).dailySpend.state, "denied");
 });
 
-// ---- 读不到（failed）和「重新读取」----
-test("读失败：页面上是 failed（会再试），和新上游正在读（pending）分开；下次读成功就是 ok", async (t) => {
+test("读失败：页面上和新上游正在读一样是 pending（后台再试），柱子先用余额快照的数；下次读成功就是 ok", async (t) => {
   let fail = true;
-  const h = harness(t, { stations: [station("a")], read: async (st, options) => {
+  const h = harness(t, { stations: [station("a")], read: async () => {
     if (fail) throw Object.assign(new Error("net"), { code: "NETWORK_UNREACHABLE" });
     return { days: [{ day: "2026-10-23", usd: 4 }], source: "dashboard" };
   } });
   await h.spend.load();
-  assert.equal(h.rt.history.dailySpendView("a").state, "pending", "还没读过");
   await h.spend.tick();
-  assert.equal(h.rt.history.dailySpendView("a").state, "failed", "读失败、会再试");
+  assert.equal(h.rt.history.dailySpendView("a").state, "pending");
+  assert.equal(h.rt.history.dailySpendView("a").source, "balance");
   fail = false;
   h.clock.now += 10 * MIN;
   await h.spend.tick();
   assert.equal(h.rt.history.dailySpendView("a").state, "ok");
-});
-
-test("「重新读取」：不等退避马上读；读成功就是 ok；读到「不给读」是 denied；对方断路时 skipped、状态不变；正在读时 busy、定时那轮也不会同时读同一个", async (t) => {
-  let fail = true, release = null;
-  const h = harness(t, { stations: [station("a")], read: async () => {
-    if (release) await new Promise((resolve) => { release = resolve; });
-    if (fail === "denied") throw Object.assign(new Error("off"), { code: "UPSTREAM_FEATURE_UNSUPPORTED" });
-    if (fail) throw Object.assign(new Error("net"), { code: "NETWORK_UNREACHABLE" });
-    return { days: [{ day: "2026-10-23", usd: 4 }], source: "dashboard" };
-  } });
-  await h.spend.load();
-  await h.spend.tick();
-  assert.equal(h.calls.length, 1);
-  await h.spend.tick();
-  assert.equal(h.calls.length, 1, "退避中：定时那轮不读");
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "failed" });
-  assert.equal(h.calls.length, 2, "点了重新读取：马上读");
-  assert.equal(h.rt.history.dailySpendView("a").state, "failed");
-  noteOwnRequest("https://a.test/api/x", { status: 500, now: h.clock.now });
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "skipped" });
-  assert.equal(h.calls.length, 2, "对方断路：不发请求");
-  h.clock.now += 61000;
-  fail = false;
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "read" });
-  assert.equal(h.rt.history.dailySpendView("a").state, "ok");
-  // 已经读到昨天了：没有要读的
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "none" });
-  // 正在读的时候再点：busy，定时那轮也跳过它
-  h.clock.now = at("2026-10-25T01:00:00");
-  release = () => {};
-  const first = h.spend.refresh("a");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "busy" });
-  assert.deepEqual(await h.spend.tick(), [], "定时那轮不读正在读的");
-  const pending = h.calls.length;
-  release();
-  assert.deepEqual(await first, { outcome: "read" });
-  assert.equal(h.calls.length, pending);
-});
-
-test("「重新读取」：「不给读」的上游不用等一周就能再试一次；别的类型（自营、固定成本）没有这个数", async (t) => {
-  let open = false;
-  const h = harness(t, { stations: [station("a"), station("own", { isOwn: true })], read: async () => {
-    if (!open) throw Object.assign(new Error("off"), { code: "UPSTREAM_FEATURE_UNSUPPORTED" });
-    return { days: [{ day: "2026-10-23", usd: 4 }], source: "stat" };
-  } });
-  await h.spend.load();
-  await h.spend.tick();
-  assert.equal(h.rt.history.dailySpendView("a").state, "denied");
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "denied" });
-  assert.equal(h.calls.length, 2);
-  open = true;
-  assert.deepEqual(await h.spend.refresh("a"), { outcome: "read" });
-  assert.equal(h.store.states.get("a").status, "ok");
-  assert.deepEqual(await h.spend.refresh("own"), { outcome: "none" });
-  assert.deepEqual(await h.spend.refresh("missing"), { outcome: "none" });
-});
-
-test("接口 POST /api/stations/:id/daily-spend（重新读取）：返回 outcome 和读完以后的 dailySpend；找不到上游 404；没有后台时 outcome 是 none", async (t) => {
-  const { registerHooks } = await import("node:module");
-  const hook = registerHooks({ load(url, context, nextLoad) {
-    if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true, source: "export const withAuth = handler => handler; export const json = (value, status = 200) => Response.json(value, {status});" };
-    return nextLoad(url, context);
-  } });
-  let POST;
-  try { ({ POST } = await import("../app/api/stations/[id]/daily-spend/route.js")); } finally { hook.deregister(); }
-  const s = station("a");
-  const h = harness(t, { stations: [s], read: async () => ({ days: [{ day: "2026-10-23", usd: 4 }], source: "dashboard" }) });
-  await h.spend.load();
-  const rt = { ...h.rt, upstreamSpend: h.spend };
-  const call = (id, runtime = rt) => POST(new Request(`https://local.test/api/stations/${id}/daily-spend`, { method: "POST" }), runtime, { id });
-  const ok = await (await call("a")).json();
-  assert.equal(ok.outcome, "read");
-  assert.equal(ok.dailySpend.state, "ok");
-  assert.equal(ok.dailySpend.days.at(-2).usd, 4);
-  assert.equal((await call("zzz")).status, 404);
-  const none = await (await call("a", { ...rt, upstreamSpend: undefined })).json();
-  assert.equal(none.outcome, "none");
 });
