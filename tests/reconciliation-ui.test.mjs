@@ -778,8 +778,10 @@ test("后台标签页不刷新：页面在后台时定时刷新一个请求都�
   const polled = () => seen.filter((path) => path === "/api/reconciliation/profit" || path === "/api/stations").length;
   const setHidden = (hidden) => page.evaluate((value) => { Object.defineProperty(document, "hidden", { configurable: true, get: () => value }); document.dispatchEvent(new Event("visibilitychange")); }, hidden);
   // 前台：快进 2 分钟，刷新照常发
+  // 请求发出去要一点真实时间（机器忙时更久）：等到数变了为止，最多 5 秒，不靠固定睡 300 毫秒
+  const until = async (condition) => { for (let i = 0; i < 50 && !condition(); i += 1) await page.waitForTimeout(100); };
   const before = polled();
-  await page.clock.fastForward(120000); await page.waitForTimeout(300);
+  await page.clock.fastForward(120000); await until(() => polled() > before);
   assert.ok(polled() > before, "前台照常刷新");
   // 后台：快进 1 小时，一个都不发
   await setHidden(true);
@@ -787,7 +789,7 @@ test("后台标签页不刷新：页面在后台时定时刷新一个请求都�
   await page.clock.fastForward(3600000); await page.waitForTimeout(300);
   assert.equal(polled(), hiddenAt, "后台一小时一个刷新请求都不发");
   // 切回前台：立刻刷一次
-  await setHidden(false); await page.waitForTimeout(300);
+  await setHidden(false); await until(() => polled() > hiddenAt);
   assert.ok(polled() > hiddenAt, "切回前台立刻刷一次");
 });
 
@@ -2134,13 +2136,11 @@ test("余额趋势「每天花了多少」：余额小标题和查看范围在�
   const ticks = await modal.locator(".jy-trend-daily svg text.tick-label").allTextContents();
   assert.ok(ticks.includes("今天") && ticks.includes("10月4日"), `横轴只标头尾：${ticks}`);
   // 悬停一根柱子：标题是那一天，一行「花费 ¥71.40」（10.2 美元 × 7）
-  const box = await modal.locator(".jy-trend-daily .jy-chart-stack").boundingBox();
-  // 最高的一根是 10 月 28 日（10.2 美元）
-  const boxes = await bars.evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { x: r.x, width: r.width, height: r.height }; }));
-  const barBox = boxes.reduce((best, item) => (item.height > best.height ? item : best));
-  await page.mouse.move(barBox.x + barBox.width / 2, box.y + 40);
+  // 最高的一根是 10 月 28 日（10.2 美元）。用 hover() 悬停：Playwright 会等弹窗的出现动画停稳再算位置，不会因为机器忙、动画还在走而悬停到邻居上
+  const heights = await bars.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height));
+  await bars.nth(heights.indexOf(Math.max(...heights))).hover();
   await modal.getByText("花费", { exact: true }).waitFor();
-  assert.match(await modal.locator(".jy-tip").innerText(), /10月2[0-9]日[\s\S]*花费[\s\S]*¥71\.40/);
+  assert.match(await modal.locator(".jy-tip").innerText(), /10月28日[\s\S]*花费[\s\S]*¥71\.40/);
   // 1440×900：弹窗不用滚（设计稿写高约 590，实际按现有的读数和余量图高度叠上来是下面这个数）
   const wrapper = await modal.boundingBox();
   assert.ok(wrapper.height < 800, `1440×900 上放得下：${wrapper.height}`);
