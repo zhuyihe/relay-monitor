@@ -45,7 +45,7 @@ const SCHEMA = {
   rules: {
     keys: { PRIMARY: ["id"], uq_reconciliation_active_token: ["active_token_key"] },
     notNull: ["id", "upstream_station_id", "own_station_id", "token_id", "token_name", "fixed_group", "timezone", "enabled", "billing_policy", "scope_version", "cost_coverage"],
-    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40 },
+    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40, key_idle_day: 10 },
     onUpdate: "updated_at",
   },
   channels: {
@@ -515,6 +515,15 @@ export class MemoryReconciliationRepository {
       const entry = this.#ruleEntry(tx, ruleId);
       if (!entry) return;
       this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null });
+    });
+  }
+
+  // 对应 MySQL 版 markKeyIdle
+  async markKeyIdle(ruleId, idle) {
+    await this.#transaction("markKeyIdle", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry) return;
+      this.#update(tx, "rules", [entry], { key_idle_since_ms: idle ? bigint(idle.sinceMs) : null, key_idle_day: idle?.day ?? null, key_idle_token_id: idle?.tokenId == null ? null : bigint(idle.tokenId) });
     });
   }
 

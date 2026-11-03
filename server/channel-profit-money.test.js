@@ -74,7 +74,8 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
     saveLinks: async (values) => { persisted.links.push(...structuredClone(values)); return structuredClone(values); } };
   const repository = new MemoryReconciliationRepository({ now: () => state.now });
   const rt = { store, pool: storePool };
-  rt.reconciliation = createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false });
+  const ownLogStore = new MemoryOwnLogStore();
+  rt.reconciliation = createReconciliationModule(rt, { repository, ownLogStore, ownLogIngest: false });
   rt.channelOnboarding = rt.onboardingSource = await createChannelOnboardingModule(rt, { repository: linkRepo, now: () => state.now, refresh: async () => {} }).load();
   await rt.channelOnboarding.sync();
   const identified = () => ({ ok: true, status: 200, stale: false, fetchedAtMs: state.now, revealIssues: [],
@@ -85,7 +86,7 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
   const at = async (iso) => { state.now = SH(iso); inject(); await rt.channelOnboarding.sync(); };
   const round = async (iso) => { await at(iso); await rt.reconciliation.refreshDue(state.now); };
   const costOn = (day) => repository.tables.ledger.filter((row) => row.bill_date === day);
-  return { state, rt, store, own, supplier, supplier2, repository, profit, at, round, costOn, requests, channelKey, used, elsewhere };
+  return { state, rt, store, own, supplier, supplier2, repository, profit, at, round, costOn, requests, channelKey, used, elsewhere, ownLogStore };
 }
 
 for (const upstreamType of ["newapi", "sub2api"]) {
@@ -644,6 +645,136 @@ test("今天提醒换 Key：Key 有了用量，下一次实时读自己消失；
   await g.at("2026-10-10T11:40:00");
   await g.profit.selectKey({ ownStationId: g.own.id, channelId: 1, upstreamStationId: g.supplier.id, tokenId: 9 });
   assert.equal((await todayG("2026-10-10T11:50:00")).rows[0]?.notice?.code, "CHANNEL_KEY_IDLE_TODAY", "撤销解绑：还是原来那条绑定，计时不重来");
+});
+
+// ===== 「今天提醒换 Key」的 1 小时计时存库（重启不清零；跨天、换 Key 重新计时；只在开始和清除时写库）=====
+const spyIdle = (f) => {
+  const writes = [], real = f.repository.markKeyIdle.bind(f.repository);
+  f.repository.markKeyIdle = async (ruleId, idle) => { writes.push(idle ? { ...idle } : null); return real(ruleId, idle); };
+  return writes;
+};
+const restart = (f) => { f.rt._keyIdleSince = undefined; }; // 重启：内存里的计时没了，只剩库里的
+
+test("计时存库：第一次看到这个情况以后进程重启，计时接着算——重启后满 1 小时就亮，不用重新等 1 小时", async (t) => {
+  const { f, today } = await idleFixture(t);
+  const writes = spyIdle(f);
+  await f.round("2026-10-10T10:30:00"); // 第一次看到
+  assert.deepEqual(writes.map((w) => [w.day, w.tokenId, w.sinceMs === SH("2026-10-10T10:30:00")]), [["2026-10-10", 9, true]], "开始计时写了一次库");
+  restart(f);
+  assert.equal((await today("2026-10-10T11:20:00")).rows[0].notice, null, "不到 1 小时还不亮");
+  restart(f);
+  const lit = await today("2026-10-10T11:31:00");
+  assert.equal(lit.rows[0].notice?.code, "CHANNEL_KEY_IDLE_TODAY", "重启过：计时从库里接着算，从 10:30 数起满 1 小时，亮");
+  assert.equal(writes.length, 1, "重启后接着用库里的计时：不再写库");
+});
+
+test("计时跟着天走：跨天重新计时（第二天从零点以后第一次看到起算），不继承前一天的", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: {}, noAgent: true, windows: { 9: [SH("2026-10-12T12:00:00"), Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  const today = (iso) => f.at(iso).then(() => f.rt.reconciliation.profitPage({ preset: "today" }));
+  const writes = spyIdle(f);
+  await f.round("2026-10-10T10:30:00");
+  assert.equal((await today("2026-10-10T23:30:00")).rows[0].notice?.code, "CHANNEL_KEY_IDLE_TODAY", "第一天满 1 小时亮");
+  restart(f);
+  await f.round("2026-10-11T00:30:00"); // 第二天第一次看到（Key 还是没用量）
+  assert.equal((await today("2026-10-11T01:00:00")).rows[0].notice, null, "跨天重新计时：才 30 分钟，不亮（不继承前一天的）");
+  assert.equal((await today("2026-10-11T01:40:00")).rows[0].notice?.code, "CHANNEL_KEY_IDLE_TODAY", "第二天满 1 小时又亮");
+  assert.deepEqual(writes.map((w) => w.day), ["2026-10-10", "2026-10-11"], "每天开始计时写一次");
+});
+
+test("计时跟着 Key 走：换成另一把还没用量的 Key，旧计时不留，重新计时（不会立刻亮）", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 10], channelKey: {}, noAgent: true, windows: { 9: [SH("2026-10-10T20:00:00"), Infinity], 10: [SH("2026-10-10T20:00:00"), Infinity] } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  const today = (iso) => f.at(iso).then(() => f.rt.reconciliation.profitPage({ preset: "today" }));
+  const writes = spyIdle(f);
+  await f.round("2026-10-10T10:30:00");
+  assert.equal((await today("2026-10-10T11:31:00")).rows[0].notice?.code, "CHANNEL_KEY_IDLE_TODAY", "Key 9 满 1 小时亮");
+  await f.at("2026-10-10T11:35:00");
+  assert.equal((await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 10 })).changed, true, "换成 Key 10（也还没用量）");
+  restart(f);
+  await f.round("2026-10-10T11:40:00");
+  assert.equal((await today("2026-10-10T11:50:00")).rows[0].notice, null, "换了 Key：旧计时不留，不会立刻亮");
+  assert.equal((await today("2026-10-10T12:45:00")).rows[0].notice?.code, "CHANNEL_KEY_IDLE_TODAY", "新 Key 满 1 小时才亮");
+  assert.deepEqual(writes.map((w) => w.tokenId), [9, 10], "换 Key 重新开始计时写一次");
+});
+
+test("计时只在开始和清除时写库：idle 期间每轮都不写；Key 有了用量清一次；之后每轮不写", async (t) => {
+  const { f, today } = await idleFixture(t);
+  const writes = spyIdle(f);
+  for (const iso of ["2026-10-10T10:30:00", "2026-10-10T10:40:00", "2026-10-10T10:50:00", "2026-10-10T11:00:00", "2026-10-10T11:30:00"]) await f.round(iso);
+  assert.equal(writes.length, 1, "idle 五轮：只在开始时写了一次");
+  await today("2026-10-10T11:40:00");
+  assert.equal(writes.length, 1, "页面读也不写");
+  for (const iso of ["2026-10-10T12:30:00", "2026-10-10T12:40:00", "2026-10-10T13:00:00"]) await f.round(iso); // 12:00 起 Key 有用量了
+  assert.deepEqual(writes, [writes[0], null], "Key 有了用量：清一次（null），之后每轮不再写");
+  assert.equal((await f.repository.listRules())[0].keyIdle, null, "库里清掉了");
+});
+
+// ===== 绑定、换 Key 时当场核用量（checkKeyUsage）：渠道最近 24 小时有收入、这把 Key 最近 24 小时没用量 → idle: true =====
+// 收入读已经存着的小时桶（不读用户站）；有收入才问上游，一个 stat；查不到不报错也不提醒
+async function usageCheckFixture(t, { revenue = true, covered = true, expectedCost = true, upstreamType = "newapi" } = {}) {
+  // Key 9 一直有用量，Key 10 从来没有
+  const f = await setup(t, { upstreamType, keys: [9, 10], channelKey: {}, noAgent: true, windows: { 10: [Infinity, Infinity] } });
+  await f.at("2026-10-10T12:00:00");
+  Object.assign(f.store.settings, { expectedCost });
+  const from = SH("2026-10-09T00:00:00"), to = SH("2026-10-10T11:50:00");
+  await f.ownLogStore.startCursor(f.own.id, covered ? from : SH("2026-10-10T06:00:00"), to);
+  await f.ownLogStore.applyWindow(f.own.id, { fromMs: covered ? from : SH("2026-10-10T06:00:00"), toMs: to, buckets: revenue ? [
+    { slotMs: SH("2026-10-10T08:00:00"), channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 5, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1000, adminQuota: 0, testQuota: 0 },
+  ] : [] });
+  await f.rt.reconciliation.getUpstreamKeys(f.supplier.id, { force: true }); // 小窗口先读 Key 目录（强制），之后的核用量复用这份
+  const statCalls = () => f.requests.filter((request) => request === "up.test/api/log/self/stat").length;
+  const upCalls = () => f.requests.filter((request) => request.startsWith("up.test") || request.startsWith("up2.test")).length;
+  const check = (tokenId, channelId = 1) => f.rt.reconciliation.checkKeyUsage({ ownStationId: f.own.id, channelId, upstreamStationId: f.supplier.id, tokenId });
+  return { f, check, statCalls, upCalls };
+}
+
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`绑定、换 Key 当场核用量（${upstreamType}）：渠道有收入、Key 没用量 → idle；Key 有用量 → 不 idle；每次最多 1 个上游请求、只读上游；同一把 Key 1 分钟内不重读`, async (t) => {
+    const { f, check, upCalls } = await usageCheckFixture(t, { upstreamType });
+    const before = upCalls();
+    // New API 一个 stat；Sub2API 的读法本身要核两次账号身份再读统计（和结账读同一段代码），共 3 个，都是读上游
+    const perCheck = upstreamType === "newapi" ? 1 : 3;
+    assert.deepEqual(await check(10), { checked: true, idle: true }, "渠道最近有收入，Key 10 一点用量没有");
+    assert.equal(upCalls() - before, perCheck, "只读上游、不重读 Key 目录（小窗口刚读过的，复用）");
+    assert.equal(f.requests.filter((request) => request.startsWith("own.test/api/log/stat")).length, 0, "不读用户站");
+    assert.deepEqual(await check(10), { checked: true, idle: true });
+    assert.equal(upCalls() - before, perCheck, "同一把 Key 1 分钟内不重复读");
+    assert.deepEqual(await check(9), { checked: true, idle: false }, "Key 9 有用量：不提醒");
+    assert.equal(upCalls() - before, 2 * perCheck);
+    await f.at("2026-10-10T12:02:00");
+    assert.deepEqual(await check(10), { checked: true, idle: true });
+    assert.equal(upCalls() - before, 3 * perCheck, "过了 1 分钟再读");
+  });
+}
+
+test("核用量：没有收入不问上游（idle false、checked true）；没有桶的几种情况（算应付成本关着、桶没覆盖到这段窗口）不判、不问上游；Key 不在目录、上游读失败：不判、不报错", async (t) => {
+  const none = await usageCheckFixture(t, { revenue: false });
+  const before = none.upCalls();
+  assert.deepEqual(await none.check(10), { checked: true, idle: false });
+  assert.equal(none.upCalls(), before, "这个渠道最近没有收入：不用问上游");
+  const off = await usageCheckFixture(t, { expectedCost: false });
+  const offBefore = off.upCalls();
+  assert.deepEqual(await off.check(10), { checked: false, idle: false }, "「算应付成本」关着没有桶：不判");
+  assert.equal(off.upCalls(), offBefore);
+  const gap = await usageCheckFixture(t, { covered: false });
+  assert.deepEqual(await gap.check(10), { checked: false, idle: false }, "桶没覆盖到最近 24 小时：不判");
+  const ok = await usageCheckFixture(t);
+  assert.deepEqual(await ok.check(999), { checked: false, idle: false }, "Key 不在目录里：不判");
+  // 上游读失败：不判、不抛
+  const fail = await usageCheckFixture(t);
+  const real = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => (String(input).includes("/api/log/self/stat") ? { status: 500, text: async () => "{}" } : real(input, init)));
+  assert.deepEqual(await fail.check(10), { checked: false, idle: false }, "上游读失败：不提醒，也不报错");
+  // 读失败的不缓存：恢复以后下一次就能判
+  globalThis.fetch.mock.restore();
+  assert.deepEqual(await fail.check(10), { checked: true, idle: true });
+  // 管理员自用、渠道测试的额度不算收入
+  const adminOnly = await usageCheckFixture(t, { revenue: false });
+  await adminOnly.f.ownLogStore.applyWindow(adminOnly.f.own.id, { fromMs: SH("2026-10-10T11:50:00"), toMs: SH("2026-10-10T11:55:00"), buckets: [{ slotMs: SH("2026-10-10T11:00:00"), channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 3, promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 900, adminQuota: 600, testQuota: 300 }] });
+  assert.deepEqual(await adminOnly.check(10), { checked: true, idle: false }, "只有管理员自用和渠道测试：不算有收入");
 });
 
 test("今天提醒换 Key：装了读取服务的站点不判；固定成本的上游不判", async (t) => {

@@ -214,6 +214,11 @@ export async function ensureSchema(pool) {
   // 事情解开（比如又换回来）清成 NULL
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_code", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_since_ms", "BIGINT NULL");
+  // 「今天有收入、绑的 Key 一直没用量」（CHANNEL_KEY_IDLE_TODAY）连着满 1 小时才提示：这个计时存库，重启（每次合并都会自动部署重启）不清零。
+  // 记哪一天、哪一把 Key、从什么时候起（毫秒）；跨天、换了 Key 重新计时；只在开始和清除时写
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_idle_since_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_idle_day", "VARCHAR(10) NULL");
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_idle_token_id", "BIGINT NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");

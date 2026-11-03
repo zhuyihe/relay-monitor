@@ -198,7 +198,7 @@ contract("createRule stores the rule, name-ordered channels and one operator-con
     id: null, upstreamStationId: fixture.station("up"), ownStationId: fixture.station("own"), tokenId: fixture.token(),
     tokenName: `Contract ${fixture.tag}`, fixedGroup: "default", timezone: "UTC", enabled: true,
     billingPolicy: "legacy-v3", scopeVersion: 1, billingEffectiveFrom: null, costCoverage: "unknown", provider: null, canonicalKey: null,
-    keyIssue: null,
+    keyIssue: null, keyIdle: null,
     sourceBinding: null, ownSource: null, coverageDeclaration: { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] },
     archivedAt: null, archivedAtMs: null, accountingFloorMs: null, boundAtMs: null, createdAt: null, updatedAt: null,
     channels: [
@@ -1885,6 +1885,16 @@ contract("replaceDayKeys: the given days' keys are replaced by the new rows; oth
   const listed = (await repository.listDayKeys([one.id], "2026-10-09", "2026-10-14"))[one.id];
   assert.deepEqual(Object.fromEntries(Object.entries(listed).map(([day, keys]) => [day, keys.map((key) => key.tokenId)])), { "2026-10-10": [7], "2026-10-11": [9], "2026-10-12": [9] });
   assert.equal(await repository.replaceDayKeys(one.id, [], []), 0);
+});
+
+contract("markKeyIdle: the idle timer reads back as keyIdle (since, day, token); null clears it", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(222), name: "I" }] });
+  assert.equal((await repository.getRule(rule.id)).keyIdle ?? null, null);
+  await repository.markKeyIdle(rule.id, { sinceMs: 1793000000123, day: "2026-11-03", tokenId: 77 });
+  assert.deepEqual((await repository.getRule(rule.id)).keyIdle, { sinceMs: 1793000000123, day: "2026-11-03", tokenId: 77 });
+  assert.deepEqual((await repository.listRules()).find((item) => item.id === rule.id).keyIdle, { sinceMs: 1793000000123, day: "2026-11-03", tokenId: 77 }, "列表里也读得到（重启后读规则就是这条路）");
+  await repository.markKeyIdle(rule.id, null);
+  assert.equal((await repository.getRule(rule.id)).keyIdle ?? null, null);
 });
 
 contract("markKeyIssue: an open issue reads back as keyIssue; null clears it", async ({ repository, fixture }) => {
