@@ -7,6 +7,7 @@ import { refreshStation } from "../../../../server/refresh.js";
 import { purgeStation } from "./purge.js";
 import { forgetOwnLog } from "../../../../server/own-log-store.js";
 import { forgetUserOps } from "../../../../server/user-ops.js";
+import { forgetUpstreamSpend } from "../../../../server/upstream-spend.js";
 import { sameEndpoint } from "../../../../lib/endpoint.js";
 
 async function updateStation(request, rt, params) {
@@ -30,6 +31,8 @@ async function updateStation(request, rt, params) {
   if (!s) return json({ error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" }, 404);
   // 自营站点换了地址：整站日志的进度和桶是旧站的，清掉从头读（应付成本 V1）
   if (before?.isOwn && s.isOwn && !sameEndpoint(before.baseUrl, s.baseUrl)) { await forgetOwnLog(rt, s.id); await forgetUserOps(rt, s.id); }
+  // 上游换了地址：旧站的每天花费不是新站的，清掉重读
+  if (before && !before.isOwn && !s.isOwn && !sameEndpoint(before.baseUrl, s.baseUrl)) await forgetUpstreamSpend(rt, s.id);
   rt._ownCache?.clear();
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;

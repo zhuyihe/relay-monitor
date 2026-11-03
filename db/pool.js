@@ -112,6 +112,26 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (station_id, date),
     INDEX idx_date (date)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 上游自己那边读到的每天花费（日均花费、可用天数的主要依据，lib/upstream-spend.js）。
+  // upstream_daily_spend：一个上游一个业务时区的整天一行，留 40 天；spend_day 是 YYYY-MM-DD（业务时区），spent_usd 和余额同一个单位（美元）。
+  // upstream_spend_state：每个上游一行，读到哪天了（read_through）、对方给不给读（status：ok / denied）、上次试的时刻
+  await pool.query(`CREATE TABLE IF NOT EXISTS upstream_daily_spend (
+    station_id VARCHAR(32) NOT NULL,
+    spend_day VARCHAR(10) NOT NULL,
+    spent_usd DOUBLE NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (station_id, spend_day),
+    INDEX idx_upstream_spend_day (spend_day)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS upstream_spend_state (
+    station_id VARCHAR(32) PRIMARY KEY,
+    status VARCHAR(12) NOT NULL,
+    source VARCHAR(16) NULL,
+    read_through VARCHAR(10) NULL,
+    denied_code VARCHAR(48) NULL,
+    checked_at BIGINT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 上游渠道对账：规则、规则下的本站渠道、聚合快照与独立告警状态。
   // 凭据继续只保存在既有 stations.doc；此处不复制 PAT 或 API Key。
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_rules (

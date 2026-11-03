@@ -361,7 +361,7 @@ export default function TrendModal({
             <div>
               <dt>{COPY.burn}</dt>
               <dd className="fig">{burnCellText(station, pred)}</dd>
-              <dd>{pred ? basisText(pred.basis) : COPY.notEnough}</dd>
+              {pred ? (basisText(pred.basis) ? <dd>{basisText(pred.basis)}</dd> : null) : <dd>{COPY.notEnough}</dd>}
             </div>
             <div>
               <dt>{COPY.days}</dt>

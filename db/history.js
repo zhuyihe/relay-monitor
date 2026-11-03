@@ -2,6 +2,7 @@
 // 原始快照可长期保留；内存只保存独立的近期热窗口，日汇总用于长期分析。
 // 日汇总按业务时区划日（lib/business-time.js），与经营分析、利润窗口同一日界线。
 import { businessTimeZone, dayBoundsInTz, dayKeyInTz } from "../lib/business-time.js";
+import { SPEND_BASIS, dailyBurn, spendView } from "../lib/upstream-spend.js";
 const MAX_POINTS = 5000; // 每站上限
 const HOT_AGE_MS = 30 * 24 * 3600 * 1000; // 仅运行时热数据窗口
 const MIN_GAP_MS = 30 * 1000; // 相邻快照最小间隔
@@ -146,6 +147,52 @@ export class History {
     this._removed = new Set(); // 待彻底删除的站点
     this._purged = new Set(); // 已彻底删除的站点不会被在途刷新或旧批次重新写回
     this.cleanup = cleanupState(null);
+    // { stationId: { rows: [{ day, usd }, ...], denied } }：上游自己那边读到的每天花费（server/upstream-spend.js 读、存、推进来），predict 用；
+    // denied：对方不给读以前的用量（没有 rows 时页面据此写「读不到」）
+    this.dailySpend = new Map();
+    this._balanceDays = new Map(); // 站点 id → { key, days }：balanceDays 的缓存
+  }
+
+  // 一个上游每天花费的最新一份（按日期升序）；没读到就只记 denied，predict 退回余额快照的老办法
+  setDailySpend(stationId, rows, { denied = false } = {}) {
+    stationId = String(stationId);
+    if (rows?.length || denied) this.dailySpend.set(stationId, { rows: (rows || []).map((row) => ({ day: row.day, usd: Number(row.usd) || 0 })), denied: !!denied });
+    else this.dailySpend.delete(stationId);
+  }
+
+  // 接口给页面（余额趋势的柱状图）的：近 30 天每天花了多少。
+  //   state：ok 读到了 / denied 对方不给读以前的用量 / pending 读不到（新上游正在读，或读失败在重试）
+  //   days：[{ day, usd }] 按日期升序、业务时区；最后一个是今天（到现在，today 是调用方给的 { usd, estimate }；没有就不放）。
+  //         ok 时是上游自己那边读到的整天；denied / pending 时是控制台自己的余额快照里每天下降的数（从开始监控那天起，没快照的天不出现），source 写 balance
+  //   since：开始监控的日期（最早一个余额快照在业务时区是哪天；只留 30 天热数据，更早的就是窗口开头），没有快照是 null
+  dailySpendView(stationId, today = null) {
+    stationId = String(stationId);
+    const tz = businessTimeZone();
+    const todayKey = dayKeyInTz(Date.now(), tz);
+    const entry = this.dailySpend.get(stationId);
+    const view = spendView(entry?.rows, { denied: entry?.denied, today: todayKey });
+    const snapshots = this.data[stationId] || [];
+    const days = view.state === "ok" ? view.days : this.balanceDays(stationId, todayKey, tz);
+    if (today && Number.isFinite(Number(today.usd))) days.push({ day: todayKey, usd: Math.round(Number(today.usd) * 10000) / 10000 });
+    return { state: view.state, source: view.state === "ok" ? "upstream" : "balance", days, since: snapshots.length ? dayKeyInTz(snapshots[0][0], tz) : null, todayEstimate: !!today?.estimate };
+  }
+
+  // 余额快照里每天下降的数（今天以前的整天，下降按后一快照所在的天计，充值不算）；一遍扫完，按最后一个快照缓存，页面反复来取不重算
+  balanceDays(stationId, todayKey, tz) {
+    const arr = this.data[stationId] || [];
+    const key = `${arr.length}|${arr.length ? arr[arr.length - 1][0] : 0}|${todayKey}`;
+    const hit = this._balanceDays.get(stationId);
+    if (hit?.key === key) return hit.days.map((day) => ({ ...day }));
+    const byDay = new Map();
+    for (let i = 0; i < arr.length; i += 1) {
+      const day = dayKeyInTz(arr[i][0], tz);
+      if (day >= todayKey) break;
+      const drop = i ? arr[i - 1][1] - arr[i][1] : 0;
+      byDay.set(day, (byDay.get(day) || 0) + (drop > 0 ? drop : 0));
+    }
+    const days = [...byDay].map(([day, usd]) => ({ day, usd: Math.round(usd * 10000) / 10000 }));
+    this._balanceDays.set(stationId, { key, days });
+    return days.map((day) => ({ ...day }));
   }
 
   async load() {
@@ -382,6 +429,7 @@ export class History {
     stationId = String(stationId);
     this._purged.add(stationId);
     delete this.data[stationId];
+    this.dailySpend.delete(stationId);
     this._pending = this._pending.filter(([id]) => String(id) !== stationId);
     this._removed.add(stationId);
     if (this._saveTimer) {
@@ -471,7 +519,24 @@ export class History {
   }
 
   /**
-   * 耗尽预测——按「实时速率」分层估计：
+   * 日均花费、可用天数：只此一份（上游列表、运营总览、快用完提醒、日报都读这里）。
+   * 有上游自己那边读到的每天花费时，日均花费 = max（近 7 个整天的平均，最近 24 小时实际花费），见 lib/upstream-spend.js；
+   * 一天的数都没有（对方不给读、又是新加的）退回下面 predictFromSnapshots 的老办法。
+   * 最近 24 小时用余额快照算，只算下降的部分，不满 24 小时按读到的算、不放大。
+   */
+  predict(stationId, windowHours = 48) {
+    const rows = this.dailySpend.get(String(stationId))?.rows;
+    const all = this.data[stationId] || [];
+    if (rows?.length && all.length) {
+      const now = Date.now();
+      const burn = dailyBurn({ rows, today: dayKeyInTz(now, businessTimeZone()), last24h: this.usedBetween(stationId, now - 24 * 3600000, Infinity) });
+      if (burn) return forecastFrom({ burnPerDay: burn.burnPerDay, samples: burn.days, spanHours: burn.days * 24 }, all[all.length - 1], burn.basis);
+    }
+    return this.predictFromSnapshots(stationId, windowHours);
+  }
+
+  /**
+   * 耗尽预测的老办法（只看余额快照）——按「实时速率」分层估计：
    *   1. 近 3 小时实际消耗速率（提速/降速 3 小时内即反映到 ETA）
    *   2. 数据不足退近 12 小时
    *   3. 再不足退回充值截断后的 48 小时最小二乘回归（冷启动兜底）
@@ -481,14 +546,13 @@ export class History {
    * 日均花费舍到分以后是 0（每天不到半分钱）就当近期没有花费：etaDays、etaAt 是 null，
    * 不拿没舍的速率算出天数——否则页面写「日均花费 ¥0.00」旁边又标「快用完」，各处说法对不上。
    */
-  predict(stationId, windowHours = 48) {
+  predictFromSnapshots(stationId, windowHours = 48) {
     const all = this.data[stationId] || [];
     if (all.length < 3) return null;
     const latest = all[all.length - 1];
 
     let est = this.burnRate(stationId, 3, 1, 5);
-    let basis = "近3小时";
-    if (!est) { est = this.burnRate(stationId, 12, 2, 5); basis = "近12小时"; }
+    if (!est) est = this.burnRate(stationId, 12, 2, 5);
     if (!est) {
       // 冷启动兜底：充值截断后的窗口回归
       const cutoff = Date.now() - windowHours * 3600 * 1000;
@@ -513,10 +577,9 @@ export class History {
       if (Math.abs(denom) < 1e-9) return null;
       const slope = (n * sxy - sx * sy) / denom;
       est = { burnPerDay: slope < 0 ? -slope * 24 : 0, samples: n, spanHours: spanMs / 3600000 };
-      basis = "回归";
     }
 
-    return forecastFrom(est, latest, basis);
+    return forecastFrom(est, latest, SPEND_BASIS.fallback);
   }
 }
 

@@ -2,15 +2,27 @@
 // 隐藏敏感凭证，仅返回是否已配置；告警的去重状态（alertState，里面有通知发送失败的原文）前端用不到，不返回
 import { businessTimeZone, dayBoundsInTz } from "../lib/business-time.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
+import { spendReadable } from "../lib/upstream-spend.js";
+
+// 今天花了多少：sub2api 直接用站点仪表盘接口的值；拿不到就按余额历史从业务时区零点推算（前端标 ≈）
+export function todaySpendOf(rt, s) {
+  const midnight = dayBoundsInTz(Date.now(), businessTimeZone()).startMs;
+  const fromSite = s.balance?.todayUsed;
+  return { usd: fromSite ?? rt.history.usedSince(s.id, midnight), estimate: fromSite == null };
+}
+
+// 余额趋势柱状图用：近 30 天每天花了多少 { state, source, days: [{ day, usd }], since, todayEstimate }（说明在 db/history.js dailySpendView）
+//   state：ok 读到了 / denied 对方不给读以前的用量 / pending 读不到（正在读或读失败在重试）/ none 这种上游没有这个数（自营站点、固定成本、sk 密钥）
+export function dailySpendOf(rt, station, today = null) {
+  return spendReadable(station) ? rt.history.dailySpendView(station.id, today ?? todaySpendOf(rt, station)) : { state: "none", source: null, days: [], since: null, todayEstimate: false };
+}
 
 export function redact(rt, s) {
   const { accessToken, apiKey, password, s2Tokens, keyAgentSecret, onboardingOrigin, authorizationUpdateRef, alertState, ...rest } = s;
   const balance = s.balance && !s.balance.ok
     ? { ...s.balance, error: connectionDiagnostic(s.balance.error, s) }
     : s.balance;
-  // 今日消耗：sub2api 直接用站点仪表盘接口的值；拿不到就按余额历史从业务时区零点推算（前端标 ≈）
-  const midnight = dayBoundsInTz(Date.now(), businessTimeZone()).startMs;
-  const fromSite = s.balance?.todayUsed;
+  const today = todaySpendOf(rt, s);
   return {
     ...rest,
     balance,
@@ -22,9 +34,10 @@ export function redact(rt, s) {
       ? { expiresAt: s2Tokens.expiresAt || null, lastLoginAt: s2Tokens.lastLoginAt || null }
       : null,
     prediction: rt.history.predict(s.id),
+    dailySpend: dailySpendOf(rt, s, today),
     spark: rt.history.sparkline(s.id, 48),
-    todayUsed: fromSite ?? rt.history.usedSince(s.id, midnight),
-    todayIsEstimate: fromSite == null,
+    todayUsed: today.usd,
+    todayIsEstimate: today.estimate,
     todayTokens: s.balance?.todayTokens ?? null,
     todayRequests: s.balance?.todayRequests ?? null,
   };

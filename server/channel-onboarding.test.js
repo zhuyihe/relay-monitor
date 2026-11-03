@@ -223,7 +223,7 @@ async function authorizationFixture(t, type = "newapi") {
   store.data.auth = { isDefault: false }; await store.save();
   let rt;
   async function restart() {
-    store = new Store(pool); await store.load(); rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 },
+    store = new Store(pool); await store.load(); rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} },
       sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
     rt.reconciliation = createReconciliationModule(rt); rt.channelOnboarding = rt.onboardingSource = await createChannelOnboardingModule(rt, { now: () => state.now }).load();
   }
