@@ -294,3 +294,19 @@ test("接口字段 dailySpend：{ state: ok | pending | denied | none, days: [{ 
   assert.equal(body.prediction.burnPerDay, 3);
   assert.equal((await (await GET(new Request("https://local.test/api/stations/c/history"), rt, { id: "c" })).json()).dailySpend.state, "denied");
 });
+
+test("读失败：页面上和新上游正在读一样是 pending（后台再试），柱子先用余额快照的数；下次读成功就是 ok", async (t) => {
+  let fail = true;
+  const h = harness(t, { stations: [station("a")], read: async () => {
+    if (fail) throw Object.assign(new Error("net"), { code: "NETWORK_UNREACHABLE" });
+    return { days: [{ day: "2026-10-23", usd: 4 }], source: "dashboard" };
+  } });
+  await h.spend.load();
+  await h.spend.tick();
+  assert.equal(h.rt.history.dailySpendView("a").state, "pending");
+  assert.equal(h.rt.history.dailySpendView("a").source, "balance");
+  fail = false;
+  h.clock.now += 10 * MIN;
+  await h.spend.tick();
+  assert.equal(h.rt.history.dailySpendView("a").state, "ok");
+});

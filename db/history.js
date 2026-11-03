@@ -161,7 +161,7 @@ export class History {
   }
 
   // 接口给页面（余额趋势的柱状图）的：近 30 天每天花了多少。
-  //   state：ok 读到了 / denied 对方不给读以前的用量 / pending 读不到（新上游正在读，或读失败在重试）
+  //   state：ok 读到了 / denied 对方不给读以前的用量 / pending 读不到（新上游正在读，或读失败后台会再试）
   //   days：[{ day, usd }] 按日期升序、业务时区；最后一个是今天（到现在，today 是调用方给的 { usd, estimate }；没有就不放）。
   //         ok 时是上游自己那边读到的整天；denied / pending 时是控制台自己的余额快照里每天下降的数（从开始监控那天起，没快照的天不出现），source 写 balance
   //   since：开始监控的日期（最早一个余额快照在业务时区是哪天；只留 30 天热数据，更早的就是窗口开头），没有快照是 null
@@ -520,7 +520,8 @@ export class History {
 
   /**
    * 日均花费、可用天数：只此一份（上游列表、运营总览、快用完提醒、日报都读这里）。
-   * 有上游自己那边读到的每天花费时，日均花费 = max（近 7 个整天的平均，最近 24 小时实际花费），见 lib/upstream-spend.js；
+   * 有上游自己那边读到的每天花费时，日均花费 = max（近 7 个整天的平均，最近 24 小时实际花费）；最近 3 小时的速度超过它的 2 倍
+   *（花费突然暴涨）才按最近 3 小时的速度算，见 lib/upstream-spend.js dailyBurn；
    * 一天的数都没有（对方不给读、又是新加的）退回下面 predictFromSnapshots 的老办法。
    * 最近 24 小时用余额快照算，只算下降的部分，不满 24 小时按读到的算、不放大。
    */
@@ -529,7 +530,8 @@ export class History {
     const all = this.data[stationId] || [];
     if (rows?.length && all.length) {
       const now = Date.now();
-      const burn = dailyBurn({ rows, today: dayKeyInTz(now, businessTimeZone()), last24h: this.usedBetween(stationId, now - 24 * 3600000, Infinity) });
+      const burn = dailyBurn({ rows, today: dayKeyInTz(now, businessTimeZone()), last24h: this.usedBetween(stationId, now - 24 * 3600000, Infinity),
+        rate3h: this.burnRate(stationId, 3, 1, 5)?.burnPerDay ?? null });
       if (burn) return forecastFrom({ burnPerDay: burn.burnPerDay, samples: burn.days, spanHours: burn.days * 24 }, all[all.length - 1], burn.basis);
     }
     return this.predictFromSnapshots(stationId, windowHours);
