@@ -115,7 +115,7 @@ test("对方不给读：记下「不给读」，不反复试（隔一周最多�
   for (let i = 0; i < 5; i += 1) { h.clock.now += 6 * 3600000; await h.spend.tick(); }
   assert.equal(h.calls.length, 1, "一天多里 5 次看都没再问");
   h.rt.history.data.a = Array.from({ length: 7 }, (_, i) => [h.clock.now - (6 - i) * 1800000, 100 - i, 0]);
-  assert.equal(h.rt.history.predict("a").basis, "近3小时", "老办法");
+  assert.equal(h.rt.history.predict("a").basis, "fallback", "老办法");
   h.clock.now = at("2026-10-31T11:00:00");
   await h.spend.tick();
   assert.equal(h.calls.length, 2, "一周以后再问一次");
@@ -269,14 +269,17 @@ test("接口字段 dailySpend：{ state: ok | pending | denied | none, days: [{ 
   h.rt.history.data.a = [[h.clock.now, 30, 0]];
   const view = (s) => redact(h.rt, s);
   assert.equal(view(upstream).dailySpend.state, "ok");
-  assert.equal(view(upstream).dailySpend.days.length, 30, "近 30 个整天，按日期升序");
-  assert.deepEqual([view(upstream).dailySpend.days[0].day, view(upstream).dailySpend.days.at(-1).day], ["2026-09-24", "2026-10-23"]);
+  assert.equal(view(upstream).dailySpend.days.length, 31, "近 30 个整天 + 今天（到现在），按日期升序");
+  assert.deepEqual([view(upstream).dailySpend.days[0].day, view(upstream).dailySpend.days.at(-2).day, view(upstream).dailySpend.days.at(-1).day], ["2026-09-24", "2026-10-23", "2026-10-24"]);
   assert.deepEqual(view(upstream).dailySpend.days[0], { day: "2026-09-24", usd: 3 });
+  assert.deepEqual([view(upstream).dailySpend.source, view(upstream).dailySpend.todayEstimate], ["upstream", true], "今天按余额快照推的（没有站点仪表盘的数）");
+  assert.deepEqual(view({ ...upstream, balance: { ok: true, remaining: 30, todayUsed: 7.5 } }).dailySpend.days.at(-1), { day: "2026-10-24", usd: 7.5 }, "今天取站点仪表盘的数");
+  assert.equal(view({ ...upstream, balance: { ok: true, remaining: 30, todayUsed: 7.5 } }).dailySpend.todayEstimate, false);
   assert.equal(view(upstream).prediction.burnPerDay, 3);
   assert.equal(view(upstream).prediction.etaDays, 10);
-  assert.deepEqual(view(fresh).dailySpend, { state: "pending", days: [] });
-  assert.deepEqual(view(closed).dailySpend, { state: "denied", days: [] }, "对方不给读以前的用量");
-  for (const s of [own, fixed, sk]) assert.deepEqual(view(s).dailySpend, { state: "none", days: [] });
+  assert.equal(view(fresh).dailySpend.state, "pending");
+  assert.equal(view(closed).dailySpend.state, "denied", "对方不给读以前的用量");
+  for (const s of [own, fixed, sk]) assert.deepEqual(view(s).dailySpend, { state: "none", source: null, days: [], since: null, todayEstimate: false });
   // history 接口给同一份
   const { registerHooks } = await import("node:module");
   const hook = registerHooks({ load(url, context, nextLoad) {
@@ -289,5 +292,5 @@ test("接口字段 dailySpend：{ state: ok | pending | denied | none, days: [{ 
   const body = await (await GET(new Request("https://local.test/api/stations/a/history"), rt, { id: "a" })).json();
   assert.deepEqual(body.dailySpend, view(upstream).dailySpend);
   assert.equal(body.prediction.burnPerDay, 3);
-  assert.deepEqual((await (await GET(new Request("https://local.test/api/stations/c/history"), rt, { id: "c" })).json()).dailySpend, { state: "denied", days: [] });
+  assert.equal((await (await GET(new Request("https://local.test/api/stations/c/history"), rt, { id: "c" })).json()).dailySpend.state, "denied");
 });

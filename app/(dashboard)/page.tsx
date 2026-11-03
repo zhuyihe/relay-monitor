@@ -69,7 +69,7 @@ const COPY = Object.freeze({
   balance: (text: string) => `余额 ${text}`,
   lowLine: (text: string) => `余额提醒线 ${text}`,
   available: (days: string) => `可用${days}`,
-  burnSentence: (balance: string, burn: string, basis: string) => `余额 ${balance}，日均花费 ${burn}，${basis}。`,
+  burnSentence: (balance: string, burn: string, basis: string) => `余额 ${balance}，日均花费 ${burn}${basis ? `，${basis}` : ""}。`,
   expiresIn: (n: number) => `${n} 天后到期`,
   fixedSentence: (date: string) => `最近一笔 ${date}到期。要续上，再记一笔固定成本；不再续费可以在编辑里标记。`,
   runway: "快用完的上游",
@@ -558,7 +558,7 @@ function RunwayPanel({
           [COPY.tip.burn, burnCellText(s, p)],
           [COPY.tip.days, balanceDaysText(view)],
         ];
-        if (view.days != null && view.days !== Infinity && view.days > 0) tip.push([COPY.tip.basis, basisText(p?.basis)]);
+        if (view.days != null && view.days !== Infinity && view.days > 0 && basisText(p?.basis)) tip.push([COPY.tip.basis, basisText(p?.basis)]);
       }
       if (s.noRenewal) tip.push([COPY.tip.renewal, COPY.noRenewal]);
 
