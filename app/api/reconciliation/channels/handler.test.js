@@ -37,3 +37,13 @@ test("channels 接口：请求不对给 400 和码；模块抛的带码的错原
   assert.deepEqual([failed.status, body.code], [400, "KEY_AGENT_NOT_CONFIGURED"]);
   assert.doesNotMatch(body.error, /secret-pat/, "原文里的令牌不能原样给出去");
 });
+
+test("channels 接口：key-usage 是只读的 GET，读 ?ownStationId=&channelId=&upstreamStationId=&tokenId=，原样交给对账模块；没有自营站点是 400", async () => {
+  const calls = [];
+  const rt = { store: { get: () => ({ id: "own" }) }, channelOnboarding: {}, channelProfit: {}, reconciliation: { checkKeyUsage: async (input) => { calls.push(input); return { checked: true, idle: true }; } } };
+  const ok = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/key-usage?ownStationId=own&channelId=3&upstreamStationId=up&tokenId=9"), rt, "key-usage");
+  assert.deepEqual([ok.status, await ok.json()], [200, { checked: true, idle: true }]);
+  assert.deepEqual(calls, [{ ownStationId: "own", channelId: "3", upstreamStationId: "up", tokenId: "9" }]);
+  const unset = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/key-usage?channelId=3"), rt, "key-usage");
+  assert.deepEqual([unset.status, (await unset.json()).code], [400, "OWN_STATION_UNSET"]);
+});
