@@ -1,5 +1,6 @@
 // GET /api/stations/:id/history?hours=（趋势图用历史数据）——对应 v1 server.js 同名路由
 import { withAuth, json } from "../../../../../lib/api.js";
+import { dailySpendOf } from "../../../../../server/stations.js";
 
 export const GET = withAuth(async (request, rt, params) => {
   const s = rt.store.get(params.id);
@@ -9,5 +10,6 @@ export const GET = withAuth(async (request, rt, params) => {
   return json({
     points: rt.history.points(s.id, hours),
     prediction: rt.history.predict(s.id),
+    dailySpend: dailySpendOf(rt, s),
   });
 });

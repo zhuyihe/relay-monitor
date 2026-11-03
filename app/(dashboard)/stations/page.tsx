@@ -802,7 +802,7 @@ export default function StationsPage() {
       main = (
         <span title={basisText(p.basis) || undefined}>
           {burn}
-          <span className="sr-only">，{basisText(p.basis)}</span>
+          {basisText(p.basis) ? <span className="sr-only">，{basisText(p.basis)}</span> : null}
         </span>
       );
     } else main = <span className="jy-muted">{EMPTY}</span>;

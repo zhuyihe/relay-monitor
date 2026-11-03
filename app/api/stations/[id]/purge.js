@@ -1,5 +1,6 @@
 import { forgetOwnLog } from "../../../../server/own-log-store.js";
 import { forgetUserOps } from "../../../../server/user-ops.js";
+import { forgetUpstreamSpend } from "../../../../server/upstream-spend.js";
 
 // 历史必须先物理清除再移除资源文档。清除失败时资源仍在，管理员可以安全重试。
 export async function purgeStation(rt, stationId) {
@@ -7,5 +8,6 @@ export async function purgeStation(rt, stationId) {
   await rt.history.purge(stationId);
   await forgetOwnLog(rt, stationId); // 整站日志的进度和桶（应付成本 V1）
   await forgetUserOps(rt, stationId); // 用户运营的快照、用量、进度、提醒状态
+  await forgetUpstreamSpend(rt, stationId); // 上游每天花费和读取状态
   return { ok: await rt.store.remove(stationId), alreadyPurged: false };
 }
