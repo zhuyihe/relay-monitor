@@ -12,7 +12,7 @@ export function todaySpendOf(rt, s) {
 }
 
 // 余额趋势柱状图用：近 30 天每天花了多少 { state, source, days: [{ day, usd }], since, todayEstimate }（说明在 db/history.js dailySpendView）
-//   state：ok 读到了 / denied 对方不给读以前的用量 / pending 读不到（正在读或读失败在重试）/ none 这种上游没有这个数（自营站点、固定成本、sk 密钥）
+//   state：ok 读到了 / denied 对方不给读以前的用量 / failed 上次读失败、会再试 / pending 新上游正在读 / none 这种上游没有这个数（自营站点、固定成本、sk 密钥）
 export function dailySpendOf(rt, station, today = null) {
   return spendReadable(station) ? rt.history.dailySpendView(station.id, today ?? todaySpendOf(rt, station)) : { state: "none", source: null, days: [], since: null, todayEstimate: false };
 }

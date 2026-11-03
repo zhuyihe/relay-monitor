@@ -22,6 +22,7 @@ export function createUpstreamSpend(rt, {
   const states = new Map(); // 站点 id → 库里那一行（status、source、readThrough、checkedAt）
   const retry = new Map(); // 站点 id → { fails, until }：读失败后什么时候再试（只放内存，重启就重新试）
   let running = false;
+  const inflight = new Set(); // 正在读的站点：定时看一遍和「重新读取」不会同时读同一个
   let timer = null, kickTimer = null;
 
   const keepFrom = (today) => shiftDayLabel(today, -UPSTREAM_SPEND.KEEP_DAYS);
@@ -32,15 +33,16 @@ export function createUpstreamSpend(rt, {
     const rows = await store.listDays(stationIds, keepFrom(today), today);
     for (const id of stationIds) {
       const mine = rows.filter((row) => row.stationId === id).map(({ day, usd }) => ({ day, usd }));
-      rt.history.setDailySpend(id, mine, { denied: states.get(id)?.status === "denied" });
+      rt.history.setDailySpend(id, mine, { denied: states.get(id)?.status === "denied", failed: retry.has(id) });
     }
   }
 
   // 这个上游这轮要读哪几天：{ from, through }（业务时区日期，含两头）；不用读返回 null
-  function plan(station, at) {
+  // force：页面上点「重新读取」：不等退避、不等「不给读」的一周，余额读没读成也读
+  function plan(station, at, { force = false } = {}) {
     if (!spendReadable(station) || station.archivedAt || station.monitorEnabled === false) return null;
-    if (!station.balance?.ok) return null; // 第一次读余额成功以后才读
-    if ((retry.get(station.id)?.until ?? 0) > at) return null;
+    if (!force && !station.balance?.ok) return null; // 第一次读余额成功以后才读
+    if (!force && (retry.get(station.id)?.until ?? 0) > at) return null;
     const tz = businessTimeZone();
     const today = dayKeyInTz(at, tz);
     // 昨天最后一个小时对方的看板还没写全就先别读：过了零点一会儿才算昨天读得到
@@ -49,7 +51,7 @@ export function createUpstreamSpend(rt, {
     let from;
     if (!state) from = shiftDayLabel(today, -UPSTREAM_SPEND.BACKFILL_DAYS);
     else if (state.status === "denied") {
-      if (at - state.checkedAt < UPSTREAM_SPEND.DENIED_RETRY_MS) return null;
+      if (!force && at - state.checkedAt < UPSTREAM_SPEND.DENIED_RETRY_MS) return null;
       from = shiftDayLabel(today, -UPSTREAM_SPEND.BACKFILL_DAYS);
     } else from = shiftDayLabel(state.readThrough, 1);
     const earliest = shiftDayLabel(today, -UPSTREAM_SPEND.BACKFILL_DAYS);
@@ -98,8 +100,26 @@ export function createUpstreamSpend(rt, {
         return "denied";
       }
       failed(station, error, checkedAt);
+      await publish([station.id]).catch(() => {}); // 页面上「读不到」（state: failed）
       return "failed";
     }
+  }
+
+  async function run(station, todo) {
+    inflight.add(station.id);
+    try { return await readOne(station, todo); } finally { inflight.delete(station.id); }
+  }
+
+  // 页面上点「重新读取」：马上读这一个上游，不等退避、不等一周；返回 { outcome }：read / denied / failed / skipped（上游断路或额度快到限流）/
+  // busy（正在读）/ none（这种上游没有这个数、或已经读到昨天了没有要读的）
+  async function refresh(stationId) {
+    const station = rt.store.get(stationId);
+    if (!station) return { outcome: "none" };
+    if (inflight.has(stationId)) return { outcome: "busy" };
+    retry.delete(stationId);
+    const todo = plan(station, now(), { force: true });
+    if (!todo) { await publish([stationId]).catch(() => {}); return { outcome: "none" }; }
+    return { outcome: await run(station, todo) };
   }
 
   // 看一遍有没有要读的；没有就不发任何请求。一个上游读完再读下一个，之间隔开
@@ -112,9 +132,10 @@ export function createUpstreamSpend(rt, {
       for (const station of rt.store.list({ includeArchived: false })) {
         const todo = plan(station, now());
         if (!todo) continue;
+        if (inflight.has(station.id)) continue;
         if (!first) await sleep(UPSTREAM_SPEND.BACKFILL_GAP_MS);
         first = false;
-        done.push({ id: station.id, outcome: await readOne(rt.store.get(station.id) || station, todo), ...todo });
+        done.push({ id: station.id, outcome: await run(rt.store.get(station.id) || station, todo), ...todo });
       }
     } finally {
       running = false;
@@ -135,7 +156,7 @@ export function createUpstreamSpend(rt, {
   }
 
   return {
-    tick, load, kick,
+    tick, load, kick, refresh,
     // 刷新余额成功时问一声：这个上游还没读过，就尽快读（第一次读余额成功以后读过去 30 天）
     noteBalanceOk(station) { if (spendReadable(station) && !states.has(station.id)) kick(); },
     stateOf: (stationId) => states.get(stationId) ?? null,
