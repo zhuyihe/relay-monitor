@@ -513,7 +513,7 @@ const modelRow = (page, name) => page.locator("tbody tr").filter({ has: page.get
 // 页面上不该出现的话（讲算法、讲测法、v4 的词）：v5 页面只写结论、数字、该做什么
 const BANNED_WORDS = ["至少", "积累", "怎么算的", "被挡", "没买到", "余量", "缺口", "上限", "今晚", "能给", "高峰"];
 
-test("模型供需（电脑）：一屏、顶上三个数、八列主表（只列近 24 小时缺货的模型）、建议按原因给、收起的其余模型、按上游看；整页不滚、两块各自在框里滚、表头固定；页面上没有讲算法的话", async (t) => {
+test("模型供需（电脑）：一屏、顶上三个数、八列主表（只列近 24 小时缺货的模型）、建议按原因给、收起的其余模型、按上游看；整页不滚、两块各自在框里滚、表头固定；页面上没有讲算法的话", { skip: "模块隐藏中（lib/features.js 的 modelsModule）" }, async (t) => {
   const { page } = await openModelsPage(t, {});
   await page.setViewportSize({ width: 1440, height: 900 });
   assert.equal(await page.getByText(MODELS_COPY.asOf("16:50"), { exact: true }).isVisible(), false, "电脑上顶栏有「数据截至」，三个数下面不再写第二次");
@@ -598,7 +598,7 @@ test("模型供需（电脑）：一屏、顶上三个数、八列主表（只�
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-page-1440x900.png` }); }
 });
 
-test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四个数、每小时缺货失败（按原因分色、可切近 7 天）、哪些渠道在失败、受影响的用户、找货帮手", async (t) => {
+test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四个数、每小时缺货失败（按原因分色、可切近 7 天）、哪些渠道在失败、受影响的用户、找货帮手", { skip: "模块隐藏中（lib/features.js 的 modelsModule）" }, async (t) => {
   const { page, requests } = await openModelsPage(t, {});
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("button", { name: MODELS_COPY.rowOpen("claude-sonnet-4.6"), exact: true }).click();
@@ -669,7 +669,7 @@ test("模型供需（电脑）：点开一个模型——宽 760 的抽屉：四
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-drawer-1440x900.png` }); }
 });
 
-test("模型供需（手机 375）：顶上三个数两两一排、一个模型一张卡片（四行）、不横向滚动；抽屉整屏、渠道和找货帮手是卡片", async (t) => {
+test("模型供需（手机 375）：顶上三个数两两一排、一个模型一张卡片（四行）、不横向滚动；抽屉整屏、渠道和找货帮手是卡片", { skip: "模块隐藏中（lib/features.js 的 modelsModule）" }, async (t) => {
   const { page } = await openModelsPage(t, { viewport: { width: 375, height: 812 } });
   const cards = page.locator(".jy-models-card");
   await cards.first().waitFor();
@@ -697,7 +697,7 @@ test("模型供需（手机 375）：顶上三个数两两一排、一个模型�
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(500); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/models-drawer-375x812.png` }); }
 });
 
-test("模型供需：断货的模型（一个开着的渠道都没有）——手机卡片三行、抽屉不画柱子、写一句话、用户写「断货中，数不出受影响的用户。」", async (t) => {
+test("模型供需：断货的模型（一个开着的渠道都没有）——手机卡片三行、抽屉不画柱子、写一句话、用户写「断货中，数不出受影响的用户。」", { skip: "模块隐藏中（lib/features.js 的 modelsModule）" }, async (t) => {
   const { page } = await openModelsPage(t, { viewport: { width: 375, height: 812 } });
   const card = page.locator(".jy-models-card").filter({ hasText: "glm-4.6" });
   assert.deepEqual((await card.innerText()).split("\n"), ["glm-4.6", "断货中", "估计每天少收 ¥12 · 没渠道", "明天预计仍断货", "建议：这个模型没有开着的渠道，去开一个"]);
@@ -713,7 +713,7 @@ test("模型供需：断货的模型（一个开着的渠道都没有）——�
   assert.match(await k.nth(3).innerText(), /明天预计[\s\S]*仍断货/);
 });
 
-test("模型供需：拿不到数据时只写一句话、放在表的位置：没开错误日志、控制台关了读取（带「去打开」）、近 24 小时没有失败、这次没算出来；没有提示条", async (t) => {
+test("模型供需：拿不到数据时只写一句话、放在表的位置：没开错误日志、控制台关了读取（带「去打开」）、近 24 小时没有失败、这次没算出来；没有提示条", { skip: "模块隐藏中（lib/features.js 的 modelsModule）" }, async (t) => {
   const noLog = await openModelsPage(t, { mode: "norecords" });
   await noLog.page.setViewportSize({ width: 1440, height: 900 });
   await noLog.page.getByText(MODELS_COPY.none.noLog, { exact: true }).waitFor();
@@ -736,6 +736,31 @@ test("模型供需：拿不到数据时只写一句话、放在表的位置：�
     const text = await page.locator("main").innerText();
     for (const word of ["积累", "怎么算的", "今晚", "余量"]) assert.equal(text.includes(word), false, `不该出现「${word}」`);
   }
+});
+
+test("模型供需模块隐藏中：/models 显示「找不到这个页面」（接口是真 404，见 routes-hidden.test.js；页面走 Next 的 notFound，流式输出时 HTTP 状态码是 200，用户看到的是 404 页；导航里没有这一项由 lib/nav 的单测和 app/api/models/routes-hidden.test.js 管，侧栏就是读那一份）", async (t) => {
+  for (const viewport of [undefined, { width: 375, height: 812 }]) {
+    const page = await openFixturePage(t, async (route) => {
+      if (new URL(route.request().url()).pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+      return fulfill(route, {});
+    }, viewport, MODELS_NOW, null, "/models");
+    await page.getByText("找不到这个页面。", { exact: true }).waitFor();
+    assert.equal(await page.getByText(MODELS_COPY.tableTitle, { exact: false }).count(), 0);
+  }
+});
+
+test("模型供需模块隐藏中：系统设置里没有「读取错误日志」开关和它下面的提示，别的开关照旧", async (t) => {
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/settings") return fulfill(route, { ...settingsFixture(), errorLogQuiet: true });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture());
+    throw new Error("unexpected settings fixture API: " + url.pathname);
+  }, undefined, false, null, "/settings");
+  await page.getByText(SETTINGS_COPY.expectedCost, { exact: true }).first().waitFor();
+  assert.equal(await page.getByText(SETTINGS_COPY.errorLog, { exact: true }).count(), 0);
+  assert.equal(await page.getByText(SETTINGS_COPY.errorLogQuiet, { exact: false }).count(), 0);
+  assert.equal(await page.getByText(SETTINGS_COPY.errorLogHint, { exact: false }).count(), 0);
 });
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };

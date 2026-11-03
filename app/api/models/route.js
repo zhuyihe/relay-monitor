@@ -3,8 +3,11 @@
 import { withAuth, json } from "../../../lib/api.js";
 import { OWN_STATION_UNSET } from "../../../lib/format.js";
 import { modelsPage } from "../../../server/models-page.js";
+import { modelsModuleEnabled } from "../../../lib/features.js";
 
 export const GET = withAuth(async (_request, rt) => {
+  // 模块隐藏中：当作没有这个接口
+  if (!modelsModuleEnabled()) return json({ error: "not found" }, 404);
   const page = await modelsPage(rt);
   if (page.unset) return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   return json(page);

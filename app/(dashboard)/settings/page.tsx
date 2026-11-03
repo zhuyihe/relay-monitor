@@ -19,6 +19,7 @@ import { commitOnLeave, useAutoSave, useSaveQueue } from "../../components/use-a
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Sym } from "../../components/icons";
 import { More } from "../../components/more";
+import { modelsModuleEnabled } from "../../../lib/features.js";
 import { COPY } from "./copy";
 
 const RETENTION_PRESETS = [30, 90, 180, 365];
@@ -546,7 +547,7 @@ export default function SettingsPage() {
                       </div>
                       <span className="jy-caption" id={`${ids.userOps}-desc`}>{COPY.userOpsHint}</span>
                     </div>
-                    <div className="jy-field jy-settings-field">
+                    {modelsModuleEnabled() && (<div className="jy-field jy-settings-field">
                       <div className="jy-settings-switch">
                         <label htmlFor={ids.errorLog}>{COPY.errorLog}</label>
                         <Switch
@@ -561,7 +562,7 @@ export default function SettingsPage() {
                       </div>
                       <span className="jy-caption" id={`${ids.errorLog}-desc`}>{COPY.errorLogHint}</span>
                       {errorLog.value && errorLogQuiet ? <span className="jy-caption">{COPY.errorLogQuiet}</span> : null}
-                    </div>
+                    </div>)}
                     <p className="jy-caption">
                       {COPY.lowLineMovedBefore}
                       <Link className="jy-link" href="/notifications">{NAV_LABELS.notifications}</Link>

@@ -3,6 +3,7 @@
 // secretsEncrypted：登录信息是否加密保存（没配 RELAY_SECRET_KEY 时为 false，页顶提示一条，§8.1）
 import { withAuth, json } from "../../../lib/api.js";
 import { businessTimeZone } from "../../../lib/business-time.js";
+import { modelsModuleEnabled } from "../../../lib/features.js";
 import { restartPolling, refreshAll } from "../../../server/refresh.js";
 import { ERROR_SPEC, OwnLogStore } from "../../../server/own-log-store.js";
 import { errorLogQuiet } from "../../../server/own-log-ingest.js";
@@ -35,7 +36,8 @@ async function ownLogProgress(rt, now = Date.now()) {
 async function ownErrorLogQuiet(rt) {
   try {
     const own = rt.store.list?.().find((station) => station.isOwn && station.type === "newapi");
-    if (!own || !rt.pool || rt.store.settings?.ownErrorLog === false) return false;
+    // 模块隐藏中不查库（lib/features.js）
+    if (!modelsModuleEnabled() || !own || !rt.pool || rt.store.settings?.ownErrorLog === false) return false;
     return await errorLogQuiet(rt._ownErrorStore ||= new OwnLogStore(rt.pool, ERROR_SPEC), own.id);
   } catch { return false; }
 }

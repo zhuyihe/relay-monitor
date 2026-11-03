@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
+import { FEATURES } from "../../../lib/features.js";
 
 // 系统设置接口：GET 多给 ownLog（自营站点的收费记录读到哪儿了、落后多少、哪几天没读全；应付成本 V1-a）；PUT 收 expectedCost（只有明确 false 才关）
 let route;
@@ -39,7 +40,8 @@ test("GET /api/settings 带 ownLog：进度两头、落后多少、哪几天没�
   assert.equal(await read(runtime({ cursor: null })), null);
 });
 
-test("GET /api/settings 带 errorLogQuiet：连续 24 小时一条错误都没读到才是 true；开关关着、没有自营站点、没有进度、有近 24 小时的数都是 false", async (t) => {
+test("GET /api/settings 带 errorLogQuiet：连续 24 小时一条错误都没读到才是 true；开关关着、没有自营站点、没有进度、有近 24 小时的数都是 false（模块打开时；隐藏时一律 false 且不查库）", async (t) => {
+  FEATURES.modelsModule = true; t.after(() => { FEATURES.modelsModule = false; });
   t.mock.method(Date, "now", () => NOW);
   const { GET } = await settingsRoute();
   const H = 3600000;

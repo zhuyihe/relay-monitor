@@ -41,6 +41,7 @@ import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, re
 import { workflowAction } from "../lib/workflow-actions.js";
 import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
 import { ERROR_SPEC, OwnLogStore } from "./own-log-store.js";
+import { modelsModuleEnabled } from "../lib/features.js";
 import { ERROR_KIND, INGEST, cachedRetrySettings, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
@@ -4492,7 +4493,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       // 自营站点错误日志的计数（模型供需第 1 步）：设置里「读取错误日志」开着（默认开，只有明确关才关）才读；排在整站消费日志后面读，共用请求额度和断路，
       // 额度紧、断路时宁可落后也不多读；关→开那一下和消费日志同一个规矩：进度比昨天 0 点还旧就挪到昨天 0 点（关着那段不补）
-      if (ownLogIngest) {
+      // 模型供需模块隐藏中（lib/features.js）时整段不跑：不读错误日志，也不读站点的重试设置（那次读在错误日志读取里）；消费日志、判断消费日志开没开的读照旧
+      if (ownLogIngest && modelsModuleEnabled()) {
         const errorsOn = rt.store?.settings?.ownErrorLog !== false;
         const errorsWasOff = rt.store?.settings?.ownErrorLogWasOff === true;
         if (!errorsOn && !errorsWasOff) await rt.store?.updateSettings?.({ ownErrorLogWasOff: true })?.catch?.(() => {});
