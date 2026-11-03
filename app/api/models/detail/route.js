@@ -3,8 +3,11 @@
 import { withAuth, json } from "../../../../lib/api.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { modelDetail } from "../../../../server/models-page.js";
+import { modelsModuleEnabled } from "../../../../lib/features.js";
 
 export const GET = withAuth(async (request, rt) => {
+  // 模块隐藏中：当作没有这个接口
+  if (!modelsModuleEnabled()) return json({ error: "not found" }, 404);
   const name = new URL(request.url).searchParams.get("name") || "";
   if (!name) return json({ error: "请选一个模型", code: "MODEL_REQUIRED" }, 400);
   const detail = await modelDetail(rt, name);

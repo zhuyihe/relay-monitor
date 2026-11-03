@@ -3,6 +3,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
+import { FEATURES } from "../../../lib/features.js";
+
+// 这个文件测模块打开时接口的行为（模块隐藏时是 404，见 routes-hidden.test.js）；每个测试文件是单独的进程，这里改它不影响别的文件
+FEATURES.modelsModule = true;
 
 const hook = registerHooks({ load(url, context, nextLoad) {
   if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true,
