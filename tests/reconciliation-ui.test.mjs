@@ -780,14 +780,19 @@ test("后台标签页不刷新：页面在后台时定时刷新一个请求都�
   // 前台：快进 2 分钟，刷新照常发
   // 请求发出去要一点真实时间（机器忙时更久）：等到数变了为止，最多 5 秒，不靠固定睡 300 毫秒
   const until = async (condition) => { for (let i = 0; i < 50 && !condition(); i += 1) await page.waitForTimeout(100); };
+  // 等请求数「稳住」：连续 600 毫秒没有新增才算前台这一批都落地了。快进 2 分钟会同时触发好几个定时刷新（页面的、侧栏的），
+  // 它们的响应一个接一个回来；只等「数变了」就切后台，后面落地的会被算进后台（CI 上出现过 3 !== 2）
+  const settle = async () => { let last = -1, steady = 0; for (let i = 0; i < 100 && steady < 6; i += 1) { await page.waitForTimeout(100); const now = polled(); steady = now === last ? steady + 1 : 0; last = now; } };
+  await settle();
   const before = polled();
-  await page.clock.fastForward(120000); await until(() => polled() > before);
+  await page.clock.fastForward(120000); await until(() => polled() > before); await settle();
   assert.ok(polled() > before, "前台照常刷新");
   // 后台：快进 1 小时，一个都不发
   await setHidden(true);
+  await settle();
   const hiddenAt = polled();
   await page.clock.fastForward(3600000); await page.waitForTimeout(300);
-  assert.equal(polled(), hiddenAt, "后台一小时一个刷新请求都不发");
+  assert.equal(polled(), hiddenAt, `后台一小时一个刷新请求都不发（多出来的是：${seen.slice(-4).join("、")}）`);
   // 切回前台：立刻刷一次
   await setHidden(false); await until(() => polled() > hiddenAt);
   assert.ok(polled() > hiddenAt, "切回前台立刻刷一次");
