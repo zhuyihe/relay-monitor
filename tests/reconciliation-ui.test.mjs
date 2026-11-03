@@ -2213,7 +2213,7 @@ test("上游资源：绑定渠道选中一把 Key 时核用量：渠道有收入
   await idle.bind.getByText(hint, { exact: true }).waitFor();
   assert.equal(await idle.bind.getByText(hint, { exact: true }).locator("svg, img").count(), 0, "前面不加图标");
   assert.equal(await idle.bind.getByRole("button", { name: "绑定", exact: true }).isEnabled(), true, "提醒不拦「绑定」");
-  assert.ok(idle.usageReads.length >= 1 && idle.usageReads.every((query) => /channelId=100/.test(query) && /upstreamStationId=up1/.test(query) && /tokenId=\d+/.test(query)), "问的是这个渠道和选中的这把 Key：" + idle.usageReads.join(" ");
+  assert.ok(idle.usageReads.length >= 1 && idle.usageReads.every((query) => /channelId=100/.test(query) && /upstreamStationId=up1/.test(query) && /tokenId=\d+/.test(query)), "问的是这个渠道和选中的这把 Key：" + idle.usageReads.join(" "));
   await shot(idle.page, "bind-key-idle-1440x900");
   for (const keyUsage of [{ checked: true, idle: false }, { checked: false, idle: false }, "fail"]) {
     const quiet = await openBindModal(t, { upstream: "云帆", host: "api.yunfan-ai.com", matching: [100], keys, keyUsage });
