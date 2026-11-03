@@ -8,6 +8,7 @@ import "../../styles/pages/my.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "antd";
 import { api } from "../../../lib/client";
+import { visibleInterval } from "../../../lib/visible-interval.js";
 import { NAV_LABELS } from "../../../lib/brand";
 import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE, RANGE_TEXT } from "../../../lib/format";
 import { workflowAction } from "../../../lib/workflow-actions";
@@ -114,15 +115,7 @@ export default function MyStationPage() {
   // 范围变化立即拉取；约 30 秒自动刷新一次，切回标签页立即刷一次
   useEffect(() => {
     load(false, range);
-    const timer = setInterval(() => load(true), 30000);
-    const onVis = () => {
-      if (!document.hidden) load(true);
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return visibleInterval(() => load(true), 30000);
   }, [range, load]);
 
   // 范围一换，上一次细算的结果就不是这段时间的了

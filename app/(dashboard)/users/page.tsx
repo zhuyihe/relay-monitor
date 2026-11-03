@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "antd";
 import { api } from "../../../lib/client";
+import { visibleInterval } from "../../../lib/visible-interval.js";
 import { NAV_LABELS } from "../../../lib/brand";
 import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE } from "../../../lib/format";
 import { describeError } from "../../../lib/error-copy";
@@ -82,10 +83,7 @@ export default function UsersPageRoute() {
 
   useEffect(() => {
     load();
-    const timer = setInterval(() => load(), POLL_MS);
-    const onVis = () => { if (!document.hidden) load(); };
-    document.addEventListener("visibilitychange", onVis);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVis); };
+    return visibleInterval(() => load(), POLL_MS);
   }, [load]);
 
   // 流失页签：打开才取（后台只读库、读一个近 30 天的流向），每 60 秒再取；筛选一变就重取
@@ -113,10 +111,7 @@ export default function UsersPageRoute() {
   useEffect(() => {
     if (!churnOn) return;
     loadChurn();
-    const timer = setInterval(() => loadChurn(), POLL_MS);
-    const onVis = () => { if (!document.hidden) loadChurn(); };
-    document.addEventListener("visibilitychange", onVis);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVis); };
+    return visibleInterval(() => loadChurn(), POLL_MS);
   }, [churnOn, loadChurn]);
 
   const onRefresh = useCallback(async () => { await Promise.all([load(true), churnOn ? loadChurn(true) : null]); }, [load, loadChurn, churnOn]);

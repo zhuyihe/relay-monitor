@@ -6,6 +6,7 @@ import "../../styles/pages/analytics.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
+import { visibleInterval } from "../../../lib/visible-interval.js";
 import { api } from "../../../lib/client";
 import type { ProfitPageResponse } from "../../../lib/client";
 import { NO_UPSTREAM_TEXT, RANGE_TEXT } from "../../../lib/format";
@@ -79,8 +80,7 @@ export default function AnalyticsPage() {
   useEffect(() => {
     setLoading(true);
     load(startDay);
-    const timer = setInterval(() => load(startDay), POLL_MS);
-    return () => clearInterval(timer);
+    return visibleInterval(() => load(startDay), POLL_MS);
   }, [startDay, load]);
 
   const retry = useCallback(() => {

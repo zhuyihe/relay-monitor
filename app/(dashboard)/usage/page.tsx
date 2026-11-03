@@ -8,6 +8,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { Grid, Select } from "antd";
 import { Bar, Column } from "@ant-design/plots";
 import { api } from "../../../lib/client";
+import { visibleInterval } from "../../../lib/visible-interval.js";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { failureSentence } from "../../../lib/error-copy";
 import { EMPTY, formatCompact, formatInt, formatUnitPrice, formatZonedDate, formatZonedTime, RANGE_TEXT, SELL_PRICE_UNSET, TOKEN_NOTE } from "../../../lib/format";
@@ -154,15 +155,7 @@ export default function UsagePage() {
   // 档位变化即加载；每 30 秒强制拉一次；切回标签页立即刷新（同 v1）
   useEffect(() => {
     load(false, range);
-    const t = setInterval(() => load(true), 30000);
-    const onVis = () => {
-      if (!document.hidden) load(true);
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(t);
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return visibleInterval(() => load(true), 30000);
   }, [range, load]);
 
   // 只用属于当前档位的数据；切档位时先显示骨架，不拿上一档的数字冒充

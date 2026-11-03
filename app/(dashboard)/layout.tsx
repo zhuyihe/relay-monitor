@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { App, Dropdown } from "antd";
 import { api } from "../../lib/client";
+import { visibleInterval } from "../../lib/visible-interval.js";
 import { formatAsOf, formatAsOfTime } from "../../lib/format";
 import { failureText } from "../../lib/error-copy";
 import { workflowActionMeta } from "../../lib/workflow-actions";
@@ -57,10 +58,10 @@ function useAttentionCount(enabled: boolean) {
       } catch {}
     };
     load();
-    const id = setInterval(load, COUNT_POLL_MS);
+    const stop = visibleInterval(load, COUNT_POLL_MS);
     return () => {
       alive = false;
-      clearInterval(id);
+      stop();
     };
   }, [enabled]);
   return useMemo(() => {
