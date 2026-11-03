@@ -81,6 +81,8 @@ export function ruleFromRow(row, channels = []) {
     canonicalKey: row.canonical_key || null,
     // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
     keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    // 「今天有收入、绑的 Key 一直没用量」的计时（CHANNEL_KEY_IDLE_TODAY）：从什么时候起（毫秒）、哪一天、哪一把 Key；没在计时是 null
+    keyIdle: row.key_idle_since_ms != null ? { sinceMs: Number(row.key_idle_since_ms), day: row.key_idle_day, tokenId: row.key_idle_token_id == null ? null : Number(row.key_idle_token_id) } : null,
     // 解开了、但那几天仍然算不准的冲突期（可以有好几段）：只在有的时候带这个字段（见 server/reconciliation.js keyAgentRoundFor）
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
@@ -747,6 +749,11 @@ export class ReconciliationRepository {
   // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
   async markKeyIssue(ruleId, issue) {
     await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?", [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+  }
+
+  // 「今天有收入、绑的 Key 一直没用量」的计时，存库重启不清零。idle 是 { sinceMs, day, tokenId }，null 清掉；只在开始和清除时调用（server/reconciliation.js）
+  async markKeyIdle(ruleId, idle) {
+    await this.pool.query("UPDATE reconciliation_rules SET key_idle_since_ms = ?, key_idle_day = ?, key_idle_token_id = ? WHERE id = ?", [idle?.sinceMs ?? null, idle?.day ?? null, idle?.tokenId ?? null, ruleId]);
   }
 
   // 换 Key（渠道换成了同一个上游的另一把 Key）：同一个事务里把这条绑定的 Key（token_id、token_name、active_token_key、canonical_key）改成新的；

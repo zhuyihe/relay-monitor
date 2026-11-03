@@ -98,6 +98,21 @@ async function loadKeyOptions(upstreamId: string, channels: ChannelOption[], exc
   return { usable: usable.length, options: [...usable.map((token: any) => ({ value: token.id as number, label: label(token) })),
     ...blocked.map(({ token, reason }: any) => ({ value: token.id as number, label: label(token), disabled: true, reason: keyReasonText(reason) }))] };
 }
+// 选中一把 Key 时核一下用量（GET /api/reconciliation/channels/key-usage，只读上游一个请求，渠道收入读已经存着的小时桶；后台 1 分钟内同一把 Key 不重复读）：
+// 渠道最近 24 小时有收入、这把 Key 最近 24 小时没有用量时返回 true，在下拉框下面提醒一句，不拦；查不到（没有桶、上游读失败）不提醒、不报错
+function useKeyIdleHint(ownStationId: string, channelId: number | null | undefined, upstreamId: string | null | undefined, tokenId: number | null) {
+  const [idle, setIdle] = useState(false);
+  useEffect(() => {
+    setIdle(false);
+    if (!ownStationId || channelId == null || !upstreamId || tokenId == null) return;
+    let alive = true;
+    const query = new URLSearchParams({ ownStationId, channelId: String(channelId), upstreamStationId: upstreamId, tokenId: String(tokenId) });
+    api(`/api/reconciliation/channels/key-usage?${query}`).then((result: any) => { if (alive) setIdle(result?.checked === true && result?.idle === true); }).catch(() => { if (alive) setIdle(false); });
+    return () => { alive = false; };
+  }, [ownStationId, channelId, upstreamId, tokenId]);
+  return idle;
+}
+
 function KeySelect({ aria, placeholder, value, keys, failed, disabled, onChange }: { aria: string; placeholder: string; value: number | null; keys: KeyOptions | null; failed: boolean; disabled: boolean; onChange: (value: number) => void }) {
   const M = CHANNEL_BINDING.bindModal;
   return <Select
@@ -125,6 +140,7 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
   const [saving, setSaving] = useState(false);
   const M = CHANNEL_BINDING.bindModal;
   const choices = useMemo(() => (upstream ? channelChoices(channels, upstream.id, { query, showDisabled }) : null), [channels, upstream, query, showDisabled]);
+  const idleHint = useKeyIdleHint(ownStationId, channelId, upstream?.id, tokenId);
 
   useEffect(() => { // 每次打开：只有一个启用的渠道对得上才替用户选好
     if (!upstream) return;
@@ -185,6 +201,7 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
     <label className="jy-bind-label">{M.key}</label>
     <KeySelect aria={M.key} placeholder={M.keyPlaceholder} value={tokenId} keys={keys} failed={failed} disabled={saving} onChange={(value) => { setTokenId(value); setHint(false); }} />
     {hint ? <p className="jy-caption jy-bind-hint">{M.onlyOne}</p> : null}
+    {idleHint ? <p className="jy-caption jy-bind-hint" role="status"><Sym kind="warn" /><span>{CHANNEL_BINDING.keyIdleHint}</span></p> : null}
     {failed ? <p className="jy-caption jy-bind-hint">{M.keysFailed}</p> : null}
   </Modal>;
 }
@@ -202,6 +219,7 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
   const [hint, setHint] = useState(false);
   const [saving, setSaving] = useState(false);
   const M = CHANNEL_BINDING.swapModal;
+  const idleHint = useKeyIdleHint(ownStationId, channel?.channelId, upstream?.id, tokenId);
   useEffect(() => {
     if (!channel || !upstream) return;
     let alive = true;
@@ -234,6 +252,7 @@ export function SwapKeyModal({ channel, upstream, ownStationId, options, onClose
     <label className="jy-bind-label">{M.next}</label>
     <KeySelect aria={M.next} placeholder={M.nextPlaceholder} value={tokenId} keys={keys} failed={failed} disabled={saving} onChange={(value) => { setTokenId(value); setHint(false); }} />
     {hint ? <p className="jy-caption jy-bind-hint">{CHANNEL_BINDING.bindModal.onlyOne}</p> : null}
+    {idleHint ? <p className="jy-caption jy-bind-hint" role="status"><Sym kind="warn" /><span>{CHANNEL_BINDING.keyIdleHint}</span></p> : null}
     <p className="jy-swap-note"><Sym kind="info" /><span>{M.note}</span></p>
     {saving ? <p className="jy-caption jy-swap-working" role="status">{M.working}</p> : null}
   </Modal>;

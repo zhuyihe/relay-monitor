@@ -4,11 +4,12 @@ import { createChannelProfitModule } from "../../../../server/channel-profit.js"
 import { connectionDiagnostic } from "../../../../lib/connection-test.js";
 
 // 渠道的选 Key / 解绑（K2c）。登录由路由那一层包好；这一层只管请求格式、错误码和模块的接线，方便单独测
-// operation：options（GET，?ownStationId=）/ stop / select-key（POST；select-key 是每日利润页的「选 Key」，没装读取服务时用）
+// operation：options（GET，?ownStationId=）/ key-usage（GET，?ownStationId=&channelId=&upstreamStationId=&tokenId=：绑定、换 Key 的小窗口里选中一把 Key 时查
+// 「这个渠道最近 24 小时有收入、这把 Key 一点用量都没有」，只读，返回 { checked, idle }，查不到不报错）/ stop / select-key（POST；select-key 是每日利润页的「选 Key」，没装读取服务时用）
 export async function handleChannelProfitRequest(request, rt, operation) {
   let body = {};
   const search = new URL(request.url).searchParams;
-  const readOnly = operation === "options";
+  const readOnly = operation === "options" || operation === "key-usage";
   if (!readOnly) {
     try { body = await request.json(); } catch { return Response.json({ error: "页面已过期，请刷新后重新打开", code: "INVALID_REQUEST" }, { status: 400 }); }
     if (!body || typeof body !== "object" || Array.isArray(body)) return Response.json({ error: "页面已过期，请刷新后重新打开", code: "INVALID_REQUEST" }, { status: 400 });
@@ -21,6 +22,7 @@ export async function handleChannelProfitRequest(request, rt, operation) {
     if (!rt.channelOnboarding) await startChannelOnboarding(rt);
     const module = rt.channelProfit ||= createChannelProfitModule(rt);
     const result = operation === "options" ? await module.options(ownStationId)
+      : operation === "key-usage" ? await rt.reconciliation.checkKeyUsage({ ownStationId, channelId: search.get("channelId"), upstreamStationId: search.get("upstreamStationId"), tokenId: search.get("tokenId") })
       : operation === "select-key" ? await module.selectKey({ ownStationId, channelId: body.channelId, upstreamStationId: body.upstreamStationId ?? null, tokenId: body.tokenId })
       : await module.stop({ ownStationId, channelIds: body.channelIds });
     return Response.json(result);

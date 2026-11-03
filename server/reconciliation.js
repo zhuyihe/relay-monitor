@@ -1327,6 +1327,52 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { rekeyedDays: blocked.map((state) => state.billDate).sort(), fromDay, recomputedDays: recomputed.size, tooOld, noRecentUsage };
   }
 
+  // 绑定、换 Key 时当场核用量（小窗口里选中一把 Key 时查）：这个渠道最近 24 小时有收入、这把 Key 最近 24 小时在上游一点用量都没有 → idle: true（页面在下拉框下面提醒，不拦）。
+  // 渠道收入读已经存着的自营站点小时桶（不读用户站），没有桶（「算应付成本」关着、整站日志没追平、桶没覆盖到这段窗口）就不判；
+  // 没收入就不用问上游；有收入才查这把 Key 的用量：一个 stat 请求，读的是上游。同一把 Key（同一个渠道、同一个上游）1 分钟内不重复读。
+  // 查不到（上游读失败、Key 不在目录里、没有桶）返回 { checked: false, idle: false }，不报错。Sub2API 只能按自然日读，从昨天零点读到现在
+  const KEY_USAGE_CHECK_CACHE_MS = 60000;
+  const keyUsageChecks = new Map();
+  async function channelRevenueFromBuckets(own, channelId, fromMs, toMs) {
+    if (rt.store?.settings?.expectedCost !== true) return null; // 桶只有「算应付成本」开着才有
+    const store = ownLogStore || rt._ownLogStore;
+    if (!store) return null;
+    const cursor = await store.getCursor(own.id).catch(() => null);
+    if (!cursor || cursor.coveredFromMs > fromMs || cursor.coveredToMs < toMs - OWN_LOAD.BUCKET_TODAY_MAX_LAG_MS) return null;
+    if (cursor.disabledFromMs != null && cursor.disabledToMs != null && cursor.disabledFromMs < toMs && cursor.disabledToMs > fromMs) return null;
+    let units = 0;
+    for (const bucket of await store.listBuckets(own.id, fromMs, Math.ceil(toMs / OWN_LOG_SLOT_MS) * OWN_LOG_SLOT_MS)) if (bucket.channelId === Number(channelId)) units += bucket.quota - bucket.adminQuota - bucket.testQuota;
+    return units;
+  }
+  async function checkKeyUsage({ ownStationId, channelId, upstreamStationId, tokenId }) {
+    const unknown = { checked: false, idle: false };
+    const key = [ownStationId, channelId, upstreamStationId, tokenId].join("|");
+    const hit = keyUsageChecks.get(key);
+    if (hit && Date.now() - hit.at < KEY_USAGE_CHECK_CACHE_MS) return hit.promise;
+    const promise = (async () => {
+      const own = upstreamStation(ownStationId), configured = upstreamStation(upstreamStationId);
+      if (!own?.isOwn || !configured || !billingStation(configured) || !Number.isInteger(Number(channelId)) || !Number.isInteger(Number(tokenId))) return unknown;
+      const now = Date.now(), tz = businessTimeZone();
+      const sub2 = configured.type !== "newapi";
+      const fromMs = sub2 ? dayStartInTz(shiftDayLabel(dayKeyInTz(now, tz), -1), tz) : Math.floor((now - 24 * 3600000) / OWN_LOG_SLOT_MS) * OWN_LOG_SLOT_MS;
+      const revenue = await channelRevenueFromBuckets(own, channelId, fromMs, now).catch(() => null);
+      if (revenue == null) return unknown;
+      if (!(revenue > 0)) return { checked: true, idle: false }; // 这个渠道最近没有收入：不用问上游
+      const upstream = { ...configured };
+      const metadata = await metadataFor(upstream, {}); // 和小窗口刚读过的 Key 目录是同一份缓存（getUpstreamKeys，5 分钟），不另读
+      const token = metadata?.tokens?.find((item) => item.id === Number(tokenId));
+      if (!token) return unknown;
+      const stat = await upstreamWindowFor(upstream, metadata, token, { startMs: fromMs, endMs: now, timezone: tz }, { readOnly: true });
+      const used = [stat?.amountUsd, stat?.knownAmountUsd, stat?.quotaUnits].some((value) => Number(value) > 0);
+      return { checked: true, idle: !used };
+    })().catch(() => unknown);
+    keyUsageChecks.set(key, { at: Date.now(), promise });
+    // 不缓存没查成的（下一次选还可以再试）；表别长大：留最近 50 个
+    promise.then((result) => { if (!result.checked && keyUsageChecks.get(key)?.promise === promise) keyUsageChecks.delete(key); });
+    while (keyUsageChecks.size > 50) keyUsageChecks.delete(keyUsageChecks.keys().next().value);
+    return promise;
+  }
+
   // 这条绑定从哪天开始算（补每天 Key、找新 Key 第一天有用量都不早于它）：新策略取核算起点，老绑定取第一个分段的起点，没有就是建绑定那天
   async function ruleStartDay(rule, today) {
     const segments = await repository.listSegments(rule.id).catch(() => []);
@@ -3229,7 +3275,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       });
       // 今天就提醒换 Key（CHANNEL_KEY_IDLE_TODAY，提示类，只亮感叹号：这一行照读到的数算、进今天的合计，不藏）。条件和结账时的 CHANNEL_KEY_NO_USAGE 一样，
       // 只看今天、用今天已经读到的收入和 Key 用量，不另读：没装读取服务、不是固定成本、今天渠道有收入、绑的 Key 今天上游成本是 0。
-      // 上游账单可能晚到几分钟，所以要这个情况连着满 1 小时才提示（从这个进程第一次看到起算，重启重新计时）；Key 有了用量、收入没了、
+      // 上游账单可能晚到几分钟，所以要这个情况连着满 1 小时才提示（计时存库，重启不清零；跨天、换了 Key 重新计时）；Key 有了用量、收入没了、
       // 解绑再绑（规则换了），下一次实时读自己消失
       // 这把 Key 这天全算在后绑的别的渠道上（一把 Key 一天只算在一个渠道上）：成本是 0 不是没用量，不判 CHANNEL_KEY_NO_USAGE / IDLE_TODAY
       const keysLost = keyParts.some((part) => part.keysLost);
@@ -3237,11 +3283,22 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 「最近 1 小时有收入」：记下今天的收入什么时候变多（每日利润页分组用），用的是这次本来就读到的数
         if (completeDownstream) noteTodayIncome((rt._saleSeen ||= new Map()), rule.id, dayKeyInTz(Date.now(), rule.timezone), downstreamUsd);
         const idleNow = costBasis !== "fixed" && completeDownstream && downstreamUsd > 0 && completeUpstream && upstreamUsd === 0 && !keyAgentConfigOf(own) && !keysLost;
-        const tracker = (rt._keyIdleSince ||= new Map()), seen = tracker.get(rule.id), dayKey = dayKeyInTz(Date.now(), rule.timezone);
-        if (!idleNow) tracker.delete(rule.id);
-        else {
-          if (!seen || seen.day !== dayKey) tracker.set(rule.id, { day: dayKey, at: Date.now() });
-          if (Date.now() - (tracker.get(rule.id).at) >= KEY_IDLE_TODAY_MS) {
+        const dayKey = dayKeyInTz(Date.now(), rule.timezone);
+        // 计时存库（rule.keyIdle，重启不清零），内存里的 rt._keyIdleSince 是读库之后的第一手：同一轮几次读、库里的旧值（规则列表有短缓存）不能把刚清掉的又带回来。
+        // 只在开始（含跨天、换了 Key 重新计时）和清除时写库，平时每轮只比较
+        const tracker = (rt._keyIdleSince ||= new Map());
+        const seen = tracker.has(rule.id) ? tracker.get(rule.id) : rule.keyIdle ? { day: rule.keyIdle.day, tokenId: rule.keyIdle.tokenId, at: rule.keyIdle.sinceMs } : null;
+        const persist = (idle) => repository.markKeyIdle(rule.id, idle).catch(() => {}); // 写不进去不影响判断：内存里的计时照用，下一次开始/清除再写
+        if (!idleNow) {
+          if (seen) { tracker.set(rule.id, null); await persist(null); }
+        } else {
+          let current = seen;
+          if (!current || current.day !== dayKey || Number(current.tokenId) !== Number(rule.tokenId)) {
+            current = { day: dayKey, tokenId: Number(rule.tokenId), at: Date.now() };
+            await persist({ sinceMs: current.at, day: current.day, tokenId: current.tokenId });
+          }
+          tracker.set(rule.id, current);
+          if (Date.now() - current.at >= KEY_IDLE_TODAY_MS) {
             issues.push({ code: "CHANNEL_KEY_IDLE_TODAY", scope: "rule", channelId: rule.channels?.[0]?.channelId ?? null, detail: issueText("CHANNEL_KEY_IDLE_TODAY"), observedAt: Date.now() });
           }
         }
@@ -4182,6 +4239,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
     createRule: saveRule,
     changeRuleKeyManual,
+    checkKeyUsage,
     updateRule,
     appendChannels,
     previewKeyScope,
