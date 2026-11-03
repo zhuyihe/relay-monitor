@@ -7,6 +7,7 @@
 import { App } from "antd";
 import { createElement, useEffect, useRef, useState } from "react";
 import { api } from "../../../lib/client";
+import { visibleInterval } from "../../../lib/visible-interval.js";
 import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
 import { ERROR_CATEGORIES } from "../../../lib/error-copy";
 import { livePollMs } from "./profit-format";
@@ -144,10 +145,7 @@ export function useProfitPage() {
   const pollMs = preset === activeWindow.preset ? livePollMs(activeWindow, Date.now(), data?.tz, (data?.dayCounts?.reading ?? 0) > 0, !!data?.rows?.some((row) => row.reading)) : null;
   useEffect(() => {
     if (!pollMs || !config) return;
-    const timer = setInterval(() => void load(activeWindow), pollMs);
-    const onVisible = () => { if (!document.hidden) void load(activeWindow); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+    return visibleInterval(() => void load(activeWindow), pollMs);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWindow.preset, activeWindow.startMs, activeWindow.endMs, pollMs, config]);
 

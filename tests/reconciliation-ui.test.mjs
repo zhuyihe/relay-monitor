@@ -763,6 +763,34 @@ test("模型供需模块隐藏中：系统设置里没有「读取错误日志�
   assert.equal(await page.getByText(SETTINGS_COPY.errorLogHint, { exact: false }).count(), 0);
 });
 
+test("后台标签页不刷新：页面在后台时定时刷新一个请求都不发（成本估算页每 30 秒的刷新、侧栏每分钟的需处理计数），切回前台立刻刷一次", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 5, cost: 2 })];
+  const seen = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname;
+    seen.push(path);
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
+    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows), dailyCost: [] });
+    throw new Error("unexpected cost fixture API: " + path);
+  }, undefined, true, null, "/analytics");
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.mix, exact: true }).waitFor();
+  const polled = () => seen.filter((path) => path === "/api/reconciliation/profit" || path === "/api/stations").length;
+  const setHidden = (hidden) => page.evaluate((value) => { Object.defineProperty(document, "hidden", { configurable: true, get: () => value }); document.dispatchEvent(new Event("visibilitychange")); }, hidden);
+  // 前台：快进 2 分钟，刷新照常发
+  const before = polled();
+  await page.clock.fastForward(120000); await page.waitForTimeout(300);
+  assert.ok(polled() > before, "前台照常刷新");
+  // 后台：快进 1 小时，一个都不发
+  await setHidden(true);
+  const hiddenAt = polled();
+  await page.clock.fastForward(3600000); await page.waitForTimeout(300);
+  assert.equal(polled(), hiddenAt, "后台一小时一个刷新请求都不发");
+  // 切回前台：立刻刷一次
+  await setHidden(false); await page.waitForTimeout(300);
+  assert.ok(polled() > hiddenAt, "切回前台立刻刷一次");
+});
+
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
 const onboardingRequests = new WeakMap();
