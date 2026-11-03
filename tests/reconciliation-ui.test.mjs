@@ -2148,15 +2148,16 @@ test("余额趋势「每天花了多少」：余额小标题和查看范围在�
   if (process.env.UI_SHOT_DIR) { await page.mouse.move(5, 5); await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/trend-daily-1440x900.png` }); }
 });
 
-test("余额趋势「每天花了多少」：上游不给读以前的用量（小标题下一行灰字、柱子从加进来那天画起）、读不到（带重新读取）、近 30 天没花钱、这种上游没有这个数（不画这一块）", async (t) => {
+test("余额趋势「每天花了多少」：上游不给读以前的用量（小标题下一行灰字、柱子从加进来那天画起）、读不到（先用余额算、不放重新读取）、近 30 天没花钱、这种上游没有这个数（不画这一块）", async (t) => {
   const keys = dayKeys30();
   const denied = await openTrendDaily(t, { state: "denied", source: "balance", since: "2026-10-27", todayEstimate: true, days: keys.slice(25).map((day) => ({ day, usd: 4 })) });
   await denied.modal.getByText("这个上游不给读以前的用量，从加进来那天起算。", { exact: true }).waitFor();
   await denied.modal.locator(".jy-trend-daily path.jy-chart-bar").first().waitFor();
   assert.equal(await denied.modal.locator(".jy-trend-daily path.jy-chart-bar").count(), 5, "柱子只从加进来那天起画");
-  const failed = await openTrendDaily(t, { state: "pending", source: "balance", since: null, todayEstimate: false, days: [] });
-  await failed.modal.getByText("读不到每天花了多少", { exact: true }).waitFor();
-  await failed.modal.locator(".jy-trend-daily").getByRole("button").waitFor();
+  const pending = await openTrendDaily(t, { state: "pending", source: "balance", since: "2026-10-30", todayEstimate: true, days: keys.slice(27).map((day) => ({ day, usd: 2 })) });
+  await pending.modal.getByText("加进来以前的用量还在读，读到后自动补上。", { exact: true }).waitFor();
+  await pending.modal.locator(".jy-trend-daily path.jy-chart-bar").first().waitFor();
+  assert.equal(await pending.modal.locator(".jy-trend-daily").getByRole("button").count(), 0, "不放「重新读取」");
   const none = await openTrendDaily(t, { state: "ok", source: "upstream", since: "2026-09-01", todayEstimate: false, days: keys.map((day) => ({ day, usd: 0 })) });
   await none.modal.getByText("近 30 天没有花费。", { exact: true }).waitFor();
   const absent = await openTrendDaily(t, { state: "none", source: null, since: null, todayEstimate: false, days: [] });

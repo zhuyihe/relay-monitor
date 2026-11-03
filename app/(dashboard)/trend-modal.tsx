@@ -4,8 +4,7 @@
 // 数据：GET /api/stations/:id/history?hours=；图和花费按上游设置的汇率折成 ¥，没设置时按 1 美元 = 1 元；当前余额和上游列表同一种写法（balanceMoneyOf）。
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { Button, Grid, Modal } from "antd";
-import { workflowActionMeta } from "../../lib/workflow-actions";
+import { Grid, Modal } from "antd";
 import { api } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
@@ -59,7 +58,7 @@ const COPY = Object.freeze({
   dailyTitle: "每天花了多少",
   dailySub: "近 30 天",
   dailyDenied: "这个上游不给读以前的用量，从加进来那天起算。",
-  dailyFailed: "读不到每天花了多少",
+  dailyPending: "加进来以前的用量还在读，读到后自动补上。",
   dailyLoading: "正在读取…",
   dailyNone: "近 30 天没有花费。",
   dailyAdded: (day: string) => `${day} 加进来`,
@@ -353,7 +352,7 @@ export default function TrendModal({
   // 每天花了多少：history 回包里带，没回来之前用上游列表里那一份
   const spend = data?.dailySpend ?? station?.dailySpend ?? null;
   const daily = useMemo(() => {
-    if (!spend || spend.state === "none" || spend.state === "pending") return null;
+    if (!spend || spend.state === "none") return null;
     const grid = dailyGrid(spend, tz, Date.now());
     const items = grid.keys.map((key) => ({ key, cost: (grid.byDay.get(key) ?? 0) * rate }));
     // 加进来那天画一条竖虚线；30 天以前加进来的、或就在最左最右一根的不画（Bars 里头尾不画）
@@ -447,16 +446,12 @@ export default function TrendModal({
                 <span className="jy-caption">{COPY.dailySub}</span>
               </div>
               {spend.state === "denied" && <p className="jy-caption jy-trend-note">{COPY.dailyDenied}</p>}
+              {spend.state === "pending" && <p className="jy-caption jy-trend-note">{COPY.dailyPending}</p>}
               <div className="jy-trend-daily" aria-busy={loading}>
                 {!data && err === null ? (
                   <p className="jy-muted">{COPY.dailyLoading}</p>
-                ) : spend.state === "pending" ? (
-                  <div className="jy-state jy-state--center" role="alert">
-                    <h3><Sym kind="crit" className="jy-status--crit" />{COPY.dailyFailed}</h3>
-                    <div className="actions"><Button type="primary" loading={loading} onClick={() => setRetry((n) => n + 1)}>{workflowActionMeta("refresh").label}</Button></div>
-                  </div>
                 ) : daily && daily.items.every((item) => item.cost === 0) ? (
-                  <p className="jy-muted">{COPY.dailyNone}</p>
+                  spend.state === "pending" ? null : <p className="jy-muted">{COPY.dailyNone}</p>
                 ) : daily ? (
                   <Bars
                     items={daily.items}
