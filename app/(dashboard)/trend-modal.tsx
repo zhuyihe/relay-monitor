@@ -464,6 +464,7 @@ export default function TrendModal({
                     height={phone ? 132 : 148}
                     label={COPY.dailyChart(stationDisplayName(station))}
                     marker={daily.marker}
+                    edgesOnly
                   />
                 ) : null}
               </div>

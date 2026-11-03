@@ -2165,6 +2165,31 @@ test("余额趋势「每天花了多少」：上游不给读以前的用量（�
   assert.equal(await absent.modal.getByText("每天花了多少", { exact: true }).count(), 0, "自营站点、固定成本这类没有这个数，不画");
 });
 
+test("余额趋势「每天花了多少」：「加进来」的字在图顶上专门留的一行里、不压在柱子上（柱子很高、线靠右也一样）；横轴只有头尾两个刻度", async (t) => {
+  const keys = dayKeys30();
+  // 柱子很高，加进来是 3 天前：线在最右边
+  const { page, modal } = await openTrendDaily(t, { state: "ok", source: "balance", since: "2026-10-30", todayEstimate: false, days: keys.map((day) => ({ day, usd: 40 })) });
+  const label = modal.locator(".jy-trend-daily .jy-bars-marker");
+  await label.waitFor();
+  await modal.locator(".jy-trend-daily path.jy-chart-bar").first().waitFor();
+  // 等弹窗的出现动画停稳再比位置
+  await modal.evaluate((el) => new Promise((resolve) => { let last = ""; let same = 0; const tick = () => { const r = JSON.stringify(el.getBoundingClientRect()); same = r === last ? same + 1 : 0; last = r; same >= 5 ? resolve(null) : requestAnimationFrame(tick); }; tick(); }));
+  const text = await label.boundingBox();
+  const barBoxes = await modal.locator(".jy-trend-daily path.jy-chart-bar").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return { top: r.top, left: r.left, right: r.right }; }));
+  const overlap = barBoxes.filter((bar) => bar.top < text.y + text.height && bar.right > text.x && bar.left < text.x + text.width);
+  assert.deepEqual(overlap, [], "字和柱子不重叠");
+  // 线离右边不到 120px：字右对齐、放在线的左边
+  const rule = await modal.locator(".jy-trend-daily .day-rule").boundingBox();
+  assert.ok(text.x + text.width <= rule.x + 1, "字在线的左边");
+  // 横轴只有头尾
+  const xTicks = await modal.locator(".jy-trend-daily svg text.tick-label:not(.jy-bars-marker)").allTextContents();
+  assert.deepEqual(xTicks.filter((tick) => /日$|今天$/.test(tick)), ["10月4日", "今天"], `横轴只标头尾：${xTicks}`);
+  // 线靠左时字在线的右边
+  const left = await openTrendDaily(t, { state: "ok", source: "upstream", since: "2026-10-12", todayEstimate: false, days: keys.map((day) => ({ day, usd: 40 })) });
+  const leftLabel = left.modal.locator(".jy-trend-daily .jy-bars-marker"); await leftLabel.waitFor();
+  assert.ok((await leftLabel.boundingBox()).x >= (await left.modal.locator(".jy-trend-daily .day-rule").boundingBox()).x - 1, "线靠左时字在线的右边");
+});
+
 test("余额趋势「每天花了多少」（手机 375）：弹窗整屏、柱子高 132、往下滚能看到", async (t) => {
   const keys = dayKeys30();
   const { page, modal } = await openTrendDaily(t, { state: "ok", source: "upstream", since: "2026-10-20", todayEstimate: false, days: keys.map((day, i) => ({ day, usd: i % 4 === 0 ? 0 : 6 })) }, { viewport: { width: 375, height: 812 } });
