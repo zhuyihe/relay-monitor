@@ -208,68 +208,6 @@ export function SparkLine({ values, gray, label, width = 96, height = 24 }: { va
   );
 }
 
-// 抽屉：柱状图。一种颜色，柱宽不超过 24px，顶上 4px 圆角、底部平，柱间 2px；最后一根（今天、这个小时）浅色
-export function Bars({
-  items, valueLabel, tipTitle, tipValue, tickLabel, axis, height = 140, light, label,
-}: {
-  items: { key: string; cost: number }[];
-  // 悬停提示里那一行的名字（「消费」）
-  valueLabel: string;
-  tipTitle: (key: string, index: number) => string;
-  tipValue: (cost: number) => string;
-  // 横轴只标头、中、最后一根
-  tickLabel: (key: string, index: number) => string;
-  axis: (v: number, step: number) => string;
-  height?: number;
-  // 最后一根浅色
-  light?: boolean;
-  label: string;
-}) {
-  const [ref, w] = useElementWidth();
-  const [hover, setHover] = useState<number | null>(null);
-  const n = items.length;
-  const values = items.map((item) => item.cost);
-  const yt = niceTicks(0, Math.max(0, ...values), 3);
-  const Lp = 44, Rp = 8, Tp = 8, Bp = 24;
-  const pw = Math.max(1, w - Lp - Rp), slot = pw / Math.max(1, n), bw = Math.min(24, Math.max(2, slot - 2));
-  const y = (v: number) => Tp + (1 - v / yt.hi) * (height - Tp - Bp);
-  const idx = n ? [...new Set([0, Math.floor((n - 1) / 2), n - 1])] : [];
-  const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!w || !n) return;
-    setHover(clamp(Math.floor((e.clientX - e.currentTarget.getBoundingClientRect().left - Lp) / slot), 0, n - 1));
-  };
-  const onKeyDown = (e: KeyboardEvent) => {
-    if (!n) return;
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); const d = e.key === "ArrowLeft" ? -1 : 1; setHover((h) => (h == null ? n - 1 : clamp(h + d, 0, n - 1))); }
-    else if (e.key === "Escape") setHover(null);
-  };
-  const hx = hover != null ? Lp + slot * (hover + 0.5) : 0;
-  return (
-    <div ref={ref} className="jy-chart-stack" tabIndex={0} role="img" aria-label={label} onPointerMove={onPointerMove} onPointerLeave={() => setHover(null)} onKeyDown={onKeyDown} onBlur={() => setHover(null)}>
-      <div className="jy-chart" style={{ height }}>
-        {w > 0 && n > 0 && (
-          <svg viewBox={`0 0 ${w} ${height}`} height={height} aria-hidden="true">
-            <g className="grid">{yt.ticks.map((t) => <line key={t} x1={Lp} x2={w - Rp} y1={y(t)} y2={y(t)} />)}</g>
-            {yt.ticks.map((t) => <text key={t} className="tick-label" x={Lp - 6} y={y(t) + 4} textAnchor="end">{axis(t, yt.step)}</text>)}
-            {items.map((item, i) => {
-              const v = values[i];
-              const cx = Lp + slot * (i + 0.5) - bw / 2;
-              const topY = y(v);
-              return v > 0 ? <path key={item.key} className={`jy-chart-bar${light && i === n - 1 ? " is-light" : ""}${hover === i ? " is-hover" : ""}`} d={barPath(cx, Math.min(topY, y(0) - 1), y(0), bw, 4, true)} /> : null;
-            })}
-            {idx.map((i) => <text key={i} className="tick-label" x={clamp(Lp + slot * (i + 0.5), Lp, w - Rp)} y={height - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"}>{tickLabel(items[i].key, i)}</text>)}
-          </svg>
-        )}
-      </div>
-      {hover != null && (
-        <ChartTip x={hx} width={w}>
-          <TipBody title={tipTitle(items[hover].key, hover)} rows={[[valueLabel, tipValue(items[hover].cost), "var(--jy-s1)"]]} />
-        </ChartTip>
-      )}
-    </div>
-  );
-}
-
 // 抽屉：余额变化的线，往上跳的那一下是充值，标一个点；悬停写那一刻的余额
 export function BalanceLine({
   points, recharges, tz, money, rate, height = 160, label,
