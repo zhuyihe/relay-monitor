@@ -8557,11 +8557,38 @@ test("模型供需模块隐藏时：轮询不读错误日志、不读站点的�
   assert.equal(f.state.requests.filter(isError).length, 0, "一个错误日志的请求都没发");
   assert.equal(await ownErrorStore.getCursor("own"), null, "错误日志的进度没有建");
   assert.equal(f.module.ownRetrySettings({ id: "own" }), null, "没读过站点的重试设置");
-  assert.deepEqual(f.rt.store.settings, { expectedCost: true, ownErrorLog: true }, "设置里存的值一个字都没动（也没写关着的标记）");
-  f.rt.store.settings = { expectedCost: true, ownErrorLog: false };
-  now += 6 * 60000; resetOwnRequestBudget(); await f.module.refreshDue(now);
-  assert.equal(f.rt.store.settings.ownErrorLogWasOff, undefined, "关着也不写标记：恢复模块时还是用户原来的选择");
+  assert.equal(f.rt.store.settings.ownErrorLog, true, "用户存的「读取错误日志」值不动");
+  assert.equal(f.rt.store.settings.ownErrorLogWasOff, true, "隐藏时按「关着」处理：打上标记（写的是控制台自己的库）");
   assert.ok((await ownLogStore.getCursor("own")) != null, "消费日志照读");
+});
+
+// 隐藏了几天以后再打开：不从隐藏前的旧进度一路补读，走原来的「关→开」规矩（进度挪到最近），用户站不会一次挨一大波错误日志请求
+test("模型供需模块隐藏后再打开：关着那段不补，进度挪到最近；隐藏那几轮只写一次「关着」标记、一个用户站请求都不发", async (t) => {
+  FEATURES.modelsModule = false; t.after(() => { FEATURES.modelsModule = false; });
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  resetOwnRequestBudget();
+  const ownLogStore = new MemoryOwnLogStore(), ownErrorStore = new MemoryOwnLogStore(ERROR_SPEC);
+  const oldFrom = now - 3 * 86400000;
+  await ownErrorStore.startCursor("own", oldFrom, oldFrom); // 隐藏前读到三天前
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000, ownLogStore, ownErrorStore, ownLogIngest: true } });
+  f.state.fullLogList = true;
+  const writes = [];
+  f.rt.store.updateSettings = async (patch) => { writes.push(patch); return Object.assign(f.rt.store.settings, patch); };
+  f.rt.store.settings = { expectedCost: false, ownErrorLog: true };
+  const isError = (request) => request.host === "own.test" && request.path === "/api/log/" && !request.sourceRead && /type=5/.test(request.query || "");
+  for (let i = 0; i < 4; i += 1) { now += 6 * 60000; resetOwnRequestBudget(); await f.module.refreshDue(now); }
+  assert.equal(f.state.requests.filter(isError).length, 0, "隐藏时一个错误日志的请求都没发");
+  assert.deepEqual(writes.filter((patch) => "ownErrorLogWasOff" in patch), [{ ownErrorLogWasOff: true }], "标记只写一次");
+  assert.equal((await ownErrorStore.getCursor("own")).coveredToMs, oldFrom, "进度没动");
+  // 打开
+  FEATURES.modelsModule = true;
+  now += 6 * 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  const cursor = await ownErrorStore.getCursor("own");
+  assert.ok(cursor.coveredToMs > now - 15 * 60000, `进度挪到最近、关着那三天不补：${new Date(cursor.coveredToMs).toISOString()}`);
+  assert.ok(f.state.requests.filter(isError).length <= 3, `只读最近一两个窗口，不补三天：${f.state.requests.filter(isError).length} 个请求`);
+  assert.equal(f.rt.store.settings.ownErrorLogWasOff, false, "判断过了，标记清掉");
+  assert.equal(f.rt.store.settings.ownErrorLog, true, "用户的选择没变");
 });
 
 // ---- 应付成本 V1-b：结账时按桶和价目表算、写进账本新列 ----
