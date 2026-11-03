@@ -55,7 +55,10 @@ async function doRefreshOne(rt, station, options = {}) {
   const current = rt.store.get(station.id);
   if (!current || current.archivedAt || current.monitorEnabled === false) return result;
   station.balance = result;
-  if (result.ok) rt.history.append(station.id, result.remaining, result.used);
+  if (result.ok) {
+    rt.history.append(station.id, result.remaining, result.used);
+    rt.upstreamSpend?.noteBalanceOk(station); // 新上游第一次读余额成功：尽快读过去 30 天每天的花费（server/upstream-spend.js）
+  }
 
   // 告警评估（异步失败不影响主流程）
   try {

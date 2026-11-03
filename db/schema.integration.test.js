@@ -12,6 +12,8 @@ import { defineOwnErrorStoreContract } from "../server/test-support/own-error-st
 import { ERROR_SPEC, OwnLogStore } from "../server/own-log-store.js";
 import { defineUserOpsStoreContract } from "../server/test-support/user-ops-store-contract.js";
 import { UserOpsStore } from "../server/user-ops-store.js";
+import { defineUpstreamSpendStoreContract } from "../server/test-support/upstream-spend-store-contract.js";
+import { UpstreamSpendStore } from "../server/upstream-spend-store.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
@@ -866,6 +868,16 @@ defineUserOpsStoreContract({
     contractSchemaReady ||= ensureSchema(contractPool);
     await contractSchemaReady;
     return new UserOpsStore(contractPool);
+  },
+});
+
+// 上游每天花费和读取状态：和内存实现同一组用例
+defineUpstreamSpendStoreContract({
+  name: "MySQL 8",
+  create: async () => {
+    contractSchemaReady ||= ensureSchema(contractPool);
+    await contractSchemaReady;
+    return new UpstreamSpendStore(contractPool);
   },
 });
 

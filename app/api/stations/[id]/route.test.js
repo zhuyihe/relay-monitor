@@ -25,7 +25,7 @@ test("公共PUT明确映射CAS，忽略伪造identity/markers/guard，restore保
   station.onboardingOrigin = { requestId: "server-origin" };
   station.authorizationUpdateRef = { requestId: "server-rotation" };
   station.alertState = { errorCount: 3 };
-  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 } };
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} } };
   const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
   const response = await send({ name: "Renamed", expectedAuthVersion: 1, expectedResourceVersion: stationBusinessVersion(station),
     verifiedIdentity: { provider: "sub2api", baseUrl: station.baseUrl, accountId: "forged" },
@@ -62,7 +62,7 @@ test("自营站点换了地址：整站日志的进度和桶清掉（forgetOwnLo
   const store = new Store(pool);
   const station = await store.add({ type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "token-a", monitorEnabled: true }); // 自营站点要开着监控才算 isOwn
   const forgotten = [], userOpsForgotten = [];
-  const rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 }, _ownLogStore: { deleteStation: async (id) => forgotten.push(id) },
+  const rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} }, _ownLogStore: { deleteStation: async (id) => forgotten.push(id) },
     _userOpsStore: { deleteStation: async (id) => userOpsForgotten.push(id) } };
   const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
   assert.equal((await send({ name: "改名" })).status, 200);
@@ -73,11 +73,27 @@ test("自营站点换了地址：整站日志的进度和桶清掉（forgetOwnLo
   assert.deepEqual(userOpsForgotten, [station.id], "用户运营的快照、用量、进度、提醒状态也跟着清（改名、写法不同不清，上面已经断言过没清）");
 });
 
+test("上游（不是自营站点）换了地址：旧站每天的花费和读取状态清掉重读；只改名字、地址只是写法不同不清", async () => {
+  const { PUT } = await stationRoute();
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const station = await store.add({ type: "newapi", baseUrl: "https://up.test", accessToken: "token-a", userId: "1", monitorEnabled: true });
+  const cleared = [];
+  const rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend: (id) => cleared.push(["history", id]) },
+    _upstreamSpendStore: { deleteStation: async (id) => cleared.push(["store", id]) } };
+  const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
+  assert.equal((await send({ name: "改名" })).status, 200);
+  assert.equal((await send({ baseUrl: "https://UP.test/" })).status, 200);
+  assert.deepEqual(cleared, [], "改名、地址只是写法不同：不清");
+  assert.equal((await send({ baseUrl: "https://other.test", accessToken: "token-b" })).status, 200);
+  assert.deepEqual(cleared, [["store", station.id], ["history", station.id]], "真换了地址：库里的天数和预测里的都清掉");
+});
+
 test("PUT 找不到上游和上游类型不对时带码，界面按码说（lib/error-copy.js）", async () => {
   const { PUT } = await stationRoute();
   const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
     commit: async () => {}, rollback: async () => {}, release() {} }) };
-  const rt = { store: new Store(pool), history: { predict: () => null, sparkline: () => [], usedSince: () => 0 } };
+  const rt = { store: new Store(pool), history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} } };
   const send = (id, body) => PUT(new Request(`https://local.test/api/stations/${id}`, { method: "PUT", body: JSON.stringify(body) }), rt, { id });
   const missing = await send("no-such-station", { name: "x" });
   assert.equal(missing.status, 404);
@@ -100,7 +116,7 @@ test("U04 actual authenticated GET显式includeUnmonitored可重载暂停和专�
   paused.onboardingOrigin = { requestId: "internal-origin" }; paused.authorizationUpdateRef = { requestId: "internal-update" };
   dedicated.s2Tokens = { accessToken: "generated-access", refreshToken: "generated-refresh" };
   store.data.auth = { username: "admin", isDefault: false };
-  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 },
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} },
     sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
   const { PUT } = await stationRoute();
   const pausedResponse = await PUT(new Request("http://localhost/api/stations/one", { method: "PUT", body: JSON.stringify({ monitorEnabled: false,
@@ -164,7 +180,7 @@ test("authenticated PUT暂停、SQL重载和启用保留原成本设置，CAS及
     accessToken: "synthetic-monitor-token", userId: "41", includeInProfit, cnyPerUsd: 0.7, lowBalanceUsd: 17 }));
   const dedicated = await store.add({ type: "newapi", monitorEnabled: false, includeInProfit: true });
   assert.equal(dedicated.includeInProfit, false);
-  const rt = { store, history: { append() {}, predict: () => null, sparkline: () => [], usedSince: () => 0 },
+  const rt = { store, history: { append() {}, predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} },
     sessions: { verify: (token) => token === "synthetic-valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
   t.mock.method(console, "error", () => {});
   t.mock.method(globalThis, "fetch", async (url) => {
@@ -256,7 +272,7 @@ test("PUT 渠道 Key 读取服务配置（K2a）：令牌太弱报 400，响应�
     commit: async () => {}, rollback: async () => {}, release() {} }) };
   const store = new Store(pool);
   const station = await store.add({ type: "newapi", baseUrl: "https://own.test", isOwn: true, accessToken: "pat" });
-  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 } };
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }), setDailySpend() {} } };
   const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
   const weak = await send({ keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: "too-short" });
   assert.equal(weak.status, 400);
