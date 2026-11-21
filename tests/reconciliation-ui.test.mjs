@@ -299,7 +299,7 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
 
 test("表下面一行：还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
   const { page } = await openDailyPage(t, { pageOptions: { unlinked: 2, rateUnset: [{ id: "upstream-1", name: "Fixture upstream" }] }, ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 2 * 3600000, behindMs: 2 * 3600000 } });
-  const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); await notes.getByText(RATE_UNSET_USD, { exact: true }).waitFor();
+  const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); assert.equal(await notes.getByText(RATE_UNSET_USD, { exact: true }).count(), 0);
   await notes.locator("span", { hasText: /自营站点的收费记录读得慢，只读到 (10月9日 )?9:00，这以后的应付成本还没算。/ }).waitFor(); assert.equal(await notes.getByRole("link", { name: PROFIT_COPY.notice.goSettings, exact: true }).getAttribute("href"), "/settings");
   const fresh = await openDailyPage(t, { ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 60000, behindMs: 60000 } }); await rowOf(fresh.page, "Rule A").waitFor(); assert.equal(await fresh.page.locator(".jy-profit-notes").count(), 0);
 });
@@ -2248,12 +2248,12 @@ test("编辑固定成本的上游：用不到的汇率、余额提醒线、其�
     throw new Error("unexpected API: " + method + " " + path);
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=box");
   const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.editTitle("服务器"), exact: true }); await drawer.waitFor();
-  assert.equal(await drawer.getByLabel("汇率", { exact: true }).isVisible(), false); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).isVisible(), false);
+  assert.equal(await drawer.getByLabel("采购系数", { exact: true }).isVisible(), false); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).isVisible(), false);
   assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).count(), 0); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), false);
   // 改成按用量算：原来的值照旧填着（藏起来时没丢）
   const pickType = async (label) => { await drawer.getByRole("combobox", { name: "类型", exact: true }).click(); await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: label }).first().click(); };
-  await pickType("New API"); await drawer.getByLabel("汇率", { exact: true }).waitFor();
-  assert.equal(await drawer.getByLabel("汇率", { exact: true }).inputValue(), "7.2"); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3");
+  await pickType("New API"); await drawer.getByLabel("采购系数", { exact: true }).waitFor();
+  assert.equal(await drawer.getByLabel("采购系数", { exact: true }).inputValue(), "7.2"); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3");
   // 改回固定成本、改一笔金额后保存：汇率、余额提醒线、其他地址照原值带上；不再续费一律 false（会关掉到期提醒，固定成本的表单里没有这个开关）
   await pickType("固定成本"); await drawer.getByLabel("第 1 笔金额（¥）", { exact: true }).fill("320");
   await drawer.getByRole("button", { name: "保存", exact: true }).click();
@@ -2277,7 +2277,7 @@ test("编辑自营站点：「汇率」那一格叫「售价」，只对上游�
   const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.editTitle("我的站"), exact: true }); await drawer.waitFor();
   // 自营站点那一格叫「售价」（ui-copy-spec §7），说明照售价写，不说余额提醒
   assert.equal(await drawer.getByLabel("售价", { exact: true }).inputValue(), "7.5"); await drawer.getByText(`${formatSellPrice(7.5)}。`, { exact: true }).waitFor();
-  assert.equal(await drawer.getByLabel("汇率", { exact: true }).count(), 0);
+  assert.equal(await drawer.getByLabel("采购系数", { exact: true }).count(), 0);
   // 「算进利润」「渠道里用的其他地址」藏起来；「余额提醒线」「不再续费」照旧显示（自营站点的余额也推送提醒）
   assert.equal(await drawer.getByText("算进利润", { exact: true }).isVisible(), false); assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).isVisible(), false);
   assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3"); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), true);
@@ -3565,4 +3565,27 @@ test("用户运营·流失页签·手机：一人一张卡片，损失在右上�
   assert.match(await cards.nth(1).innerText(), /平时|之前 14 天 → 近 3 天/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/churn-375.png`, fullPage: false }); }
+});
+
+test("采购系数不改变主站单位：摘要、行、明细都显示成本 30 和利润 70，核对区保留实扣 60", async (t) => {
+  const row = { ...profitRow("rule-1", "Rule A", { income: 100, cost: 60 }), rates: { income: 1, cost: 0.5, costBasis: "usage" }, actualCostMain: 30 };
+  const result = { ...profitPage([row], { fixedCostUsd: 0 }), fixedCostMain: 0,
+    accountingTotals: { income: 100, actual: 30, gross: 70, fixedCost: 0, net: 70 },
+    timing: { incomeThroughMs: Date.parse(PROFIT_AS_OF) - 180000, costThroughMs: Date.parse(PROFIT_AS_OF), provisional: true },
+    historicalRatePreview: { entries: 1, days: [PROFIT_YESTERDAY], costBefore: 30, costAfter: 60 } };
+  const { page } = await openDailyPage(t, { rows: [row], pageOf: () => result,
+    detail: (route, params) => fulfill(route, profitDetail({ day: params.day, rates: { income: 1, cost: 0.5 }, income: { usd: 100, adminUsage: { usd: 0, deducted: "all" }, byChannel: [] }, actual: { usd: 60, main: 30, keyName: "Rule A" }, grossProfitUsd: 40, expected: { usd: 60, reason: null, groupName: "default", groupRatio: 1, segments: [], byModel: [], missingPriceModels: [], byChannel: [], tokens: 0 }, gap: { usd: 0, rate: 0, state: "within" } })) });
+  await metricOf(page, "上游成本").getByText("$30.00", { exact: true }).waitFor();
+  await metricOf(page, "毛利").getByText("$70.00", { exact: true }).waitFor();
+  const table = rowOf(page, "Rule A");
+  assert.match(await table.innerText(), /\$30\.00/);
+  assert.match(await table.innerText(), /\$70\.00/);
+  await page.locator(".jy-profit-notes").getByText("今日利润为暂估", { exact: false }).waitFor();
+  await page.locator(".jy-profit-notes").getByText("历史记录未改写", { exact: false }).waitFor();
+  await table.click();
+  const drawer = page.locator(".jy-profit-detail");
+  await drawer.getByText("$30.00", { exact: true }).waitFor();
+  await drawer.getByText("$70.00", { exact: true }).waitFor();
+  await drawer.getByText("采购系数 0.5", { exact: false }).waitFor();
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-coefficient.png` });
 });

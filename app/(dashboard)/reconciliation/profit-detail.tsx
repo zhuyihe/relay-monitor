@@ -1,4 +1,5 @@
 "use client";
+import { costInMainUnit } from "../../../lib/profit.js";
 // 计算明细（设计稿 daily-profit-a.md §5、用语规范 §9）：一行一天，从上到下收入、应付成本（按模型拆开）、没算进的模型、上游成本、差额、毛利，
 // 最后倍率、固定于、改过。几个渠道合用一把 Key 时收入、应付成本按渠道各写一行，上游成本只有一个数。
 import { useState } from "react";
@@ -42,7 +43,7 @@ function KeysTable({ detail, keys, income, cost, incomeRate, costRate, ctx }: { 
   const cells = keys.map((key) => {
     // 这一把 Key 这天的汇率：已固定的天是结账时记的（换上游那天两把 Key 各按各上游的）
     const kc = key.costRate ?? costRate, ki = key.incomeRate ?? incomeRate;
-    const i = toDisplay(key.incomeUsd, ki, ctx.currency), c = toDisplay(key.costUsd, kc, ctx.currency), g = i != null && c != null ? i - c : null;
+    const i = toDisplay(key.incomeUsd, ki, ctx.currency), c = ctx.currency === "USD" ? key.costMain !== undefined ? key.costMain : costInMainUnit(key.costUsd, kc, ki) : toDisplay(key.costUsd, kc, ctx.currency), g = i != null && c != null ? i - c : null;
     return { key, i, c, g };
   });
   const sum = (pick: (item: (typeof cells)[number]) => number | null) => cells.every((item) => pick(item) != null) ? cells.reduce((total, item) => total + pick(item)!, 0) : null;
@@ -71,12 +72,14 @@ function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: P
   // 汇率用这一天的（已固定的天是结账时记下的、换上游之前是旧上游的），接口没给才退回这一行现在的
   const incomeRate = detail.rates?.income ?? row.rates?.income ?? null, costRate = detail.rates?.cost ?? row.rates?.cost ?? null;
   const income = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, incomeRate, ctx.currency), ctx.currency);
+  const costValue = (usd: number | null | undefined) => ctx.currency === "USD" ? costInMainUnit(usd, costRate, incomeRate) : toDisplay(usd, costRate, ctx.currency);
   const cost = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, costRate, ctx.currency), ctx.currency);
   // 这天几块各按各的汇率换好的总数（接口算的）；没有就退回按上面那个汇率换
   const incomeTotal = ctx.currency === "CNY" && detail.income.cny != null ? fmtMoney(detail.income.cny, ctx.currency) : income(detail.income.usd);
-  const actualTotal = ctx.currency === "CNY" && detail.actual.cny != null ? fmtMoney(detail.actual.cny, ctx.currency) : cost(detail.actual.usd);
+  const actualValue = ctx.currency === "USD" && detail.actual.main !== undefined ? detail.actual.main : costValue(detail.actual.usd);
+  const actualTotal = ctx.currency === "CNY" && detail.actual.cny != null ? fmtMoney(detail.actual.cny, ctx.currency) : fmtMoney(actualValue, ctx.currency);
   const grossTotal = detail.grossProfitUsd == null ? EMPTY : ctx.currency === "CNY" && detail.income.cny != null && detail.actual.cny != null ? fmtMoney(detail.income.cny - detail.actual.cny, ctx.currency)
-    : fmtMoney(toDisplay(detail.income.usd, incomeRate, ctx.currency)! - toDisplay(detail.actual.usd, costRate, ctx.currency)!, ctx.currency);
+    : fmtMoney(toDisplay(detail.income.usd, incomeRate, ctx.currency)! - actualValue!, ctx.currency);
   const channelName = (channelId: number) => row.channels.find((channel) => channel.channelId === channelId)?.name || `渠道 ${channelId}`;
   const many = row.channels.length > 1;
   const group = groupText(detail.expected.groupName, detail.expected.groupRatio) || (detail.expected.groupRatio != null ? `×${ratioText(detail.expected.groupRatio)}` : EMPTY);
@@ -103,10 +106,12 @@ function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: P
         : keys ? <KeysTable detail={detail} keys={keys} income={income} cost={cost} incomeRate={incomeRate} costRate={costRate} ctx={ctx} />
           : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
     </Section>
+    <p className="jy-caption">采购系数 {costRate ?? 1}，主站系数 {incomeRate ?? 1}；未配置按 1。上游实扣已含分组和模型倍率，采购系数只换算一次。</p>
     <Section title={COPY.detail.gross} value={grossTotal}>
       <p>{COPY.detail.grossFormula}</p>
     </Section>
     <Verify key={`${detail.day}:${verify.open}`} summary={verify}>
+      <p className="jy-caption">扣费对比使用上游原始额度，未乘采购系数；采购系数用于上面的实际成本和利润。</p>
       <Section title={COPY.detail.expected} value={detail.expected.usd == null ? EMPTY : cost(detail.expected.usd)}>
         {today ? <p>{COPY.detail.expectedToday}</p>
           : detail.expected.usd == null && !models.length ? <p>{gapReasonText(detail.expected.reason, missing.map((model) => model.model), { settled: detail.settled, zone: ctx.zoneOf?.(row), keyChangeWhen: keyChangeWhen(detail.expected.keyChange) })}</p>

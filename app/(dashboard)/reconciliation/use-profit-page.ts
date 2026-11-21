@@ -96,7 +96,12 @@ export function useProfitPage() {
     await load(next);
     return true;
   };
-  const refresh = () => load(activeWindow, { observe: true });
+  const refresh = async () => {
+    const next = await load(activeWindow, { observe: true });
+    if (!next) { message.error("刷新失败，请查看页面上的错误说明。"); return; }
+    const incomplete = next.rows.filter((row) => row.reading || row.attention || row.notice?.code === "UPSTREAM_COST_UNREAD_TODAY");
+    if (incomplete.length) message.warning(`已刷新当前对账范围，仍有 ${incomplete.length} 行数据未完整读取，请查看行内原因。`);
+  };
 
   // 需处理那一行的「重新读取」：只让服务端读这一行的绑定（照旧带 observe），再读整页
   const retryRow = async (row: ProfitRow) => {

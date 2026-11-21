@@ -93,7 +93,7 @@ export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" 
   // 这天的收入、上游成本、毛利（美元原币）：已固定的取账本，今天取这一行整段的数，其余是 null
   incomeUsd: number | null; actualCostUsd: number | null; grossUsd: number | null;
   // 同一天的人民币数：已固定的天按那天结账时记下的汇率，今天按现在的汇率；没有汇率是 null
-  incomeCny?: number | null; actualCostCny?: number | null };
+  incomeCny?: number | null; actualCostCny?: number | null; actualCostMain?: number | null };
 // 一行（一个渠道）范围里用过的每把 Key（用户 10-30 定）：收入是读的时候分的（只有一把全归它；几把按原价用量比例；读不到倍率按成本比例），不存
 export type ProfitKeyRow = {
   tokenId: number; name: string;
@@ -104,7 +104,7 @@ export type ProfitKeyRow = {
   ratio: number | null; ratioKind: "group" | "actual_over_standard";
   costUsd: number | null; rawUsd: number | null; incomeUsd: number | null;
   // 人民币：范围里每天按那天的汇率换了再加；没有汇率是 null（页面退回按这一行现在的汇率换）
-  costCny?: number | null; incomeCny?: number | null;
+  costCny?: number | null; incomeCny?: number | null; costMain?: number | null;
   incomeBasis: "single" | "raw" | "cost" | null;
   grossProfitUsd: number | null; grossMarginRate: number | null;
   // 范围里有几天这把 Key 的收入份额没分（这天还没固定、只有一边固定）：数不进 incomeUsd，成本照进 costUsd
@@ -123,7 +123,7 @@ export type ProfitRow = {
   // 一个渠道一行（rowKey `ch:<自营站点>:<渠道>`）：bound 在绑着的，unboundOn 已解绑的那天（整天算，之后不算）；毛利率 = 毛利 ÷ 收入，没收入是 null
   incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null;
   // 按人民币显示时用：范围里每天按那天（那个上游）结账时记下的汇率换了再加，今天按现在的；算不出（没有汇率、和美元合计对不上）是 null，页面退回按这一行现在的汇率换
-  incomeCny?: number | null; actualCostCny?: number | null;
+  incomeCny?: number | null; actualCostCny?: number | null; actualCostMain?: number | null;
   // 提示类的感叹号（今天提醒换 Key）：这一行照读到的数算、进合计，不是需处理
   notice: { code: string; text: string; detail: string | null; action: WorkflowAction | null; diagnostic?: string } | null;
   attention: { diagnostic?: string; code: string | null; title: string | null; detail: string | null; action: WorkflowAction | null; fromDay: string | null; moreCount: number;
@@ -142,10 +142,15 @@ export type ProfitPageResponse = {
   counts: { channels: number; countedChannels: number; attentionChannels: number };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
   asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
+  fixedCostMain?: number | null;
+  coverage?: { knownChannelCount: number; accountedChannelCount: number; catalogueState: string; wholeSiteState: string; channels: { channelId: number; name: string; status: string }[] };
+  timing?: { incomeThroughMs: number | null; costThroughMs: number | null; provisional: boolean };
+  historicalRatePreview?: { entries: number; days: string[]; costBefore: number; costAfter: number };
+  accountingTotals?: { income: number | null; actual: number | null; gross: number | null; fixedCost: number | null; net: number | null };
   ownIncomeUnavailable: { code: string } | null; unlinkedChannelCount: number; notCountedDays?: { count: number }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
   // 每天的实付成本合计（成本估算「每天的上游成本」用）：美元原值和按各行汇率折的人民币
-  dailyCost?: { day: string; actualCostUsd: number; actualCostCny?: number }[];
+  dailyCost?: { day: string; actualCostUsd: number; actualCostCny?: number; actualCostMain?: number }[];
 };
 export type ProfitDetailModel = { model: string; upstreamModel?: string | null; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; pricesPerMillion?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null } | null; beforeRatioUsd: number; usd: number };
 export type ProfitDetailResponse = {
@@ -156,7 +161,7 @@ export type ProfitDetailResponse = {
   // backfilledAt：这天固定时收费记录还没读完、后来补算的时刻；没补算是 null
   expected: { usd: number | null; reason: string | null; keyChange?: { atMs: number | null; between: [number, number] | null } | null; backfilledAt?: string | null; groupName: string | null; groupRatio: number | null; segments: { startMs: number; endMs: number; ratio: number | null; group?: string | null; usd?: number | null; ruleId: string | null }[];
     byModel: ProfitDetailModel[]; missingPriceModels: { model: string; inputTokens: number; outputTokens: number; requests: number }[]; byChannel: { channelId: number; usd: number | null }[]; tokens: number | null };
-  actual: { usd: number | null; cny?: number | null; keyName: string | null };
+  actual: { usd: number | null; cny?: number | null; main?: number | null; keyName: string | null };
   // 这天没算出来的原因（换 Key 冲突期、还在读取、需处理…），算出来的是 null：实付、毛利写「—」加这个原因，不写 0
   unavailable?: { code: string | null; title: string | null; detail: string | null } | null;
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;

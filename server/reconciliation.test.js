@@ -5632,17 +5632,17 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.ok(full.coverage.channels.find((channel) => channel.channelId === 9).actions.some((action) => action.href === "/stations?action=connect&ownStationId=own&channelIds=9"));
 });
 
-test("3b 核算按人民币：收入按本站汇率、成本按上游汇率", async (t) => {
+test("3b 核算保持主站单位：采购成本按上游系数折算", async (t) => {
   const f = await completedDayFixture(t);
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   f.stations.find((station) => station.id === "upstream").cnyPerUsd = 6;
   const full = await f.module.queryRules();
   assert.deepEqual(full.results[0].rates, { income: { stationId: "own", cnyPerUsd: 7, source: "configured" },
     cost: { stationId: "upstream", cnyPerUsd: 6, source: "configured" }, costBasis: "usage" });
-  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []]);
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []]);
   const display = full.commonSummary.totals.display;
-  assert.deepEqual([display.currency, display.knownIncome, display.knownCost, display.confirmedProfit], ["CNY", 52.5, 18, 34.5], "每条 $2.5×7 − $1×6");
-  assert.ok(Math.abs(display.confirmedMarginRate - 34.5 / 52.5) < 1e-9);
+  assert.deepEqual([display.currency, display.knownIncome, display.knownCost, display.confirmedProfit], ["USD", 7.5, 3 * (6 / 7), 7.5 - 18 / 7], "每条 $2.5×7 − $1×6");
+  assert.ok(Math.abs(display.confirmedMarginRate - (7.5 - 18 / 7) / 7.5) < 1e-9);
   assert.equal(full.commonSummary.totals.confirmedProfitUsd, 4.5, "USD 原始口径不变");
 });
 
@@ -5657,8 +5657,8 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率", async (t)
   assert.deepEqual(full.fixedOffProfitStations, [], "我的站点会摊销它的采购费");
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   full = await module.queryRules();
-  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []], "只需要本站汇率");
-  assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [52.5, 52.5]);
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []], "只需要本站汇率");
+  assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [7.5, 7.5]);
   // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，成本照样记 0
   const offProfit = [
     [{ includeInProfit: false }, "设为不计入成本的固定采购上游"],
@@ -5693,14 +5693,14 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率", async (t)
   assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }]);
 });
 
-test("3b 只设置了部分汇率：整页仍按 USD 原值显示，并列出还没设置的站点", async (t) => {
+test("3b 部分采购系数为空：默认 1，仍按主站单位核算", async (t) => {
   const f = await completedDayFixture(t);
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   const full = await f.module.queryRules();
   assert.equal(full.displayCurrency, "USD");
-  assert.deepEqual(full.unconfiguredRateStations, [{ id: "upstream", name: "上游" }]);
+  assert.deepEqual(full.unconfiguredRateStations, []);
   assert.equal(full.commonSummary.totals.display.currency, "USD");
-  assert.equal(full.commonSummary.totals.display.confirmedProfit, 4.5);
+  assert.equal(full.commonSummary.totals.display.confirmedProfit, 7.5 - 3 / 7);
 });
 
 test("U05首次局部缺其余账单证据为unknown，0规则仍0/10；凭据/Key业务变化不能借旧cache变accounted", async (t) => {
@@ -7357,13 +7357,13 @@ test("1b接口：GET 和 POST 默认只读零写入，只有带 observe:true 的
   } finally { hooks.deregister(); delete globalThis.__p1bRuntime; }
 });
 
-test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率、改成固定采购，已结账的昨天照旧；当时没设的汇率按当前配置", async (t) => {
+test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率、改成固定采购，已结账的昨天照旧；未配置系数也保存 1", async (t) => {
   const f = await completedDayFixture(t);
   const own = f.stations.find((station) => station.id === "own"), upstream = f.stations.find((station) => station.id === "upstream");
   own.cnyPerUsd = 7.1;
   await f.module.refreshDue(Date.now());
   assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.revision, row.source, row.revenue_usd, row.cost_usd, row.revenue_rate, row.cost_rate, row.cost_basis]),
-    Array(3).fill(["2026-10-08", 1, "settle", 2.5, 1, 7.1, null, "usage"]));
+    Array(3).fill(["2026-10-08", 1, "settle", 2.5, 1, 7.1, 1, "usage"]));
   own.cnyPerUsd = 8; upstream.cnyPerUsd = 6.5; upstream.fixedPurchases = [{ amount: 300, days: 30 }];
   f.rt._reconciliationResultCache.clear();
   const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
@@ -7371,8 +7371,8 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
   for (const row of results) {
     assert.deepEqual([row.displayStatus.state, row.calculation.profitUsd], ["settled", 1.5], "已结账的毛利不按固定采购重算");
     assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
-      cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
-    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage",
+      cost: { stationId: "upstream", cnyPerUsd: 1, source: "configured" }, costBasis: "usage" });
+    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: 1 }, costBasis: "usage",
       expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）；没读全时 tokens 也不写（审核 R2 #125 中-4）");
   }
   // 今天还没结账，按当前配置：固定采购、成本记 0。
@@ -8627,6 +8627,8 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   // 三条绑定三把 Key：每条这天实付 1
   assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.actualCostUsd]).sort(), [["ch:own:1", [1], 1], ["ch:own:2", [2], 1], ["ch:own:3", [3], 1]]);
   assert.deepEqual(page.pageTotals, { incomeUsd: 7.5, actualCostUsd: 3, grossProfitUsd: 4.5, grossMarginRate: 0.6 });
+  assert.deepEqual(page.accountingTotals, { income: 7.5, actual: 3, gross: 4.5, fixedCost: 0, net: 4.5 });
+  assert.equal(page.historicalRatePreview.entries, 0, "新账明确保存默认系数 1");
   assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, attentionChannels: 0 });
   assert.deepEqual([page.fixedCostUsd, page.netProfitUsd, page.unlinkedChannelCount, page.rateUnset, page.ownIncomeUnavailable, page.asOf != null, page.tz], [0, 4.5, 7, [], null, true, "Asia/Shanghai"], "固定成本 0（没有固定采购的上游）；渠道目录里 10 个渠道只绑了 3 个");
   const dayDetail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
@@ -10170,4 +10172,41 @@ test("PR C2 零点后头几分钟：00:03 看昨天，桶只读到 23:58 时退�
   const viaStat = await world.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page", force: false });
   assert.ok(yesterdayStats() > 0, "桶只读到 23:58 < 昨天终点 24:00：退回逐渠道 stat");
   assert.deepEqual(viaStat.results.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), viaBuckets.results.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), "最后几分钟没有日志时两种读法数一样");
+});
+
+test("采购系数快照：修改配置只影响今天，旧账预览不重结、不补写历史价格", async (t) => {
+  const f = await completedDayFixture(t);
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.cnyPerUsd = 0.5;
+  await f.module.refreshDue(Date.now());
+  const saved = structuredClone(f.state.ledger);
+  upstream.cnyPerUsd = 2;
+  const page = await f.module.profitPage({ preset: "yesterday" });
+  assert.equal(page.displayCurrency, "USD");
+  assert.deepEqual(page.accountingTotals, { income: 7.5, actual: 1.5, gross: 6, fixedCost: 0, net: 6 });
+  assert.equal(page.historicalRatePreview.entries, 0);
+  assert.deepEqual(f.state.ledger, saved, "读取利润不改历史账本");
+  // 模拟上线前未保存系数的旧账；预览按默认 1，并保留与当前系数的差额供核对。
+  const readFacts = f.repository.listLedgerDayFacts.bind(f.repository);
+  t.mock.method(f.repository, "listLedgerDayFacts", async (...args) => (await readFacts(...args)).map((row) => ({ ...row, costRate: null })));
+  f.rt._reconciliationResultCache.clear();
+  const legacy = structuredClone(f.state.ledger);
+  const preview = await f.module.profitPage({ preset: "yesterday" });
+  assert.deepEqual(preview.historicalRatePreview, { entries: 3, days: ["2026-10-08"], costBefore: 6, costAfter: 3 });
+  assert.equal(preview.accountingTotals.actual, 3);
+  assert.deepEqual(f.state.ledger, legacy);
+});
+
+
+test("今日桶收入保留真实截止时间，页面暂估说明不会把查询时刻冒充到账时刻", async (t) => {
+  let nowMs = Date.parse("2026-10-09T03:00:00Z");
+  const world = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(world);
+  nowMs += 3 * 60000;
+  await world.module.refreshDue(nowMs);
+  const cached = await world.module.profitPage({ preset: "today" }, { cacheOnly: true });
+  assert.equal(cached.timing.provisional, true);
+  assert.ok(cached.timing.incomeThroughMs < nowMs, "收入只读到日志游标，不能填现在");
+  assert.ok(cached.timing.costThroughMs >= cached.timing.incomeThroughMs);
+  assert.equal(Date.parse(cached.asOf), cached.timing.incomeThroughMs);
 });

@@ -80,7 +80,7 @@ test("表下面那一行：没算进利润的上游成本、还没算利润的�
   const hrefs = { upstreams: "/stations", settings: "/settings" };
   const notes = footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 2 * 3600000 });
   assert.deepEqual(notes.map((n) => [n.key, n.text, n.link?.text]), [
-    ["unlinked", "还有 2 个渠道没绑定上游，没算进来。", "去上游资源"], ["rate", RATE_UNSET_USD, undefined],
+    ["unlinked", "还有 2 个渠道没绑定上游，没算进来。", "去上游资源"],
     ["lagging", "自营站点的收费记录读得慢，只读到 12:30，这以后的应付成本还没算。", "去设置"],
   ]);
   assert.equal(footerNotes(page(), ctx, hrefs, { coveredToMs: NOW - 10 * 60000 }).some((n) => n.key === "lagging"), false);
@@ -349,7 +349,7 @@ test("人民币：接口按天换好的数（incomeCny / actualCostCny）优先�
   assert.deepEqual([plain.income, plain.actual, plain.gross], [70, 60, 10], "没给按这一行现在的汇率");
   const exact = rowMoney({ ...base, incomeCny: 70, actualCostCny: 51.6 }, "CNY");
   assert.deepEqual([exact.income, exact.actual, exact.gross], [70, 51.6, 70 - 51.6]);
-  assert.equal(rowMoney({ ...base, incomeCny: 70, actualCostCny: 51.6 }, "USD").actual, 6, "美元不受影响");
+  assert.equal(rowMoney({ ...base, incomeCny: 70, actualCostCny: 51.6 }, "USD").actual, 60 / 7, "主站单位不变，采购系数仍参与成本核算");
   const key = keyCells({ incomeUsd: 5, costUsd: 3, incomeCny: 35, costCny: 25.8 }, base, { currency: "CNY" });
   assert.deepEqual([key.income, key.actual], [35, 25.8]);
   assert.deepEqual([keyCells({ incomeUsd: 5, costUsd: 3 }, base, { currency: "CNY" }).actual], [30]);

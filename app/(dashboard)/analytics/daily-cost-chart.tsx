@@ -10,7 +10,7 @@ export function DailyCostPanel({ profit, tz, emptyText }: { profit: ProfitPageRe
   const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
   const days = (profit.dailyCost || []).map((item) => ({
     day: item.day,
-    value: currency === "CNY" && item.actualCostCny != null ? item.actualCostCny : item.actualCostUsd,
+    value: currency === "CNY" && item.actualCostCny != null ? item.actualCostCny : item.actualCostMain ?? item.actualCostUsd,
     today: item.day === profit.today,
   }));
   const max = Math.max(0, ...days.map((d) => d.value || 0));

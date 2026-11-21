@@ -59,7 +59,7 @@ import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   reconciliationDisplayCurrency, fixedOffProfitStations, countsInSummary } from "../lib/reconciliation-view.js";
-import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
+import { amortizeFixedCost, costInMainUnit, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, sharedOwnChannelList } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
@@ -399,6 +399,7 @@ function foldSplitSegments(pieces, costBasis) {
       quotaUnits: sumOrNull(sides, (side) => side.quotaUnits), amountUsd: complete ? sumOrNull(sides, (side) => side.amountUsd) : null, knownAmountUsd: sumKnown(sides, (side) => side.knownAmountUsd),
       successfulCount: sides.reduce((total, side) => total + (side.successfulCount ?? 0), 0), expectedCount: sides.reduce((total, side) => total + (side.expectedCount ?? 0), 0),
       observedAt: Math.max(...sides.map((side) => Number(side.observedAt) || 0)),
+      dataThroughMs: last.dataThroughMs ?? last.window?.endMs,
       window: span(first.window, last.window, list[0].window), requestedWindow: span(first.requestedWindow, last.requestedWindow, list[0].window) };
   };
   return [...groups.entries()].map(([base, list]) => {
@@ -501,7 +502,7 @@ const CALCULATION_BLOCKERS = new Set([
 
 // reference 问题只作参考（如固定采购上游的 Key 账单不全），不挡毛利。
 // 快照内容的指纹：去掉每轮都会变的各种时刻和窗口终点（「今天」的窗口终点就是现在），只看金额、问题、分段这些
-const SNAPSHOT_VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "observedAt", "stateObservedAt", "latestLogAtMs", "endMs"]);
+const SNAPSHOT_VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "observedAt", "stateObservedAt", "latestLogAtMs", "endMs", "dataThroughMs"]);
 // 详细原因（上游回的原话）只在需处理的气泡里用，不进数据库快照：上游每轮措辞不一样（请求号、时间戳）会让「今天的快照没变就跳过」失效，也不该把上游原话存下来
 const withoutDiagnostic = (health) => {
   if (!health || (!health.diagnostic && !(health.issues || []).some((issue) => issue?.diagnostic))) return health;
@@ -2004,7 +2005,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const buckets = await todayBuckets(own, segmentWindow, registry).catch(() => null);
       if (buckets) {
         const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus, fromBuckets: buckets.byChannel }).catch(() => null);
-        if (result?.state === "complete" && !result.emptySecondWindow) return result;
+        if (result?.state === "complete" && !result.emptySecondWindow) return { ...result, dataThroughMs: buckets.toMs };
       }
     }
     // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
@@ -2103,7 +2104,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const first = [...readable, ...fixed.filter(Boolean)].find((result) => result.billingTimezone) ?? {};
     return { ...merged,
       billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
-      window: segmentWindow, billingTimezone: first.billingTimezone ?? null };
+      window: segmentWindow, dataThroughMs: readable.at(-1)?.dataThroughMs ?? segmentWindow.endMs, billingTimezone: first.billingTimezone ?? null };
   }
 
   // ---- 一个渠道一天的收入只记一次（用户 10-30 定）----
@@ -3221,6 +3222,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             observedAt: Date.now(), window: segmentWindow, requestedWindow: segmentWindow, billingTimezone: null,
             channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })),
           } : {
+            dataThroughMs: downstreamResult.dataThroughMs ?? segmentWindow.endMs,
             quotaUnits: downstreamResult.quotaUnits,
             quotaPerUnit: downstreamResult.quotaPerUnit,
             amountUsd: downstreamUnavailable ? null : downstreamUsd,
@@ -3357,6 +3359,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           adminUsageDays: segmentResults.reduce((sum, segment) => ({ deducted: sum.deducted + (segment.downstream.adminUsageDays?.deducted ?? 1), undeducted: sum.undeducted + (segment.downstream.adminUsageDays?.undeducted ?? 0) }), { deducted: 0, undeducted: 0 }),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+          dataThroughMs: segmentResults.at(-1)?.downstream.dataThroughMs ?? window.endMs,
           observedAt: Date.now(), window: sideWindow("downstream"),
           billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.downstream)),
           channels: allChannels,
@@ -3767,7 +3770,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       };
     };
     // 账本记下结账时的成本计法和汇率：汇率只在当时配置过时才记，没记的读取时按当前配置。
-    const configuredRate = (rate) => isConfiguredRate(rate) ? rate.cnyPerUsd : null;
+    const configuredRate = (rate) => rate?.cnyPerUsd ?? 1;
     const ledgerRate = (rate) => { const value = ledgerDecimal(configuredRate(rate), 6); return value == null ? null : Number(value); };
     // 账本明细里记下这次是怎么结的（计划 C2a 2.6）：poll 轮询结昨天、late 回看更早的日子、manual 手动重新读取、transition 改了切换时间的重结
     const settlement = { trigger: trigger || (resettle ? "transition" : origin === "manual" ? "manual" : "poll"),
@@ -3909,8 +3912,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const source = result.settledAt ? result.ownSource ?? null
         : result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
       const provider = registry.resources.get(result.rule.upstreamStationId)?.metadata?.platform || result.rule.provider;
-      // 汇率按当前配置（没设置的 source 为 default，页面按 USD 原值显示）；固定采购的上游成本记为 0。
-      // 已结账的日子用账本记下的汇率和成本计法，账本没记的（当时没配置、迁移的旧账）按当前配置。
+      // 主站单位保持不变；采购系数只换算成本。已结账使用快照，旧快照空值固定按 1。
       const upstream = upstreamStation(result.rule.upstreamStationId), ledger = result.ledger;
       const { income, cost, costBasis } = ratesFor({ own: upstreamStation(result.rule.ownStationId), upstream, saved: ledger, costBasis: result.costBasis });
       const rates = { income: { stationId: result.rule.ownStationId, ...income }, cost: { stationId: result.rule.upstreamStationId, ...cost }, costBasis };
@@ -3936,17 +3938,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     const catalogue = rt.onboardingSource?.getSourceCatalogue?.() || null;
     const coverage = deriveKnownChannelCoverage(catalogue, knownRules, coverageFacts);
-    // 金额默认按系统原值（USD）显示；本站、各关联上游和账号级对比涉及的上游都设置了汇率时，整页按人民币显示。
+    // 保持主站额度单位，采购系数不会切换显示币种。
     const upstreams = usageUpstreams();
-    const rateStations = new Map([
-      ...selected.flatMap((row) => [row.rates.income, row.rates.costBasis === "fixed" ? null : row.rates.cost]).filter(Boolean)
-        .map((rate) => [rate.stationId, isConfiguredRate(rate)]),
-      ...[upstreams?.own, ...(upstreams?.usage || [])].filter(Boolean).map((station) => [station.id, isConfiguredRate(rateSnapshotOf(station))]),
-    ]);
-    const displayCurrency = [...rateStations.values()].every(Boolean) ? reconciliationDisplayCurrency(selected) : "USD";
-    // 已经设置了部分汇率时才提示还缺哪些；一个都没设置就是按 USD 看，不打扰。
-    const unconfiguredRateStations = [...rateStations.values()].some(Boolean)
-      ? [...rateStations].filter(([, configured]) => !configured).map(([id]) => ({ id, name: upstreamStation(id)?.name || `${UPSTREAM_GONE}（${id}）` })) : [];
+    const displayCurrency = reconciliationDisplayCurrency(selected);
+    const unconfiguredRateStations = []; // 未配置采购系数按 1，属于有效默认值。
     // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，核算页说明净利也不含它们的采购费。
     const offProfit = upstreams ? fixedOffProfitStations(selected, { amortizedIds: upstreams.fixed.map((station) => station.id), stationOf: upstreamStation }) : [];
     const grouped = summarizeReconciliationWindowGroups(selected, { currency: displayCurrency, coverageFor: (window, source) => {
@@ -4298,27 +4293,45 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (rawInput.preset === "since") page.range = { ...page.range, preset: "since" };
       // 固定成本（lib/profit-page.js fixedCostOfRange，运营总览、自营业务以后也用它）：已固定的日子读 reconciliation_fixed_cost_days 里那天记下的金额和汇率，
       // 今天和还没固定的日子按现在的购买记录算；自营站点关着收费记录碰到的日子不扣（决定记录 58）；那天是按用量算的不另扣（审核 #126 M3）。
-      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），单独收集、和它的点名去重合并（审核 #126 M6）
       const fixedStations = usageUpstreams()?.fixed || [];
       // 已固定的日子读表里所有上游的行（不看上游现在是什么计法、归档没有、算不算进利润）；一条语句
       const fixedDays = labels.length ? await repository.listFixedCostDays(null, labels[0], labels.at(-1)) : [];
-      const { usd: fixedCostUsd, cny: fixedCostCny, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: fixedStations, nameOf: (id) => upstreamStation(id)?.name, results, labels, window, now, tz, dayFacts, fixedDays, stickyDays,
-        offPeriodsOf: (ownStationId) => upstreamStation(ownStationId)?.consumeLogOffPeriods });
+      const todayLabel = dayKeyInTz(now, tz);
+      const incomeRateOfDay = (day) => day < todayLabel ? dayFacts.find((fact) => fact.billDate === day)?.revenueRate ?? 1 : rateSnapshotOf(ownStation()).cnyPerUsd;
+      const { usd: fixedCostUsd, cny: fixedCostCny, main: fixedCostMain } = fixedCostOfRange({ stations: fixedStations, nameOf: (id) => upstreamStation(id)?.name, results, labels, window, now, tz, dayFacts, fixedDays, stickyDays,
+        incomeRateOfDay, offPeriodsOf: (ownStationId) => upstreamStation(ownStationId)?.consumeLogOffPeriods });
       // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
       // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
       const ownIssues = results.flatMap((row) => row.health?.issues || []).filter((issue) =>
         (/^OWN_/.test(issue?.code || "") && reconciliationIssue(issue.code).kind === "reading") || (issue?.side === "own" && isAccessTokenError(issue?.code)));
       const ownIssue = ownIssues.at(-1);
-      const rateUnsetIds = new Set();
-      const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
+      const counted = page.rows.filter((row) => row.counted);
+      const income = counted.length ? counted.reduce((total, row) => total + row.incomeUsd, 0) : null;
+      const actual = counted.length ? counted.reduce((total, row) => total + row.actualCostMain, 0) : null;
+      const gross = income != null && actual != null ? income - actual : null;
+      const accountingTotals = { income, actual, gross, fixedCost: fixedCostMain, net: gross == null ? null : gross - fixedCostMain };
+      // 旧账只做影响预览，不改账本、不触发重结；旧快照中没记系数的部分固定按 1。
+      const legacy = dayFacts.filter((fact) => fact.revenueRate == null || (fact.costBasis !== "fixed" && fact.costRate == null));
+      const historicalRatePreview = { entries: legacy.length, days: [...new Set(legacy.map((fact) => fact.billDate))].sort(), costBefore: 0, costAfter: 0 };
+      for (const fact of legacy) {
+        const rule = results.find((row) => row.rule.id === fact.ruleId)?.rule;
+        const cost = fact.costBasis === "fixed" ? 0 : fact.costUsd ?? 0;
+        historicalRatePreview.costBefore += costInMainUnit(cost, fact.costRate ?? rateSnapshotOf(upstreamStation(rule?.upstreamStationId)).cnyPerUsd, fact.revenueRate ?? rateSnapshotOf(upstreamStation(rule?.ownStationId)).cnyPerUsd);
+        historicalRatePreview.costAfter += costInMainUnit(cost, fact.costRate ?? 1, fact.revenueRate ?? 1);
+      }
+      const current = labels.includes(todayLabel) ? results.filter((row) => !row.todayReading && (!cacheOnly || row.todayReadAtMs != null)) : [];
+      const incomeThroughMs = current.length ? Math.min(...current.map((row) => row.downstream?.dataThroughMs ?? row.todayReadAtMs ?? row.window.endMs)) : null;
+      const costThroughMs = current.length ? Math.min(...current.map((row) => row.upstream?.dataThroughMs ?? row.todayReadAtMs ?? row.window.endMs)) : null;
+      const timing = { incomeThroughMs, costThroughMs, provisional: current.length > 0 };
+      const coverage = response.coverage;
       // 只读缓存：范围里有今天时，「数据截至」写那份数真实的时刻（轮询读它的截止点，没人看时可能是几分钟前），不写现在；还在读取的行不算
-      const readAts = cacheOnly && labels.includes(dayKeyInTz(now, tz)) ? results.filter((row) => !row.todayReading).map((row) => row.todayReadAtMs).filter(Number.isFinite) : [];
-      return { ...page, asOf: readAts.length ? new Date(Math.min(now, ...readAts)).toISOString() : response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
+      const readAts = [incomeThroughMs, costThroughMs].filter(Number.isFinite);
+      return { ...page, asOf: readAts.length ? new Date(Math.min(now, ...readAts)).toISOString() : response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny, fixedCostMain, accountingTotals, coverage, timing, historicalRatePreview,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
         unsupportedChannels: await unsupportedChannels({ cacheOnly }), notCountedDays,
-        rateUnset, fixedOffProfitStations: response.fixedOffProfitStations || [] };
+        rateUnset: [], fixedOffProfitStations: response.fixedOffProfitStations || [] };
     },
     // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有
     async profitDetail({ ruleIds = [], day } = {}) {

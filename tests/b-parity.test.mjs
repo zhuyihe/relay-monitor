@@ -73,7 +73,13 @@ test("对拍：两段窗口是不是同一段，每个调用方传的选项和�
 });
 
 test("对拍：设没设汇率、一条绑定的汇率、折人民币", () => {
-  assert.deepEqual(rateDiffs(), []);
+  for (const diff of rateDiffs()) {
+    assert.equal(diff.family, "ratesFor/factsFor");
+    assert.ok(diff.input.ledger, "只有历史系数空值允许与旧实现不同");
+    const expected = structuredClone(diff.before);
+    for (const side of ["income", "cost"]) if (diff.input.ledger.rates[side] == null) expected[side] = { ...expected[side], cnyPerUsd: 1, source: "default" };
+    assert.deepEqual(diff.now, expected);
+  }
 });
 
 // ---- B2 ----
