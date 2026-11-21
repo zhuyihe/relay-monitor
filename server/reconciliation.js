@@ -4181,6 +4181,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const station = upstreamStation(stationId);
       if (!billingStation(station)) throw codedError("UPSTREAM_NOT_FOUND", "找不到这个上游");
       const connection = structuredClone(station), resourceVersion = stationBusinessVersion(connection);
+      if (station.type === "sub2api" && station.s2Tokens?.refreshToken) connection.s2Tokens = station.s2Tokens;
       if (!force && selectedId == null) return { ...publicMetadata(await metadataFor(connection, { timezone: zone })), identity: null, resourceVersion, probe: null };
       const credential = credentialFingerprint(connection);
       const assertCurrent = () => {

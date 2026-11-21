@@ -6,7 +6,7 @@ import { normalizeOffPeriods } from "../lib/consume-log.js";
 import { ALERT_RULE_KEYS, CHANNEL_EVENT_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
-import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
+import { endpointChangedError, endpointKey, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
 import { knownChannelConfig, resolveChannelConfig } from "../lib/notify.js";
 import { assertKeyAgentSecretStrength, assertKeyAgentUrl } from "./secrets.js";
 import { canOpen, hasSecretValue, isCiphertext, META_SECRETS, metaAad, openText, sealText, secretSlots, secretText, secretValue } from "./secrets.js";
@@ -29,6 +29,19 @@ function clearHiddenCredentials(station) {
   if (applicable) for (const field of ["accessToken", "userId", "apiKey", "email", "password"]) {
     if (!applicable.includes(field)) station[field] = "";
   }
+}
+
+// 人工登录后的授权一次导入；续期令牌与自动登录缓存一起加密保存。
+function importedSub2Session(input) {
+  if (input.session == null) return null;
+  const session = input.session;
+  if (input.type !== "sub2api" || typeof session.accessToken !== "string" || !session.accessToken.trim()
+      || typeof session.refreshToken !== "string" || !session.refreshToken.trim()
+      || !Number.isFinite(session.expiresAt) || session.expiresAt <= 0) {
+    throw Object.assign(new Error("登录授权不完整，请重新登录后导入授权"), { code: "INVALID_SUB2_SESSION" });
+  }
+  return { site: endpointKey(input.baseUrl), accessToken: session.accessToken.trim(),
+    refreshToken: session.refreshToken.trim(), expiresAt: session.expiresAt };
 }
 
 function originMarker(value) {
@@ -619,6 +632,7 @@ export class Store {
   }
 
   async add(input, { verifiedIdentity = null, onboardingOrigin, guard } = {}) {
+    const session = importedSub2Session(input);
     const station = {
       id: uid("st"),
       name: String(input.name || "未命名上游").trim(),
@@ -627,7 +641,7 @@ export class Store {
       monitorEnabled: input.monitorEnabled !== false,
       authVersion: 1,
       verifiedIdentity: verifiedAccount(verifiedIdentity),
-      accessToken: input.accessToken ? String(input.accessToken).trim() : "",
+      accessToken: session?.accessToken || (input.accessToken ? String(input.accessToken).trim() : ""),
       userId: input.userId ? String(input.userId).trim() : "",
       apiKey: input.apiKey ? String(input.apiKey).trim() : "",
       email: input.email ? String(input.email).trim() : "",
@@ -658,7 +672,7 @@ export class Store {
       demo: !!input.demo,
       createdAt: new Date().toISOString(),
       archivedAt: null,
-      s2Tokens: null, // Sub2API 密码模式的令牌缓存 {accessToken, refreshToken, expiresAt}
+      s2Tokens: session, // Sub2API 自动登录或人工授权的续期缓存
       alertState: null, // 告警去重状态（含不再续费站点的一次性低余额提醒时间）
       balance: null, // 最近一次查询结果
       // 渠道 Key 读取服务上一次读成功的时刻（毫秒，K2b）：重启后找不到更精确的「上一次确认是哪把 Key」时，
@@ -694,12 +708,16 @@ export class Store {
         type: s.type, baseUrl: s.baseUrl, email: s.email,
         accessToken: s.accessToken, password: s.password, userId: s.userId, apiKey: s.apiKey,
       };
+      const session = "session" in patch ? importedSub2Session({ type: patch.type || s.type,
+        baseUrl: patch.baseUrl ?? s.baseUrl, session: patch.session }) : undefined;
       const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email"];
       for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
       if ("password" in patch) s.password = String(patch.password ?? "");
+      if (session) s.accessToken = session.accessToken;
       if (s.type !== before.type) clearHiddenCredentials(s);
       // 换了站点（协议、主机、端口；原来没填地址也算）：已保存的令牌、密码、Key 不沿用，这次没重新填就不让保存，免得下次刷新发到新地址
-      if (!sameEndpoint(before.baseUrl, s.baseUrl) && staleSecrets(UPSTREAM_SECRET_FIELDS, s, patch).length) throw endpointChangedError();
+      if (!sameEndpoint(before.baseUrl, s.baseUrl) && staleSecrets(UPSTREAM_SECRET_FIELDS, s,
+        session ? { ...patch, accessToken: session.accessToken } : patch).length) throw endpointChangedError();
       if ("lowBalanceUsd" in patch) s.lowBalanceUsd = numOrNull(patch.lowBalanceUsd);
       if ("cnyPerUsd" in patch) s.cnyPerUsd = numOrNull(patch.cnyPerUsd);
       if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);
@@ -732,9 +750,9 @@ export class Store {
         before.type !== s.type || before.baseUrl !== s.baseUrl || before.email !== s.email ||
         ("accessToken" in patch && s.accessToken !== before.accessToken) ||
         ("password" in patch && s.password !== before.password) ||
-        before.userId !== s.userId || before.apiKey !== s.apiKey;
+        before.userId !== s.userId || before.apiKey !== s.apiKey || session !== undefined;
       if (credsChanged) {
-        s.s2Tokens = null;
+        s.s2Tokens = session || null;
         s.authVersion = (s.authVersion || 1) + 1;
         s.verifiedIdentity = null;
       }
@@ -747,7 +765,7 @@ export class Store {
         s.authorizationUpdateRef = null;
       }
       // 即使原缓存为空，也须覆盖提交期间后台取得的旧凭证令牌。
-      if (credsChanged) return { s2Tokens: null };
+      if (credsChanged) return { s2Tokens: session || null };
     }, { guard: guard && (() => guard(this.get(id))) });
   }
 

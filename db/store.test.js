@@ -7,6 +7,23 @@ import { evaluateStation } from "../lib/alerts.js";
 
 import { fakePool } from "./test-support/fake-pool.js";
 
+test("导入 Sub2API 人工登录授权后，改名保留续期、更新授权替换缓存、换站点不沿用授权", async () => {
+  const store = new Store(fakePool());
+  const session = { accessToken: "authorized-jwt", refreshToken: "authorized-refresh", expiresAt: 12345 };
+  const station = await store.add({ type: "sub2api", baseUrl: "https://session.test", session });
+  assert.equal(station.accessToken, session.accessToken);
+  assert.deepEqual(station.s2Tokens, { ...session, site: "https://session.test:443" });
+  await store.update(station.id, { name: "CCrouter" });
+  assert.equal(station.s2Tokens.refreshToken, session.refreshToken);
+  await store.update(station.id, { session: { ...session, accessToken: "new-jwt", refreshToken: "new-refresh" } });
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.s2Tokens.refreshToken, "new-refresh");
+  await assert.rejects(store.update(station.id, { baseUrl: "https://other.test" }), { code: "ENDPOINT_CHANGED_SECRET_REQUIRED" });
+  await store.update(station.id, { baseUrl: "https://other.test", accessToken: "other-jwt" });
+  assert.equal(station.s2Tokens, null);
+  await assert.rejects(store.add({ type: "sub2api", session: { accessToken: "incomplete" } }), { code: "INVALID_SUB2_SESSION" });
+});
+
 test("旧站点数据升级时默认保持续费", async () => {
   const store = await new Store(fakePool([{ id: "old", name: "旧站点", fixedPurchases: [] }])).load();
   assert.equal(store.get("old").noRenewal, false);

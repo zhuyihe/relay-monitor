@@ -824,7 +824,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!verificationReads.has(readKey)) verificationReads.set(readKey, verify(connection, existing));
       const observation = await verificationReads.get(readKey);
       return { ...observation, existing, connection: { ...structuredClone(connection),
-        ...(observation.connection.s2Tokens ? { s2Tokens: structuredClone(observation.connection.s2Tokens) } : {}) },
+        ...(observation.connection.s2Tokens ? { s2Tokens: observation.connection.type === "sub2api" && observation.connection.s2Tokens.refreshToken
+          ? observation.connection.s2Tokens : structuredClone(observation.connection.s2Tokens) } : {}) },
         metadata: observation.metadata && structuredClone(observation.metadata),
         identity: observation.identity && structuredClone(observation.identity) };
     }
@@ -832,6 +833,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const resourceVersion = existing ? stationBusinessVersion(existing) : null;
     const expectedAuthVersion = existing?.authVersion || 1;
     const copy = structuredClone(connection);
+    if (existing?.type === "sub2api" && existing.s2Tokens?.refreshToken) copy.s2Tokens = existing.s2Tokens;
     let metadata = null, metadataError = null, identity = null;
     if (ACCOUNT_TYPES.includes(copy.type)) {
       try { identity = await queryIdentity(copy); } catch (error) {
@@ -1052,6 +1054,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             const readKey = hash([onboardingConnectionPatch(billing.connection), billing.expectedAuthVersion, billing.resourceVersion, timezone]);
             if (!metadataReads.has(readKey)) {
               const connection = structuredClone(billing.connection);
+              if (billing.connection.type === "sub2api" && billing.connection.s2Tokens?.refreshToken) connection.s2Tokens = billing.connection.s2Tokens;
               metadataReads.set(readKey, { connection, promise: queryMetadata(connection, { timezone, capabilityStore: capabilityStore() }) });
             }
             const observation = metadataReads.get(readKey);

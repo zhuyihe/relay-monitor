@@ -1,4 +1,4 @@
-// POST /api/stations/test —— 使用临时连接信息验证上游，不写库、不刷新、不触发告警。
+// POST /api/stations/test —— 验证连接，不改配置或余额、不触发告警；已有人工授权续期时保存新令牌。
 import { withAuth, json } from "../../../../lib/api.js";
 import { describeError } from "../../../../lib/error-copy.js";
 import { sameEndpoint, staleSecrets } from "../../../../lib/endpoint.js";
@@ -42,6 +42,8 @@ function testStation(body, saved) {
       station[field] = secret && !keepSecrets ? "" : connectionValue(field, saved?.[field]);
     }
   }
+  if (keepSecrets && saved.type === "sub2api" && saved.s2Tokens?.refreshToken
+      && (!text(body.accessToken) || text(body.accessToken) === saved.accessToken)) station.s2Tokens = saved.s2Tokens;
 
   // 只看这种类型要填的密钥：老数据里残留的、用不到的字段照样不发，但不因此卡住
   const needs = UPSTREAM_TYPES.find((item) => item.value === type)?.needs || [];
@@ -68,7 +70,8 @@ export const POST = withAuth(async (request, rt) => {
     return json({ ok: false, code, category, message: text, action });
   }
 
-  const { result } = await queryStation(station);
+  const { result, tokensChanged } = await queryStation(station);
+  if (tokensChanged && station.s2Tokens === saved?.s2Tokens) await rt.store.save();
   if (!result.ok) {
     // 归类和界面同一套（lib/error-copy.js §8.2）：category 类名、message 界面上那一句、action 下一步按钮的动作键；
     // diagnostic 是脱敏后的原文（lib/providers.js 已打码），只进「查看详细原因」
