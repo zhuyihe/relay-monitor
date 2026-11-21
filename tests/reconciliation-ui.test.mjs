@@ -1152,11 +1152,13 @@ const BUSINESS_TZ = "Asia/Shanghai";
 const shanghaiDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 const shiftDay = (key, n) => { const d = new Date(key + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 test("成本估算：只有「上游成本构成」和「每天的上游成本」两块，数读每日利润同一份；只有近 7 天、近 30 天和自定义；页顶有「每日利润」链接", async (t) => {
+  const observations = [];
   const rows = [profitRow("rule-1", "Rule A", { income: 5, cost: 2 }), profitRow("rule-2", "Rule B", { income: 3, cost: 1 })];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
+    if (path === "/api/reconciliation/query") { observations.push(route.request().postDataJSON()); return fulfill(route, {}); }
     if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows),
       dailyCost: [{ day: "2026-10-07", actualCostUsd: 2 }, { day: PROFIT_TODAY, actualCostUsd: 1 }] });
     throw new Error("unexpected cost fixture API: " + path);
@@ -1167,6 +1169,10 @@ test("成本估算：只有「上游成本构成」和「每天的上游成本�
   await page.getByText(ANALYTICS_COPY.todayLegend, { exact: false }).first().waitFor();
   await page.getByRole("link", { name: "每日利润", exact: true }).first().waitFor();
   assert.equal(await page.getByRole("button", { name: "近 90 天", exact: true }).count(), 0, "没有近 90 天");
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].observe, true);
+  assert.equal(observations[0].preset, "custom", "刷新使用当前选定范围");
 });
 
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -3338,15 +3344,16 @@ function churnResponseOf(full, params) {
 async function openUsersPage(t, { viewport, search = "tab=users", initiallyEmpty = false } = {}) {
   const full = usersFixture(), requests = [];
   full.balanceSyncedMs = USERS_NOW;
+  full.todaySyncedMs = USERS_NOW;
   full.refreshIntervalMs = 60000;
   let firstSync = initiallyEmpty;
-  const balanceReads = [];
+  const balanceReads = [], syncReads = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/users") {
       requests.push(url.search);
-      if (route.request().method() === "POST") firstSync = false;
+      if (route.request().method() === "POST") { firstSync = false; syncReads.push(url.search); }
       const data = firstSync ? { ...full, starting: true, syncedMs: null, users: [] }
         : initiallyEmpty ? { ...full, basicOnly: true, ready: {}, availableDays: 0 } : full;
       return fulfill(route, usersResponse(data, url.searchParams));
@@ -3366,7 +3373,7 @@ async function openUsersPage(t, { viewport, search = "tab=users", initiallyEmpty
     throw new Error("unexpected users fixture API: " + url.pathname);
   }, viewport, USERS_NOW, null, `/users${search ? `?${search}` : ""}`);
   await page.getByRole("tab", { name: "概览" }).waitFor();
-  return { page, requests, full, balanceReads };
+  return { page, requests, full, balanceReads, syncReads };
 }
 const usersGroup = (page, name) => page.getByRole("group", { name });
 
@@ -3462,6 +3469,23 @@ test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；�
   assert.ok(requests.at(-1).includes("group=default"));
   const names = await rows().locator("td:first-child button").allInnerTexts();
   assert.ok(names.length > 0 && names.every((name) => Number(name.replace("u", "")) % 2 === 0), "只剩 default 组（编号是偶数）的人");
+});
+
+test("用户运营·默认按今天消费排序，顶部刷新同步当前用户数据并保留手动排序", async (t) => {
+  const { page, full, syncReads } = await openUsersPage(t);
+  full.users.find((row) => row.id === 55).today = 200;
+  full.users.find((row) => row.id === 1).today = 1;
+  const rows = page.locator("table.jy-data tbody tr");
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("table.jy-data tbody tr")?.textContent.includes("u055"));
+  assert.equal(syncReads.length, 1, "顶部按钮执行主动同步 POST");
+  assert.match(await rows.first().innerText(), /u055/);
+  await page.getByRole("button", { name: USERS_COPY.users.cols.week, exact: true }).click();
+  await page.waitForURL(/sort=week/);
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  assert.match(page.url(), /sort=week/);
+  assert.match(await rows.first().innerText(), /u001/);
+  await page.getByText(/消费读于/).waitFor();
 });
 
 test("用户运营·概览：五个数、一句话里的集中度、主图切到新消费用户是柱子", async (t) => {

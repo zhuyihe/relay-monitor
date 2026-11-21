@@ -259,7 +259,7 @@ export default function StationsPage() {
       if (r.tz) setTz(r.tz);
       setLoaded(true);
       setLoadError(null);
-      setRefreshedAt(Date.now());
+      setRefreshedAt(r.asOf ?? null);
       return r.stations as any[];
     } catch (e: any) {
       setLoadError(e);
@@ -305,10 +305,11 @@ export default function StationsPage() {
     return () => clearInterval(t);
   }, [refreshSec, reload]);
 
-  // 外壳的刷新只重新读取；向上游重新读余额是工具栏的「刷新」
+  // 顶部和列表工具栏共用同一刷新范围：仅更新上游余额。
   useShellPage({
-    onRefresh: () => Promise.all([reload(), metaError || !types.length ? loadMeta() : null]),
+    onRefresh: () => onRefreshAll(),
     asOf: refreshedAt,
+    autoRefreshMs: refreshSec * 1000,
     tz,
   });
 
@@ -354,10 +355,12 @@ export default function StationsPage() {
   const onRefreshAll = async () => {
     setRefreshingAll(true);
     try {
-      const r = await api("/api/refresh", { method: "POST", body: {} });
+      const r = await api("/api/refresh", { method: "POST", body: { scope: "upstreams" } });
       // /api/refresh 只返回在监控的上游；重新读取完整列表，归档与暂停监控的上游一并保留。
       // 刷新已经做完：读列表失败时由列表顶上的「读取失败」交代，这里照旧报刷新结果
       await reload().catch(() => {});
+      if (metaError || !types.length) await loadMeta();
+      if (channelsOf) await channelOptions.reload();
       // 和运营总览同一句：有读不到余额的说几个
       const done = refreshAllText(r?.stations);
       if (done.failed) message.warning(done.text);
@@ -1128,7 +1131,7 @@ export default function StationsPage() {
               options={[{ value: "", label: COPY.allTypes }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
             />
             <span className="spacer" />
-            {/* 向每个在看余额的上游重新读一遍余额；顶栏的刷新只重新读本页 */}
+            {/* 与顶栏共用：向正在监控的上游重新读取余额。 */}
             <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>{REFRESH}</Button>
             {/* 合过以后留一项「合并记录」，打开同一个抽屉（只剩记录那一块） */}
             {(mergeCounts?.records ?? 0) > 0 ? (

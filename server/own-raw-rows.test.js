@@ -34,6 +34,22 @@ test("缓存多久由调用方说：2 分钟的调用方在 3 分钟后重读，
   assert.equal(calls.length, 3);
 });
 
+test("主动刷新只重读今天，十分钟后才校正历史；整日历史窗口仍可复用", async () => {
+  const rt = {}, calls = [], start = Date.parse("2026-10-25T00:00:00+08:00"), midnight = Date.parse("2026-11-01T00:00:00+08:00");
+  let todayCost = 1;
+  const readers = { user: async (_own, from, to) => {
+    calls.push({ from, to });
+    return [{ t: midnight - 3600000, cost: 10 }, { t: midnight + 3600000, cost: todayCost }].filter((row) => row.t >= from && row.t < to);
+  } };
+  await readOwnRows(rt, own, "user", start, T0, { now: T0, readers });
+  todayCost = 7;
+  const fresh = await readOwnRows(rt, own, "user", start, T0 + 1000, { now: T0 + 1000, readers, refresh: true });
+  assert.deepEqual(fresh.map((row) => row.cost), [10, 7], "保留历史，更换今天的行而非重复累加");
+  assert.equal(calls[1].from, midnight);
+  await readOwnRows(rt, own, "user", start, T0 + 11 * MIN, { now: T0 + 11 * MIN, readers, refresh: true });
+  assert.equal(calls[2].from, start, "历史校正仍按低频进行");
+});
+
 test("同时来的几个请求只发一个；读失败的不缓存，下一次重读", async () => {
   const rt = {};
   let calls = 0, fail = true, release;

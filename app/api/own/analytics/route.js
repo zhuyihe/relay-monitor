@@ -35,17 +35,20 @@ export const GET = withAuth(async (request, rt) => {
   const cache = ownCache(rt);
   const cacheKey = `${range}|${tz}`;
   const hit = cache.get(cacheKey);
-  if (hit && Date.now() - hit.at < 120000) return json(hit.payload);
+  const refresh = request.method === "POST";
+  if (!refresh && hit && Date.now() - hit.at < 60000) return json(hit.payload);
 
   try {
     // 模型行一次拉 35 天（窗口展示 + 日消费预测共用）；用户行只拉展示窗口。
     // 上窗用户行单独拉一次；上窗模型行落在 35 天内时直接从 modelRows 切，不多发请求。
     const prevCovered = prevStart >= wideStart;
+    // 上一窗口是已经过去的小时汇总：多取到该小时末端，按真实窗口筛选，避免结束秒数变化导致每分钟重拉历史。
+    const previousReadEnd = (Math.floor(prevEnd / 3600000) + 1) * 3600000;
     const [modelRows, userRows, prevUserRows, prevModelFetched] = await Promise.all([
-      readOwnRows(rt, own, "model", wideStart, now),
-      readOwnRows(rt, own, "user", startMs, now),
-      readOwnRows(rt, own, "user", prevStart, prevEnd).catch(() => null),
-      prevCovered ? null : readOwnRows(rt, own, "model", prevStart, prevEnd).catch(() => null),
+      readOwnRows(rt, own, "model", wideStart, now, { ttlMs: 60000, refresh }),
+      readOwnRows(rt, own, "user", startMs, now, { ttlMs: 60000, refresh }),
+      readOwnRows(rt, own, "user", prevStart, previousReadEnd, { ttlMs: 10 * 60000 }).then((rows) => rows.filter((row) => row.t < prevEnd)).catch(() => null),
+      prevCovered ? null : readOwnRows(rt, own, "model", prevStart, previousReadEnd, { ttlMs: 10 * 60000 }).then((rows) => rows.filter((row) => row.t < prevEnd)).catch(() => null),
     ]);
 
     const winModel = modelRows.filter((r) => r.t >= startMs);
@@ -86,7 +89,7 @@ export const GET = withAuth(async (request, rt) => {
     }
     // 收入确认不了时不整页报错（§8.1）：收入、毛利、净利是 null，profit.incomeUnconfirmed 说原因，成本、消费、用户照常；
     // 用户列表也读不到时 usersUnavailable 说原因，没有预收、管理员标不出
-    const income = await readOwnIncomeOrUnconfirmed(rt, own, userRows, { startMs, endMs: now, tz });
+    const income = await readOwnIncomeOrUnconfirmed(rt, own, userRows, { startMs, endMs: now, tz, since: refresh ? now : null });
     // 自营站点现在关着收费记录：消费日志不全，按用户消费算出来的收入是少的，不当收入说（用语规范 §8.1「自营站点不记收费记录了」），按钮「重新检查」
     const logOff = consumeLogStillOff(own.consumeLogOffPeriods);
     const { users: ownUsers, adminSet, usersUnavailable } = income;
@@ -182,3 +185,5 @@ export const GET = withAuth(async (request, rt) => {
     return json({ error: err?.message || String(err), code: ownStationErrorCode(err) }, 502);
   }
 });
+
+export const POST = GET;

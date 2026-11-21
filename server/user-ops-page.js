@@ -15,6 +15,23 @@ const MODELS_TTL_MS = 10 * 60000;
 const MODELS_SHOWN = 4; // 最多列 4 个，剩下的合成「其他 N 个模型」
 const toUsd = (quota) => quota / QUOTA_PER_UNIT;
 
+// 只替换今天，昨天及更早的已计算结果继续复用。
+function withToday(daily, recentHours, snapshot, tz) {
+  const start = dayStartInTz(snapshot.day, tz);
+  const hours = new Map([...recentHours].map(([name, values]) => [name, new Map([...values].filter(([hour]) => hour < start))]));
+  for (const row of snapshot.rows) {
+    if (!hours.has(row.username)) hours.set(row.username, new Map());
+    hours.get(row.username).set(row.hourMs, toUsd(row.quota));
+  }
+  const days = new Map();
+  for (const name of new Set([...daily.keys(), ...hours.keys()])) {
+    const series = [...(daily.get(name) || new Array(USERS_VIEW.DAYS).fill(0))];
+    series[series.length - 1] = [...(hours.get(name) || [])].reduce((total, [hour, usd]) => total + (hour >= start ? usd : 0), 0);
+    days.set(name, series);
+  }
+  return { daily: days, recentHours: hours };
+}
+
 const emptyHint = (own, rate, now) => ({ starting: true, asOf: now, syncedMs: null, tz: businessTimeZone(), rate, ownStationId: own.id, backfill: { done: false, days: 0, total: USER_OPS.BACKFILL_DAYS }, users: [], trend: [], big: { ready: false, ids: [], count: 0 }, summary: null, ready: {} });
 
 async function directoryOf(rt, store, stationId) {
@@ -31,15 +48,17 @@ export async function localUsersPage(rt, ops, store, { now = Date.now() } = {}) 
   const paused = rt.store.settings?.userOpsEnabled === false;
   const last = rt._userOpsPageCache?.payload;
   if (last?.ownStationId === own.id && dayKeyInTz(now, last.tz) === last.today) {
-    return { ...last, rate, paused, balanceSyncedMs: last.balanceSyncedMs ?? last.syncedMs, refreshIntervalMs: (rt.store.settings?.refreshIntervalSec || 60) * 1000, fresh: last.fresh && now - last.syncedMs <= USER_BALANCE.FRESH_MS };
+    return { ...last, rate, paused, syncErrors: rt._userOpsSyncErrors || [], balanceSyncedMs: last.balanceSyncedMs ?? last.syncedMs, refreshIntervalMs: (rt.store.settings?.refreshIntervalSec || 60) * 1000, fresh: last.fresh && now - last.syncedMs <= USER_BALANCE.FRESH_MS };
   }
   const directory = await directoryOf(rt, store, own.id);
   if (!directory) return { ...emptyHint(own, rate, now), paused, refreshIntervalMs: (rt.store.settings?.refreshIntervalSec || 60) * 1000, directoryError: paused ? null : ops.getDirectoryError() };
   rt._userOpsDirectory = directory;
   const hint = emptyHint(own, rate, now);
+  const today = rt._userOpsToday?.stationId === own.id && rt._userOpsToday.day === dayKeyInTz(now, hint.tz) ? rt._userOpsToday : null;
+  const usage = today ? withToday(new Map(), new Map(), today, hint.tz) : { daily: new Map(), recentHours: new Map() };
   return {
-    ...buildUsersView({ now, tz: hint.tz, users: directory.users, daily: new Map(), recentHours: new Map(), runways: new Map(), backfill: hint.backfill, syncedMs: directory.at }),
-    basicOnly: true, paused, rate, ownStationId: own.id, balanceSyncedMs: directory.at, refreshIntervalMs: (rt.store.settings?.refreshIntervalSec || 60) * 1000,
+    ...buildUsersView({ now, tz: hint.tz, users: directory.users, ...usage, runways: new Map(), backfill: hint.backfill, syncedMs: today?.at ?? null }),
+    basicOnly: true, paused, rate, ownStationId: own.id, todaySyncedMs: today?.at ?? null, balanceSyncedMs: directory.at, syncErrors: rt._userOpsSyncErrors || [], refreshIntervalMs: (rt.store.settings?.refreshIntervalSec || 60) * 1000,
   };
 }
 
@@ -66,7 +85,8 @@ export async function usersPage(rt, ops, store, { now = Date.now() } = {}) {
   if (!view || !users) return emptyHint(own, rate, now);
   const tz = businessTimeZone();
   const liveAt = ops.getLiveAt();
-  const key = `${liveAt}|${view.balanceAt ?? liveAt}|${tz}|${own.id}|${rate}`;
+  const today = rt._userOpsToday?.stationId === own.id && rt._userOpsToday.day === dayKeyInTz(now, tz) && rt._userOpsToday.at >= liveAt ? rt._userOpsToday : null;
+  const key = `${liveAt}|${view.balanceAt ?? liveAt}|${today?.at ?? 0}|${tz}|${own.id}|${rate}`;
   if (rt._userOpsPageCache?.key === key) return rt._userOpsPageCache.payload;
 
   const previous = rt._userOpsPageCache;
@@ -117,8 +137,9 @@ export async function usersPage(rt, ops, store, { now = Date.now() } = {}) {
     for (const day of cache.days.keys()) if (day < grid.keys[0]) cache.days.delete(day);
   }
 
-  // 余额快照最早一条的时刻、7 天前的预收：后台那一轮已经算好放在 view 里，页面不再读快照
-  const payload = { ...buildUsersView({ now, tz, users, daily, recentHours, runways: view.users, backfill: view.backfill, pointsFirstMs: view.pointsFirstMs, prepaidAgo: view.prepaidAgo, syncedMs: liveAt, fresh: view.fresh }), rate, ownStationId: own.id, level1Days: view.level1Days, balanceSyncedMs: view.balanceAt ?? liveAt };
+  if (today) ({ daily, recentHours } = withToday(daily, recentHours, today, tz));
+  // 历史统计、今日消费、余额各自保留真实同步时间。
+  const payload = { ...buildUsersView({ now, tz, users, daily, recentHours, runways: view.users, backfill: view.backfill, pointsFirstMs: view.pointsFirstMs, prepaidAgo: view.prepaidAgo, syncedMs: today?.at ?? liveAt, fresh: view.fresh }), rate, ownStationId: own.id, level1Days: view.level1Days, statsSyncedMs: liveAt, todaySyncedMs: today?.at ?? liveAt, balanceSyncedMs: view.balanceAt ?? liveAt };
   rt._userOpsPageCache = { key, payload, daily, recentHours, usageAt: liveAt };
   return payload;
 }

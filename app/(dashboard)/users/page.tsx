@@ -52,7 +52,7 @@ export default function UsersPageRoute() {
   const userId = /^\d+$/.test(params.get("user") || "") ? Number(params.get("user")) : null;
 
   const [page, setPage] = useState<UsersPage | null>(null);
-  const pollMs = Math.max(30_000, page?.refreshIntervalMs ?? 60_000);
+  const pollMs = 15_000; // 只读取本地快照，源站同步仍按设置的节拍进行。
   const [err, setErr] = useState<Error | null>(null);
   const [unset, setUnset] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -68,6 +68,7 @@ export default function UsersPageRoute() {
       setPage(res);
       setUnset(false);
       setErr(null);
+      if (rethrow && res.syncErrors?.length) throw new Error(COPY.syncPartial);
     } catch (e: any) {
       if (mine !== latest.current) return;
       // 没设置自营站点是引导场景，不当错误（接口带 OWN_STATION_UNSET）
@@ -112,12 +113,12 @@ export default function UsersPageRoute() {
   useEffect(() => {
     if (!churnOn) return;
     loadChurn();
-    return visibleInterval(() => loadChurn(), pollMs);
-  }, [churnOn, loadChurn, pollMs]);
+    return visibleInterval(() => loadChurn(), 60_000);
+  }, [churnOn, loadChurn]);
 
-  const onRefresh = useCallback(async () => { await Promise.all([load(true), churnOn ? loadChurn(true) : null]); }, [load, loadChurn, churnOn]);
+  const onRefresh = useCallback(async () => { await load(true, true); if (churnOn) await loadChurn(true); }, [load, loadChurn, churnOn]);
   // 「数据截至」写后台最近一轮采集的时刻（页面取数的时刻不代表数据新）
-  useShellPage({ onRefresh, asOf: unset || !page || page.starting ? null : page.syncedMs, autoRefreshMs: pollMs, tz: page?.tz });
+  useShellPage({ onRefresh, asOf: unset || !page || page.starting ? null : page.syncedMs, autoRefreshMs: page?.refreshIntervalMs ?? 60_000, tz: page?.tz });
 
   // 换页签：两个表的筛选各是各的，地址栏里的筛选、页码、排法、搜索的字都清掉
   const setTab = (next: TabKey) => {
@@ -133,7 +134,7 @@ export default function UsersPageRoute() {
   const onQuery = (patch: Partial<ListQuery>) => {
     if ("q" in patch) setQ(patch.q || "");
     const next = { ...urlQuery, ...patch };
-    const defaultSort = next.sort === "week" && next.dir === "desc";
+    const defaultSort = next.sort === "today" && next.dir === "desc";
     setParams({
       scope: next.scope === "active30" ? null : next.scope,
       big: next.big ? "1" : null,
@@ -187,10 +188,14 @@ export default function UsersPageRoute() {
 
   return (
     <div className="jy-page">
-      {err && !page.starting && <RefreshFailedBanner asOf={page.syncedMs} tz={page.tz} error={err} onRetry={() => load()} />}
+      {err && !page.starting && <RefreshFailedBanner asOf={page.syncedMs} tz={page.tz} error={err} onRetry={() => load(false, true)} />}
       {!err && tab === "churn" && churn && churnErr && <RefreshFailedBanner asOf={churn.syncedMs} tz={page.tz} error={churnErr} onRetry={() => loadChurn()} />}
       <Tabs<TabKey> tabs={TAB_DEFS} active={tab} onChange={setTab} idPrefix="users" label={COPY.tabsLabel} />
-      {page.balanceSyncedMs != null && <p className="jy-users-progress" role="status">{COPY.drawer.balanceReadAt(formatZonedTime(page.balanceSyncedMs, page.tz))}</p>}
+      {(page.todaySyncedMs != null || page.balanceSyncedMs != null) && <p className="jy-users-progress" role="status">
+        {page.todaySyncedMs != null && <>{COPY.consumptionReadAt(formatZonedTime(page.todaySyncedMs, page.tz))} · </>}
+        {page.balanceSyncedMs != null && COPY.drawer.balanceReadAt(formatZonedTime(page.balanceSyncedMs, page.tz))}
+      </p>}
+      {!!page.syncErrors?.length && <p className="jy-users-progress" role="alert">{COPY.syncPartial}</p>}
       {page.paused && <p className="jy-users-progress" role="status">{COPY.syncPaused}{enableSync}</p>}
       {page.basicOnly && <p className="jy-users-progress" role="status">{COPY.basicOnly}</p>}
       {progress && (

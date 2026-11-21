@@ -115,7 +115,7 @@ export default function UsagePage() {
   // 错误记下所属档位，切换档位时旧错误不会串到新档位
   const [err, setErr] = useState<{ range: string; error: Error } | null>(null);
   // 与 v1 loadUsage 相同的 30 秒前端缓存（单槽，按 range 记）
-  const cacheRef = useRef<{ range: string; at: number; data: any } | null>(null);
+  const cacheRef = useRef<{ range: string; station: string; at: number; data: any } | null>(null);
   const rangeRef = useRef<string>(range);
   rangeRef.current = range;
 
@@ -128,17 +128,17 @@ export default function UsagePage() {
 
   // 拉取用量：force 跳过缓存；tz 传浏览器时区（同 v1 api.usage）。
   // 返回这次的报错（成功、用了缓存或档位已切走时返回 null），顶栏刷新按钮原样往外抛，由外壳按码归类
-  const load = useCallback(async (force = false, r = rangeRef.current): Promise<Error | null> => {
+  const load = useCallback(async (force = false, r = rangeRef.current, refresh = false): Promise<Error | null> => {
     const cached = cacheRef.current;
-    if (!force && cached && cached.range === r && Date.now() - cached.at < 30000) {
+    if (!force && cached && cached.range === r && cached.station === station && Date.now() - cached.at < 30000) {
       setData(cached.data);
       setErr(null);
       return null;
     }
     try {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const resp = await api(`/api/usage?range=${r}&tz=${encodeURIComponent(tz)}`);
-      cacheRef.current = { range: r, at: Date.now(), data: resp };
+      const resp = await api(`/api/usage?range=${r}&tz=${encodeURIComponent(tz)}&station=${encodeURIComponent(station)}`, refresh ? { method: "POST" } : undefined);
+      cacheRef.current = { range: r, station, at: Date.now(), data: resp };
       if (rangeRef.current === r) {
         setData(resp);
         setErr(null);
@@ -150,16 +150,16 @@ export default function UsagePage() {
       setErr({ range: r, error });
       return error;
     }
-  }, []);
+  }, [station]);
 
   // 档位变化即加载；每 30 秒强制拉一次；切回标签页立即刷新（同 v1）
   useEffect(() => {
     load(false, range);
-    return visibleInterval(() => load(true), 30000);
+    return visibleInterval(() => load(true), 60000);
   }, [range, load]);
 
   // 只用属于当前档位的数据；切档位时先显示骨架，不拿上一档的数字冒充
-  const current = data && data.range === range ? data : null;
+  const current = data && data.range === range && (!data.station || data.station === station) ? data : null;
   const loadError = err && err.range === range ? err.error : null;
 
   const rangePicker = useMemo(
@@ -171,7 +171,7 @@ export default function UsagePage() {
   const tz: string | undefined = current?.tz || undefined;
   useShellPage({
     onRefresh: async () => {
-      const error = await load(true);
+      const error = await load(true, rangeRef.current, true);
       if (error) throw error;
     },
     asOf: Number.isFinite(asOf) ? asOf : null,

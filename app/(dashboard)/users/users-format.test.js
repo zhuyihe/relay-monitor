@@ -222,17 +222,21 @@ test("地址栏：不认识的页签回到概览，不认识的筛选、范围�
   assert.equal(parseScope("bogus"), "active30");
   assert.deepEqual(parseSort("balance", "asc"), { key: "balance", dir: "asc" });
   assert.deepEqual(parseSort("balance", "x"), { key: "balance", dir: "desc" });
-  assert.deepEqual(parseSort("vs", "asc"), { key: "week", dir: "desc" });
+  assert.deepEqual(parseSort(null, null), { key: "today", dir: "desc" });
+  assert.deepEqual(parseSort("vs", "asc"), { key: "today", dir: "desc" });
+  assert.deepEqual(parseSort("week", "desc"), { key: "week", dir: "desc" }, "已有的手动排序链接仍然有效");
   assert.deepEqual(parseGroups("vip, default,"), ["vip", "default"]);
   assert.deepEqual(parseGroups(null), []);
   assert.deepEqual([parsePageNo("3"), parsePageNo("0"), parsePageNo("x"), parsePageNo(null)], [3, 1, 1, 1]);
 });
 
 test("用户表的查询串：默认值不写，和接口、地址栏同一套写法", () => {
-  const base = { scope: "active30", big: false, only: "all", groups: [], sort: "week", dir: "desc", page: 1, q: "" };
+  const base = { scope: "active30", big: false, only: "all", groups: [], sort: "today", dir: "desc", page: 1, q: "" };
   assert.equal(listQueryString(base), "");
   assert.equal(listQueryString({ ...base, scope: "all", big: true, only: "soon", groups: ["vip", "default"], sort: "user", dir: "asc", page: 2, q: " ali " }), "scope=all&big=1&only=soon&group=vip%2Cdefault&sort=user&dir=asc&page=2&q=ali");
   assert.equal(listQueryString({ ...base, sort: "week", dir: "asc" }), "sort=week&dir=asc", "近 7 天消费从低到高也要写出来");
+  assert.equal(listQueryString({ ...base, sort: "week", dir: "desc" }), "sort=week&dir=desc", "近 7 天消费从高到低已不是默认，需要保留查询参数");
+  assert.equal(listQueryString({ ...base, sort: "today", dir: "asc" }), "sort=today&dir=asc");
 });
 
 // ---- 流失页签 ----

@@ -10,8 +10,11 @@ export const GET = withAuth(async (request, rt) => {
   const search = new URL(request.url).searchParams;
   const includeArchived = search.get("includeArchived") === "true";
   const includeUnmonitored = search.get("includeUnmonitored") === "true";
+  const stations = rt.store.list({ includeArchived, includeUnmonitored });
+  const checked = stations.filter((s) => !s.isOwn && !s.archivedAt && s.monitorEnabled !== false && s.type !== "fixed").map((s) => s.balance?.ok ? Date.parse(s.balance.checkedAt) : NaN);
   return json({
-    stations: rt.store.list({ includeArchived, includeUnmonitored }).map((s) => redact(rt, s)),
+    stations: stations.map((s) => redact(rt, s)),
+    asOf: checked.length && checked.every(Number.isFinite) ? Math.min(...checked) : null,
     settings: rt.store.settings,
     // 有几组上游是同一个账号、能不能合：上游列表顶上的提示用（读不到是 null）
     merge: await cachedMergeCounts(rt),

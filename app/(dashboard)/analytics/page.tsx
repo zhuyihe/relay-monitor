@@ -56,14 +56,16 @@ export default function AnalyticsPage() {
   }, []);
 
   // 返回这次加载的报错（成功或已被更新的请求取代时返回 null），顶栏刷新按钮原样往外抛，由外壳按码归类
-  const load = useCallback(async (start: string): Promise<Error | null> => {
+  const load = useCallback(async (start: string, refresh = false): Promise<Error | null> => {
     const my = ++seq.current;
     try {
-      const data = (await api("/api/reconciliation/profit", { method: "POST", body: { preset: "custom", startMs: dayStartInTz(start, tz), endMs: Date.now() } })) as ProfitPageResponse;
+      const window = { preset: "custom", startMs: dayStartInTz(start, tz), endMs: Date.now() };
+      if (refresh) await api("/api/reconciliation/query", { method: "POST", body: { ...window, observe: true } });
+      const data = (await api("/api/reconciliation/profit", { method: "POST", body: window })) as ProfitPageResponse;
       if (my !== seq.current) return null;
       setProfit(data);
       setLoadedStart(start);
-      setAsOf(Date.now());
+      setAsOf(Date.parse(data.asOf) || null);
       setLoadError(null);
       setLoading(false);
       return null;
@@ -107,10 +109,11 @@ export default function AnalyticsPage() {
 
   useShellPage({
     onRefresh: async () => {
-      const error = await load(startDay);
+      const error = await load(startDay, true);
       if (error) throw error;
     },
     asOf,
+    autoRefreshMs: POLL_MS,
     range,
     tz,
   });

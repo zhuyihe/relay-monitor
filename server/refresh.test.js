@@ -62,6 +62,15 @@ test("后台轮询：上游站点每轮都读，自营站点每 5 分钟才读�
   assert.equal(OWN_LOAD.STATION_POLL_MS, 5 * 60000);
 });
 
+test("上游页面刷新只读取上游，不启动用户采集或自营站点查询", async (t) => {
+  const { rt, calls } = makeRt(t);
+  rt.pool = {};
+  rt.userOps = { runOnce() { throw new Error("不应启动用户同步"); } };
+  await refreshAll(rt, { scope: "upstreams" });
+  assert.equal(hits(calls, "own.test"), 0);
+  assert.equal(hits(calls, "up1.test"), 1);
+});
+
 test("读不到自营站点时照样发现：后台轮询读到 401 就记 ok:false（告警评估照常），不会因为 5 分钟一次而丢；读失败的结果不被 /api/user/self 的共用留住", async (t) => {
   const { rt, stations } = makeRt(t, { ownFails: true });
   await refreshAll(rt, { background: true, now: 1000000 });

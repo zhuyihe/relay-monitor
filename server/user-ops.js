@@ -1,5 +1,5 @@
 // 用户运营（第一步：数据和后台）。「用户」是自营站点（用户自己的 New API）上的用户。
-// 挂在站点余额轮询上：名单、余额按刷新间隔更新，消费统计和余额历史每 10 分钟更新。
+// 挂在站点余额轮询上：名单、余额和今日消费按刷新间隔更新，历史统计和余额快照每 10 分钟更新。
 // 每 10 分钟：
 //   1. 本轮重新读用户列表，给每个非管理员用户记一条余额快照（变了才写，没变每天补一条）；
 //   2. 读 /api/data/users 最近 3 小时，按小时覆盖写进 user_usage_hours；
@@ -48,6 +48,7 @@ export async function forgetUserOps(rt, stationId) {
   rt._userOpsGen = (rt._userOpsGen || 0) + 1;
   rt._userOpsView = null;
   rt._userOpsDirectory = null;
+  rt._userOpsToday = null;
   rt._userOpsPageCache = null; rt._userOpsDayCache = null; rt._userOpsHourCache = null; rt._userOpsModels = null; rt._userOpsChurnModels = null;
   await (rt._userOpsStore ||= new UserOpsStore(rt.pool)).deleteStation(stationId);
 }
@@ -77,7 +78,7 @@ function guardedStore(ops, alive) {
 export function createUserOps(rt, { store = null, now = () => Date.now(), send = broadcast } = {}) {
   const opsStore = () => store || (rt.pool ? (rt._userOpsStore ||= new UserOpsStore(rt.pool)) : null);
   const lastPoints = new Map(); // 站点 id → Map(用户 id → { t, balanceUsd })，第一次从库里读，之后在内存里跟着写
-  const state = { lastRunAt: 0, lastBalanceAt: 0, lastPruneAt: 0, inflight: null, directory: null, lastUsers: null, gen: 0, error: null, runwayInputs: new Map(), usageSyncedMs: null };
+  const state = { lastRunAt: 0, lastBalanceAt: 0, lastPruneAt: 0, inflight: null, liveInflight: null, directory: null, lastUsers: null, gen: 0, error: null, runwayInputs: new Map(), usageSyncedMs: null };
   let alive = () => {}; // 这一轮的「站点没被删、没换地址」检查，run 开头换成这一轮自己的（同一时间只跑一轮）
 
   const budgetOk = (own, needed = 1) => {
@@ -260,6 +261,67 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     }
   }
 
+  // 手动刷新只同步当前余额和今天的用量，不等待正在进行的历史回补。
+  async function refreshLive() {
+    if (rt.store?.settings?.userOpsEnabled === false) return { skipped: "off" };
+    const own = ownStationOf(rt), rawOps = opsStore();
+    if (!own || !rawOps) return { skipped: "no-own" };
+    if (!budgetOk(own, 2)) return { skipped: "budget" };
+    const at = now(), gen = rt._userOpsGen || 0;
+    const check = () => { if ((rt._userOpsGen || 0) !== gen) throw Object.assign(new Error("stale"), { code: STALE }); };
+    const ops = guardedStore(rawOps, check);
+    const out = { snapshots: 0, usageRows: 0, errors: [], liveOnly: true };
+    state.lastBalanceAt = at;
+    try {
+      await readDirectory(own, ops, at, at);
+      await ops.saveProgress(own.id, { balanceSyncedMs: at }, at);
+    } catch (error) {
+      if (error?.code === STALE) return { skipped: "changed" };
+      out.errors.push(`users:${error?.code || "ERROR"}`);
+    }
+    const tz = businessTimeZone(), day = dayKeyInTz(at, tz), start = dayStartInTz(day, tz);
+    try {
+      if (!budgetOk(own)) throw Object.assign(new Error("busy"), { code: "BUSY" });
+      const rows = await queryOwnData(own, start, at, "user", { includeQuotaUnits: true });
+      check();
+      await ops.upsertUsageHours(own.id, usageRows(rows));
+      await ops.saveProgress(own.id, { usageSyncedMs: at }, at);
+      rt._userOpsToday = { stationId: own.id, day, at, rows: usageRows(rows) };
+      state.usageSyncedMs = at;
+      out.usageRows = rows.length;
+    } catch (error) {
+      if (error?.code === STALE) return { skipped: "changed" };
+      out.errors.push(`usage:${error?.code || "ERROR"}`);
+    }
+    const previous = rt._userOpsView;
+    if (previous?.stationId === own.id) {
+      const users = new Map();
+      const todayHours = new Map();
+      if (rt._userOpsToday?.day === day) for (const row of rt._userOpsToday.rows) {
+        if (!todayHours.has(row.username)) todayHours.set(row.username, []);
+        todayHours.get(row.username).push([row.hourMs, toUsd(row.quota)]);
+      }
+      for (const user of (state.lastUsers || []).filter((item) => item.role < 10 && item.status === 1)) {
+        const id = Number(user.id), inputs = state.runwayInputs.get(id);
+        const points = inputs?.points?.length ? [...inputs.points, [rt._userOpsDirectory.at, user.quotaUsd]] : [[rt._userOpsDirectory.at, user.quotaUsd]];
+        const hours = new Map(inputs?.hours);
+        if (rt._userOpsToday?.day === day) {
+          for (const hour of hours.keys()) if (hour >= start) hours.delete(hour);
+          for (const [hour, usd] of todayHours.get(user.username) || []) hours.set(hour, usd);
+        }
+        const runway = userRunway({ points, hours, now: at, syncedMs: state.usageSyncedMs ?? 0, level1Days: previous.level1Days });
+        users.set(id, { ...previous.users.get(id), id, username: user.username, ...runway });
+      }
+      const fresh = state.usageSyncedMs != null && at - state.usageSyncedMs <= USER_BALANCE.FRESH_MS && at - rt._userOpsDirectory.at <= USER_BALANCE.FRESH_MS;
+      const view = { ...previous, users, balanceAt: rt._userOpsDirectory.at, fresh, pushAllowed: fresh && previous.backfill.core };
+      rt._userOpsView = view;
+      await usersPage(rt, api, ops, { now: at });
+      out.alerts = await alerts(ops, own, at, view);
+    }
+    rt._userOpsSyncErrors = out.errors;
+    return out;
+  }
+
   async function run({ force = false } = {}) {
     if (rt.store?.settings?.userOpsEnabled === false) return { skipped: "off" };
     const own = ownStationOf(rt), rawOps = opsStore();
@@ -267,10 +329,11 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     const at = now();
     const intervalMs = (rt.store.settings?.refreshIntervalSec || 60) * 1000;
     const full = force || at - state.lastRunAt >= USER_OPS.INTERVAL_MS;
-    if (!full && at - state.lastBalanceAt < intervalMs) return { skipped: "interval" };
-    if (!budgetOk(own, full ? 2 : 1)) return { skipped: "budget" };
+    if (!full && Math.floor(at / intervalMs) === Math.floor(state.lastBalanceAt / intervalMs)) return { skipped: "interval" };
+    if (!full) return api.refreshLive();
+    if (!budgetOk(own, 2)) return { skipped: "budget" };
     state.lastBalanceAt = at;
-    if (full) state.lastRunAt = at;
+    state.lastRunAt = at;
     // 站点被删、换了地址（forgetUserOps 把代数加一）：内存里的快照缓存、用户列表是旧站的，清掉；这一轮从头记住自己的代数
     const gen = rt._userOpsGen || 0;
     if (state.gen !== gen) { lastPoints.clear(); state.runwayInputs.clear(); state.lastUsers = null; state.error = null; state.gen = gen; }
@@ -280,29 +343,6 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
     const note = (out, tag, error) => { if (error?.code === STALE) throw error; out.errors.push(`${tag}:${error?.code || "ERROR"}`); };
     const out = { snapshots: 0, usageRows: 0, errors: [] };
     try {
-      if (!full) {
-        try {
-          const list = await readDirectory(own, ops, at, at);
-          const previous = rt._userOpsView;
-          if (previous?.stationId === own.id) {
-            const users = new Map();
-            for (const user of list.filter((item) => item.role < 10 && item.status === 1)) {
-              const id = Number(user.id), inputs = state.runwayInputs.get(id);
-              // 预测沿用上次整轮的历史，加上本轮真实余额；小时用量和长期快照在整轮里更新。
-              const points = inputs?.points?.length ? [...inputs.points, [at, user.quotaUsd]] : [[at, user.quotaUsd]];
-              const runway = userRunway({ points, hours: inputs?.hours, now: at, syncedMs: state.usageSyncedMs ?? 0, level1Days: previous.level1Days });
-              users.set(id, { ...previous.users.get(id), id, username: user.username, ...runway });
-            }
-            const fresh = state.usageSyncedMs != null && at - state.usageSyncedMs <= USER_BALANCE.FRESH_MS;
-            const view = { ...previous, users, balanceAt: at, fresh, pushAllowed: fresh && previous.backfill.core };
-            rt._userOpsView = view;
-            try { await usersPage(rt, api, ops, { now: at }); } catch (error) { note(out, "page", error); }
-            out.alerts = await alerts(ops, own, at, view);
-          }
-        } catch (error) { note(out, "users", error); }
-        out.balanceOnly = true;
-        return out;
-      }
       try { out.snapshots = await snapshotBalances(ops, own, at); } catch (error) { note(out, "users", error); }
       alive();
       if (budgetOk(own)) { try { out.usageRows = await syncUsage(ops, own, at); } catch (error) { note(out, "usage", error); } }
@@ -319,6 +359,7 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
         await pruneIfDue(ops, own, at);
       } catch (error) { note(out, "evaluate", error); }
       out.backfill = backfillState;
+      rt._userOpsSyncErrors = out.errors;
       return out;
     } catch (error) {
       if (error?.code === STALE) return { skipped: "changed" };
@@ -327,8 +368,14 @@ export function createUserOps(rt, { store = null, now = () => Date.now(), send =
   }
 
   const api = {
+    refreshLive() { return state.liveInflight ||= refreshLive().finally(() => { state.liveInflight = null; }); },
     // 同一时间只跑一轮；调用方不用等（轮询里不阻塞）
-    runOnce(options) { return state.inflight ||= run(options).finally(() => { state.inflight = null; }); },
+    runOnce(options) {
+      // 历史任务较慢时，分钟同步仍独立进行。
+      const intervalMs = (rt.store.settings?.refreshIntervalSec || 60) * 1000;
+      if (state.inflight && Math.floor(now() / intervalMs) > Math.floor(state.lastBalanceAt / intervalMs)) return api.refreshLive();
+      return state.inflight ||= run(options).finally(() => { state.inflight = null; });
+    },
     async syncDirectory() {
       if (rt.store?.settings?.userOpsEnabled === false) return { code: "USER_DATA_DISABLED", status: 403 };
       const own = ownStationOf(rt), rawOps = opsStore();

@@ -25,7 +25,7 @@ export type UsersList = {
 export type UsersPage = {
   starting?: boolean; unset?: boolean; asOf: number; syncedMs: number; tz: string; today: string; rate: number; ownStationId: string; level1Days?: number;
   basicOnly?: boolean; paused?: boolean; directoryError?: string | null;
-  balanceSyncedMs?: number; refreshIntervalMs?: number;
+  balanceSyncedMs?: number; todaySyncedMs?: number | null; statsSyncedMs?: number; refreshIntervalMs?: number; syncErrors?: string[];
   ready: { backfillDone?: boolean; week?: boolean; compare?: boolean; churn?: boolean; down?: boolean; balance?: boolean; prepaidCompare?: boolean };
   availableDays: number; fresh: boolean;
   backfill: { done: boolean; core?: boolean; days: number; total: number };
@@ -159,7 +159,7 @@ export const parseOnly = (raw: string | null): Only => ((ONLY_VALUES as readonly
 export const parseScope = (raw: string | null): Scope => (raw === "all" ? "all" : "active30");
 export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "last"];
 export const parseSort = (raw: string | null, dir: string | null): { key: SortKey; dir: "asc" | "desc" } =>
-  ((SORT_KEYS as readonly string[]).includes(raw ?? "") ? { key: raw as SortKey, dir: dir === "asc" ? "asc" : "desc" } : { key: "week", dir: "desc" });
+  ((SORT_KEYS as readonly string[]).includes(raw ?? "") ? { key: raw as SortKey, dir: dir === "asc" ? "asc" : "desc" } : { key: "today", dir: "desc" });
 export const parseGroups = (raw: string | null): string[] => (raw ? raw.split(",").map((value) => value.trim()).filter(Boolean) : []);
 export const parsePageNo = (raw: string | null): number => (/^\d+$/.test(raw || "") && Number(raw) >= 1 ? Number(raw) : 1);
 
@@ -171,7 +171,7 @@ export function listQueryString(query: ListQuery): string {
   if (query.big) params.set("big", "1");
   if (query.only !== "all") params.set("only", query.only);
   if (query.groups.length) params.set("group", query.groups.join(","));
-  if (query.sort !== "week" || query.dir !== "desc") { params.set("sort", query.sort); params.set("dir", query.dir); }
+  if (query.sort !== "today" || query.dir !== "desc") { params.set("sort", query.sort); params.set("dir", query.dir); }
   if (query.page > 1) params.set("page", String(query.page));
   if (query.q.trim()) params.set("q", query.q.trim());
   return params.toString();

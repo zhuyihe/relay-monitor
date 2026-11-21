@@ -112,7 +112,7 @@ export default function OverviewPage() {
       if (r?.settings) setSettings(r.settings);
       if (r?.tz) setStationsTz(r.tz);
       setStationsErr(null);
-      setStationsAt(Date.now());
+      setStationsAt(r.asOf ?? null);
       return null;
     } catch (e: any) {
       setStationsErr(e);
@@ -126,7 +126,7 @@ export default function OverviewPage() {
       const r = (await api("/api/reconciliation/profit", { method: "POST", body: { preset: "today" } })) as ProfitPageResponse;
       setProfit(r);
       setProfitErr(null);
-      setProfitAt(Date.now());
+      setProfitAt(Date.parse(r.asOf) || null);
       return null;
     } catch (e: any) {
       setProfitErr(e);
@@ -163,11 +163,15 @@ export default function OverviewPage() {
 
   // 刷新全部上游后重新加载本页；重新加载失败时抛错由顶栏提示，有上游读不到余额时如实说明
   const onRefresh = async () => {
-    const r = await api("/api/refresh", { method: "POST", body: {} });
+    const updates = await Promise.allSettled([
+      api("/api/refresh", { method: "POST", body: { scope: "upstreams" } }),
+      api("/api/reconciliation/query", { method: "POST", body: { preset: "today", observe: true } }),
+    ]);
     const [stationsLoadErr, profitLoadErr] = await Promise.all([loadStations(), loadProfit(), reloadWorkflowActions()]);
     const err = stationsLoadErr || profitLoadErr;
     if (err) throw err;
-    const done = refreshAllText(r?.stations);
+    for (const result of updates) if (result.status === "rejected") throw result.reason;
+    const done = refreshAllText(updates[0].status === "fulfilled" ? updates[0].value?.stations : []);
     if (done.failed) message.warning(done.text);
     else message.success(done.text);
   };
@@ -190,6 +194,7 @@ export default function OverviewPage() {
   const asOfs = [stationsAt, profitAt].filter((t): t is number => t != null);
   useShellPage({
     onRefresh,
+    autoRefreshMs: intervalSec * 1000,
     asOf: asOfs.length ? Math.min(...asOfs) : null,
     tz: profit?.tz || stationsTz || undefined,
   });

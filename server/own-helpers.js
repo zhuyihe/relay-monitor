@@ -319,12 +319,12 @@ export async function readOwnAdminDirectory(rt, own, { fresh = false, freshSince
  * 分日金额按实际金额累计舍入到分，逐日之和与 computeProfit 的收入一致。
  * 任一必要的角色/转售读取没成即报不可确认，页面和日报不能继续发布看似完整的利润。
  */
-export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
+export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz, since = 0 }) {
   // 有消费的用户不在用户列表里、转售 Key 所属的用户在列表里不是管理员：多半是刚注册、刚提成管理员，
   // 要一份这次请求开始以后发出的列表再判断（手里这份就是的话直接用）。重读过还对不上的名字记 1 分钟，这期间不再为它们重读
   const requestedAt = Date.now();
   let entry;
-  try { entry = await readOwnUsers(rt, own); }
+  try { entry = await readOwnUsers(rt, own, since); }
   catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
   const missing = (list) => {
     const roles = new Map(list.map((u) => [u.username, u.role]));
@@ -413,9 +413,9 @@ export function sharedOwnChannelList(rt, own) {
   const cc = rt._ownChannelsCache;
   return cc?.list && cc.stationId === own.id && (cc.key == null || cc.key === ownChannelsKey(own)) && Date.now() - cc.at <= OWN_CHANNELS_TTL_MS ? cc.list : null;
 }
-export async function ownChannelList(rt, own, { beforeRead = null } = {}) {
+export async function ownChannelList(rt, own, { beforeRead = null, refresh = false } = {}) {
   const shared = sharedOwnChannelList(rt, own);
-  if (shared) return shared;
+  if (shared && !refresh) return shared;
   beforeRead?.();
   const list = await queryOwnChannels(own);
   seedOwnChannelList(rt, own, list);

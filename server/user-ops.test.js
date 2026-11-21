@@ -6,6 +6,7 @@ import { bigUsersSummary, localUsersPage, userDetail, usersPage, usersResponse }
 import { churnResponse } from "./user-ops-churn.js";
 import { MemoryUserOpsStore } from "./test-support/user-ops-memory-store.js";
 import { noteOwnRequest, resetOwnRequestBudget } from "../lib/own-request-budget.js";
+import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 
 const H = 3600000, MIN = 60000;
 const START = Date.parse("2026-11-01T12:00:00Z");
@@ -35,7 +36,7 @@ function makeSite(t, users, { rules = {}, settings = {}, channels = [{ id: "c1",
     if (url.pathname === "/api/data/users") {
       const start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
       const isDay = end - start > 4 * 3600;
-      if (site.soft || (isDay && site.softBackfill)) return soft;
+      if (site.soft || site.softUsage || (isDay && site.softBackfill)) return soft;
       const rows = [];
       for (const user of site.users) {
         if (!(user.burn > 0)) continue;
@@ -642,8 +643,8 @@ test("手动首次同步只读名单，重启仍能看到名单和余额，历�
   const after = f.site.requests.length;
   assert.equal((await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now })).basicOnly, undefined);
   f.clock.now += 5 * MIN;
-  assert.equal((await f.ops.runOnce()).balanceOnly, true);
-  assert.deepEqual(f.site.requests.slice(after), ["/api/user/"]);
+  assert.equal((await f.ops.runOnce()).liveOnly, true);
+  assert.deepEqual(f.site.requests.slice(after), ["/api/user/", "/api/data/users?day"]);
   f.clock.now += 5 * MIN;
   assert.equal((await f.ops.runOnce()).backfill.steps, 3);
 });
@@ -659,8 +660,8 @@ test("余额按刷新间隔自动更新，绕过旧名单缓存，首页和客�
   f.clock.now += 15000;
   assert.deepEqual(await f.ops.runOnce(), { skipped: "interval" });
   f.clock.now += 15000;
-  assert.equal((await f.ops.runOnce()).balanceOnly, true);
-  assert.deepEqual(f.site.requests.slice(before), ["/api/user/"], "只读一次名单，不读小时用量或回补");
+  assert.equal((await f.ops.runOnce()).liveOnly, true);
+  assert.deepEqual(f.site.requests.slice(before), ["/api/user/", "/api/data/users?day"], "批量读取名单和今日消费，不触发历史回补");
   const page = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
   assert.equal(page.users.find((item) => item.id === 1).balanceUsd, 123.45);
   assert.equal(page.balanceSyncedMs, f.clock.now);
@@ -671,6 +672,78 @@ test("余额按刷新间隔自动更新，绕过旧名单缓存，首页和客�
   assert.equal(f.store.calls.addBalancePoints, snapshots, "长期快照仍按原来的 10 分钟写入");
 });
 
+test("分钟同步不因定时器几毫秒的偏差漏掉一轮", async (t) => {
+  const f = makeSite(t, [{ id: 1, username: "alice", balance: 100, burn: 1 }]);
+  f.clock.now += 123;
+  await f.ops.runOnce();
+  f.clock.now += MIN - 1;
+  assert.equal((await f.ops.runOnce()).liveOnly, true);
+});
+
+test("今天消费和余额自动同步：更新排名、今日合计和详情，不读取历史表", async (t) => {
+  const f = makeSite(t, [{ id: 1, username: "older", balance: 100, burn: 5 }, { id: 2, username: "today", balance: 100, burn: 1 }]);
+  await f.step();
+  const first = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+  const historyReads = f.store.calls.listUsageHours;
+  const before = f.site.requests.length;
+  f.site.users[1].burn = 20;
+  f.clock.now += MIN;
+  await f.ops.runOnce();
+  const page = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+  const rows = usersResponse(page, new URLSearchParams()).list.rows;
+  assert.equal(rows[0].username, "today");
+  assert.ok(rows[0].today > first.users.find((row) => row.id === 2).today);
+  assert.equal(page.todaySyncedMs, f.clock.now);
+  assert.equal(page.summary.todayCost, page.users.reduce((sum, row) => sum + row.today, 0));
+  assert.equal(f.store.calls.listUsageHours, historyReads);
+  assert.equal(f.site.requests.length - before, 2, "用户数量不改变这一轮批量请求的数量");
+  const detail = await userDetail(f.rt, f.ops, f.store, 2, { now: f.clock.now });
+  assert.equal(detail.user.today, rows[0].today);
+});
+
+test("跨天只统计新一天；消费同步失败保留旧消费，成功的余额仍更新", async (t) => {
+  const f = makeSite(t, [{ id: 1, username: "alice", balance: 100, burn: 2 }]);
+  const tz = businessTimeZone(), next = shiftDayLabel(dayKeyInTz(f.clock.now, tz), 1);
+  f.clock.now = dayStartInTz(next, tz) - MIN;
+  await f.ops.runOnce();
+  const yesterday = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+  f.clock.now += 2 * MIN;
+  await f.ops.runOnce();
+  const today = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+  assert.equal(today.today, next);
+  assert.equal(today.users[0].today, 2);
+  assert.ok(yesterday.users[0].today > today.users[0].today);
+  f.site.softUsage = true;
+  f.site.users[0].balance = 40;
+  f.clock.now += MIN;
+  await f.ops.refreshLive();
+  const partial = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+  assert.equal(partial.users[0].balanceUsd, 40);
+  assert.equal(partial.todaySyncedMs, today.todaySyncedMs);
+  assert.equal(partial.users[0].today, 2);
+  assert.equal(partial.syncErrors.length, 1);
+});
+
+test("手动刷新不等待历史计算，并在同一分钟内真正同步新数据", async (t) => {
+  const f = makeSite(t, [{ id: 1, username: "alice", balance: 100, burn: 1 }]);
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  const original = f.store.listUsageHours.bind(f.store);
+  t.mock.method(f.store, "listUsageHours", async (...args) => { entered(); await gate; return original(...args); });
+  const history = f.ops.runOnce();
+  await started;
+  try {
+    f.site.users[0].balance = 42;
+    f.clock.now += 1;
+    const result = await f.ops.refreshLive();
+    assert.equal(result.liveOnly, true);
+    const page = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
+    assert.equal(page.users[0].balanceUsd, 42);
+    assert.ok(page.users[0].today > 0);
+  } finally { release(); await history; }
+});
+
 test("重点用户余额用完：一分钟后的自动余额轮询当轮提醒，重读不重复提醒", async (t) => {
   const f = makeSite(t, crowd(), { rules: { onUserEta: false } });
   await f.stepsTo(25);
@@ -679,11 +752,11 @@ test("重点用户余额用完：一分钟后的自动余额轮询当轮提醒�
   f.site.users.find((item) => item.id === 1).balance = 0;
   f.clock.now += MIN;
   const out = await f.ops.runOnce();
-  assert.equal(out.balanceOnly, true);
+  assert.equal(out.liveOnly, true);
   assert.equal(out.alerts.pushed, 1);
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].title, /余额用完/);
-  assert.deepEqual(f.site.requests.slice(before), ["/api/user/"]);
+  assert.deepEqual(f.site.requests.slice(before), ["/api/user/", "/api/data/users?day"]);
   assert.equal(f.store.calls.listUsageHours, reads);
   const page = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
   assert.equal(page.users.find((item) => item.id === 1).status, "empty");
@@ -698,7 +771,7 @@ test("自动余额读取失败保留旧余额和读取时刻，关闭读取以�
   const first = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
   f.site.soft = true;
   f.clock.now += MIN;
-  assert.equal((await f.ops.runOnce()).errors.length, 1);
+  assert.equal((await f.ops.runOnce()).errors.length, 2);
   const failed = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
   assert.equal(failed.balanceSyncedMs, first.balanceSyncedMs);
   assert.equal(failed.users[0].balanceUsd, first.users[0].balanceUsd);

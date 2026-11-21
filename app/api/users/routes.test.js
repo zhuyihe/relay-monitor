@@ -55,7 +55,7 @@ test("后台还没读到过数：整页是 starting（页面写数据补全中�
   assert.equal((await missing.json()).code, "USER_NOT_FOUND");
 });
 
-test("打开概览或流失不采集，首次手动同步只读普通用户名单和余额", async (t) => {
+test("打开概览或流失不采集，手动同步批量读取普通用户余额和今天消费", async (t) => {
   const rt = fresh();
   const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({
     success: true, data: { items: [{ id: 7, username: "alice", role: 1, status: 1, quota: 625000 }], total: 1 },
@@ -68,7 +68,7 @@ test("打开概览或流失不采集，首次手动同步只读普通用户名�
   const page = await response.json();
   assert.equal(page.basicOnly, true);
   assert.deepEqual(page.list.rows.map(({ username, balanceUsd }) => [username, balanceUsd]), [["alice", 1.25]]);
-  assert.equal(fetch.mock.callCount(), 1);
+  assert.equal(fetch.mock.callCount(), 2);
   assert.equal(new URL(fetch.mock.calls[0].arguments[0]).pathname, "/api/user/");
 });
 

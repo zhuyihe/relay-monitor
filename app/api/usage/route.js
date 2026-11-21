@@ -10,14 +10,15 @@ export const GET = withAuth(async (request, rt) => {
   const usageCache = (rt._usageCache ||= new Map());
   const sp = new URL(request.url).searchParams;
   const range = ["today", "24h", "7d", "30d"].includes(sp.get("range")) ? sp.get("range") : "today";
+  const stationId = sp.get("station");
   // 用浏览器时区分桶：sub2api 站点面板也是按浏览器时区统计的，
   // 这样「今天」的口径和用户在站点上看到的完全一致
   let tz = String(sp.get("tz") || "");
   if (!isValidTimeZone(tz)) tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-  const cacheKey = `${range}|${tz}`;
+  const cacheKey = `${range}|${tz}|${stationId || "*"}`;
   const hit = usageCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < 60000) return json(hit.payload);
+  if (request.method !== "POST" && hit && Date.now() - hit.at < 60000) return json(hit.payload);
 
   const now = Date.now();
   let startMs, granularity;
@@ -33,7 +34,7 @@ export const GET = withAuth(async (request, rt) => {
   }
   const endMs = now;
 
-  const stations = await Promise.all(store.list().filter((s) => s.type !== "fixed").map(async (s) => {
+  const stations = await Promise.all(store.list().filter((s) => s.type !== "fixed" && (!stationId || (stationId === "all" ? !s.isOwn : s.id === stationId))).map(async (s) => {
     const meta = { id: s.id, name: s.name, type: s.type, cnyPerUsd: s.cnyPerUsd ?? null, isOwn: !!s.isOwn };
     try {
       const u = await queryStationUsage(s, {
@@ -49,7 +50,9 @@ export const GET = withAuth(async (request, rt) => {
   }));
   await store.save(); // sub2api 密码模式可能在查询中轮换了令牌
 
-  const payload = { range, granularity, startMs, endMs, tz, stations, generatedAt: new Date().toISOString() };
+  const payload = { range, station: stationId, granularity, startMs, endMs, tz, stations, generatedAt: new Date().toISOString() };
   usageCache.set(cacheKey, { at: Date.now(), payload });
   return json(payload);
 });
+
+export const POST = GET;

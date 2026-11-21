@@ -32,6 +32,8 @@ export const COPY = Object.freeze({
   bigTip: (own: number, count: number, group: number) => `重点用户：占近 7 天消费 ${own}%。${count} 个重点用户合起来占 ${group}%`,
   bigTipPlain: "重点用户",
   disabled: "已禁用",
+  syncPartial: "部分数据未能同步，请查看消费和余额的更新时间。",
+  consumptionReadAt: (time: string) => `消费读于 ${time}`,
   // 概览
   overview: Object.freeze({
     sentenceWait: "数据补全中，补满以后再说近 7 天谁在涨、谁在掉。",

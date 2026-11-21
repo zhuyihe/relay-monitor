@@ -1,5 +1,5 @@
 "use client";
-// 用户：一个用户表（design 用户运营 v6 §3、v7 §3、v8 §2）。默认只列近 30 天有消费的人，按近 7 天消费从高到低，每页 50 个；
+// 用户：一个用户表（design 用户运营 v6 §3、v7 §3、v8 §2）。默认只列近 30 天有消费的人，按今日消费从高到低，每页 50 个；
 // 筛选、排序、分页都在服务端（/api/users），这里只管摆：范围 | 只看重点用户 | 状态 | 分组，右边搜索；点一行开抽屉。手机是一人一张卡片。
 import { useEffect, useState } from "react";
 import { Button, Grid, Input, Select, Tooltip } from "antd";
@@ -93,7 +93,7 @@ export function UsersTab({
       render: (r) => (<span className="jy-cell-two jy-cell-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
       foot: weekOk ? money(list.totals.week, rate) : EMPTY,
     },
-    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => page.basicOnly ? EMPTY : money(r.today, rate), foot: page.basicOnly ? EMPTY : money(list.totals.today, rate) },
+    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate), foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
     {
       key: "balance", label: COPY.users.cols.balanceDays, sort: noop,
       render: (r) => (<span className="jy-cell-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
@@ -186,7 +186,7 @@ export function UsersTab({
                 <button type="button" className="jy-users-card" aria-label={COPY.users.rowOpen(row.username)} onClick={() => onOpenUser(row.id)}>
                   <span className="r1">
                     <span className="jy-users-name"><b>{row.username}</b>{row.big && <BigTag plain tip={bigTipText(row, page)} />}<StatusTag status={row.status} /></span>
-                    <b className="jy-users-week">{weekOk ? money(row.week, rate) : EMPTY}</b>
+                    <b className="jy-users-week">{query.sort === "today" ? <>{COPY.users.cols.today} {page.basicOnly && !page.todaySyncedMs ? EMPTY : money(row.today, rate)}</> : weekOk ? money(row.week, rate) : EMPTY}</b>
                   </span>
                   <span className="r2">
                     <SparkLine values={sparkValues(row, page.availableDays)} gray={row.status === "down" || row.status === "churned"} label={COPY.users.sparkLabel(row.username)} />

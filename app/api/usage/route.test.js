@@ -15,6 +15,19 @@ async function usageRoute() {
   finally { hook.deregister(); }
 }
 
+test("手动刷新绕过服务端缓存，普通读取复用最近一次真实结果", async (t) => {
+  let cost = 1, reads = 0;
+  t.mock.method(globalThis, "fetch", async () => { reads++; return Response.json({ success: true, data: [{ created_at: Math.floor(Date.now() / 1000) - 1, quota: cost * 500000, model_name: "m", token_used: 1, count: 1 }] }); });
+  const rt = { store: { list: () => [{ id: "up", type: "newapi", baseUrl: "https://usage.test", accessToken: "test" }], save: async () => {} } };
+  const { GET, POST } = await usageRoute();
+  const url = "https://local.test/api/usage?range=today&tz=Asia%2FShanghai";
+  await GET(new Request(url), rt);
+  cost = 9;
+  assert.equal((await (await GET(new Request(url), rt)).json()).stations[0].summary.cost, 1);
+  assert.equal((await (await POST(new Request(url, { method: "POST" }), rt)).json()).stations[0].summary.cost, 9);
+  assert.equal(reads, 2);
+});
+
 for (const [name, range, tz, nowIso, startIso] of [
   ["春季切换后的今天不含昨天最后一小时", "today", "America/Los_Angeles", "2026-03-08T19:00:00Z", "2026-03-08T08:00:00Z"],
   ["秋季切换后的今天保留第一个小时", "today", "America/Los_Angeles", "2026-11-01T20:00:00Z", "2026-11-01T07:00:00Z"],

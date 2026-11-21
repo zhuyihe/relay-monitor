@@ -51,6 +51,22 @@ function fixture(t, { failUsers = false, userCount = 2, resold = false, failReso
   return { own, calls, controls, rt: { store: { list: () => [own] }, history: { usedBetween: () => 0 } } };
 }
 
+test("自营业务手动刷新穿透结果和原始行缓存，只重读今天的动态部分", async (t) => {
+  const f = fixture(t);
+  const { GET, POST } = await ownAnalyticsRoute();
+  const url = "https://local.test/api/own/analytics?range=7d";
+  await GET(new Request(url), f.rt);
+  const count = f.calls.length;
+  await GET(new Request(url), f.rt);
+  assert.equal(f.calls.length, count);
+  t.mock.timers.setTime(NOW + 1000);
+  const response = await POST(new Request(url, { method: "POST" }), f.rt);
+  assert.equal(response.status, 200);
+  const reads = f.calls.slice(count).filter((url) => ["/api/data/users", "/api/data/"].includes(url.pathname));
+  assert.equal(reads.length, 2);
+  assert.ok(reads.every((url) => Number(url.searchParams.get("start_timestamp")) === Date.parse("2026-10-20T00:00:00+08:00") / 1000));
+});
+
 test("自营站点现在关着收费记录：收入、毛利、净利不说数，原因写「自营站点不记收费记录了」（页面按钮「重新检查」靠这个码认），成本和用户照常", async (t) => {
   const f = fixture(t);
   f.own.consumeLogOffPeriods = [{ fromMs: NOW - 3600000, toMs: null }];
