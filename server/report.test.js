@@ -823,3 +823,21 @@ test("日报：自营站点没起名字时写「自营站点」，不写「未�
   assert.match(html, />炬元 · 自营站点 日报</);
   assert.doesNotMatch(text + html, /未命名上游/);
 });
+
+test("昨日日报沿用已保存的系数，改采购系数后仍与每日利润一致", async (t) => {
+  const h = setup(t), { dayStart } = reportDayWindow();
+  h.rt.history = { usedBetween: () => 0 };
+  h.rt.store.data.stations.push({ id: "up", name: "Up", type: "newapi", baseUrl: "https://up.test", accessToken: "fixture", cnyPerUsd: 2 });
+  h.rt.reconciliation = { financialFacts: async () => [{ upstreamStationId: "up", billDate: new Date(dayStart + 8 * 3600000).toISOString().slice(0, 10), costRate: 0.5, revenueRate: 1 }] };
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(String(input));
+    const data = url.pathname === "/api/user/" ? { items: [{ id: 1, username: "customer", role: 1 }], total: 1 }
+      : url.pathname === "/api/channel/" ? { items: [{ id: 1, name: "channel", base_url: "https://up.test", status: 1 }], total: 1 }
+        : url.pathname.startsWith("/api/data") ? [{ username: "customer", model_name: "m", created_at: dayStart / 1000 + 3600, quota: (url.host === "up.test" ? 60 : 100) * 500000, token_used: 10, count: 1 }] : [];
+    return Response.json({ success: true, data });
+  });
+  const { text } = await buildReport(h.rt);
+  assert.match(text, /收入：¥100\.00/);
+  assert.match(text, /上游成本：¥30\.00/);
+  assert.match(text, /毛利：¥70\.00/);
+});

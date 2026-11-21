@@ -3589,3 +3589,14 @@ test("采购系数不改变主站单位：摘要、行、明细都显示成本 3
   await drawer.getByText("采购系数 0.5", { exact: false }).waitFor();
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-coefficient.png` });
 });
+
+test("收入读取失败时，页顶和说明不冒充已读到现在，保留成本真实截止时间", async (t) => {
+  const row = { ...profitRow("rule-1", "Rule A"), counted: false, incomeUsd: null, actualCostUsd: null, grossProfitUsd: null };
+  const result = { ...profitPage([row]), asOf: null, ownIncomeUnavailable: { code: "OWN_BILLING_UNAVAILABLE" },
+    timing: { incomeThroughMs: null, costThroughMs: Date.parse(PROFIT_AS_OF), provisional: true } };
+  const { page } = await openDailyPage(t, { rows: [row], pageOf: () => result });
+  await page.locator(".jy-profit-caption").getByText("数据截止时间未确认", { exact: false }).waitFor();
+  await page.locator(".jy-profit-notes").getByText("收入截至 未确认", { exact: false }).waitFor();
+  assert.equal(await page.locator(".jy-freshness").count(), 0);
+  assert.doesNotMatch(await page.locator(".jy-profit-caption").innerText(), /0:00–11:00/);
+});

@@ -1954,8 +1954,8 @@ test("页面只读缓存：「数据截至」写那份数真实的时刻（轮�
   const cached = await cachedPage(f);
   assert.equal(Date.parse(cached.asOf), SH("2026-10-30T10:10:00"));
   assert.equal(Date.parse((await f.rt.reconciliation.profitPage({ preset: "today" })).asOf), SH("2026-10-30T10:12:00"));
-  await f.at("2026-10-30T10:30:00"); // 太旧、都在读取：没有真实时刻可写，用现在
-  assert.equal(Date.parse((await cachedPage(f)).asOf), SH("2026-10-30T10:30:00"));
+  await f.at("2026-10-30T10:30:00"); // 太旧、都在读取：没有真实时刻，不写查询时间
+  assert.equal((await cachedPage(f)).asOf, null);
 });
 
 test("只含今天的范围（自选今天、开始算以来都在今天、每月 1 号的本月）：和今天一样取轮询的结果，有数、不是「—」；结果太旧时「还在读取」", async (t) => {
@@ -2588,3 +2588,39 @@ for (const failing of ["listDayKeys 读对方的", "listDayKeys 读自己的", "
     assert.ok(await f.rt.reconciliation.changeRuleKeyManual(mine.ruleId, 30));
   });
 }
+
+test("历史渠道已解绑但金额计入：渠道数量与期间合计一致", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 10], noAgent: true, channelKey: {} });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T20:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-11T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier.id, tokenId: 10 });
+  await f.round("2026-10-12T10:00:00");
+  f.rt._reconciliationResultCache.clear();
+  const page = await cachedPage(f, { preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-12T00:00:00") });
+  assert.equal(page.counts.countedChannels, 2);
+  assert.equal(page.coverage.accountedChannelCount, 2);
+  assert.equal(page.coverage.channels.find((channel) => channel.channelId === 1).status, "accounted");
+  assert.equal(page.unlinkedChannelCount, 5);
+});
+
+test("主站收入读不到：保留成本真实时间，收入及整页截止时间不冒充现在", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], noAgent: true, channelKey: {} });
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T10:00:00");
+  const before = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    return url.host === "own.test" && url.pathname === "/api/log/stat"
+      ? { status: 500, text: async () => JSON.stringify({ success: false }) } : before(input, init);
+  });
+  await f.at("2026-10-10T11:00:00");
+  await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", origin: "manual", force: true });
+  const page = await cachedPage(f);
+  assert.equal(page.ownIncomeUnavailable.code, "OWN_BILLING_UNAVAILABLE");
+  assert.equal(page.timing.incomeThroughMs, null);
+  assert.equal(page.timing.costThroughMs, f.state.now);
+  assert.equal(page.asOf, null);
+});

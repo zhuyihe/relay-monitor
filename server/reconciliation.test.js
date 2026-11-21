@@ -10210,3 +10210,16 @@ test("今日桶收入保留真实截止时间，页面暂估说明不会把查�
   assert.ok(cached.timing.costThroughMs >= cached.timing.incomeThroughMs);
   assert.equal(Date.parse(cached.asOf), cached.timing.incomeThroughMs);
 });
+
+test("自营业务与日报读取每日系数：含已解绑规则，新配置不覆盖历史记录", async (t) => {
+  const f = await completedDayFixture(t);
+  const own = f.stations.find((station) => station.id === "own"), up = f.stations.find((station) => station.id === "upstream");
+  own.cnyPerUsd = 1; up.cnyPerUsd = 0.5;
+  await f.module.refreshDue(Date.now());
+  const before = structuredClone(f.state.ledger);
+  up.cnyPerUsd = 2;
+  const facts = await f.module.financialFacts({ ownStationId: own.id, startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), tz: "Asia/Shanghai" });
+  assert.equal(facts.length, 3);
+  assert.ok(facts.every((fact) => fact.costRate === 0.5 && fact.revenueRate === 1 && fact.upstreamStationId === up.id));
+  assert.deepEqual(f.state.ledger, before);
+});

@@ -136,7 +136,7 @@ export const GET = withAuth(async (request, rt) => {
     const [profit, flow] = await Promise.all([
       unconfirmed
         ? unconfirmedIncomeProfit(rt, own, unconfirmed, { startMs, now, tz, range })
-        : computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }),
+        : computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold, incomeDays: income.incomeDays }),
       // 分组 / 渠道口径：模型行里看不出「哪个分组涨了」「换到了哪个上游渠道」
       computeFlowBreakdown(rt, own, {
         startMs, endMs: now, prevStartMs: prevStart, prevEndMs: prevEnd,
@@ -167,7 +167,7 @@ export const GET = withAuth(async (request, rt) => {
       forecast: forecastDaily(daily, 7),
       hourly: hourlyForecast,
       // 按实际用户身份和转售消费分日，客户端不再用含管理员自用的模型消费猜收入形状。
-      incomeDaily,
+      incomeDaily: profit.incomeDaily ?? incomeDaily,
       incomeDailyApprox: false,
       // 所选范围碰到已经开回来的「没记收费记录」那一段：等式下面写一句灰字（还关着的那种上面已经按「收入确认不了」说了）
       profit: !unconfirmed && consumeLogOffOverlap(own.consumeLogOffPeriods, { startMs, endMs: now }).closed ? { ...profit, consumeLogGap: true } : profit,

@@ -141,7 +141,7 @@ export type ProfitPageResponse = {
   pageTotals: { incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; grossMarginRate: number | null };
   counts: { channels: number; countedChannels: number; attentionChannels: number };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
-  asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
+  asOf: string | null; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
   fixedCostMain?: number | null;
   coverage?: { knownChannelCount: number; accountedChannelCount: number; catalogueState: string; wholeSiteState: string; channels: { channelId: number; name: string; status: string }[] };
   timing?: { incomeThroughMs: number | null; costThroughMs: number | null; provisional: boolean };

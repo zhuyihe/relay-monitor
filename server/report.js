@@ -122,7 +122,7 @@ export async function buildReport(rt) {
   // 这一天的利润（成本也只算这一天）
   const profit = unconfirmed
     ? await unconfirmedIncomeProfit(rt, own, unconfirmed, { startMs: dayStart, now: dayEnd, tz, range: "7d" })
-    : await computeProfit(rt, own, incomeUsd, adminUsd, { startMs: dayStart, now: dayEnd, tz, range: "7d", resold });
+    : await computeProfit(rt, own, incomeUsd, adminUsd, { startMs: dayStart, now: dayEnd, tz, range: "7d", resold, incomeDays: income.incomeDays });
 
   // 日序列（近 34 天，不含今天）→ 环比、前 7 天日均与预测
   // 按日期标签逐日推进（不加 24h），夏令时时区也不会错位
@@ -230,8 +230,8 @@ function reportFigures(rt, { own, tz, dayStart, byModel, byUser, daily, profit, 
     title: T.title(site, day), site, day, weekday,
     spend: money(totalCost), versusLong: versus(true), versusShort: versus(false),
     incomeReason, costReason,
-    income: incomeReason ? null : money(incomeUsd, { approx: approx.income }),
-    admin: incomeReason ? null : money(adminUsd),
+    income: incomeReason ? null : formatMoney(profit.incomeCny ?? incomeUsd * ownRate, { approx: approx.income }),
+    admin: incomeReason ? null : formatMoney(profit.adminUsageCny ?? adminUsd * ownRate),
     adminPositive: !incomeReason && adminUsd > 0,
     upstream: costReason ? null : formatMoney(profit.upstreamCostCny, { approx: approx.upstream }),
     fixed: costReason ? null : formatMoney(profit.fixedCostCny),

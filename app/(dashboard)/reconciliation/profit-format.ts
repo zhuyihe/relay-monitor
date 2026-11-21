@@ -110,10 +110,10 @@ export function attentionSuffix(page: ProfitPageResponse) {
 }
 // 页顶一句（设计稿 §2）
 export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
-  const asOf = Date.parse(page.asOf);
+  const asOf = Date.parse(page.asOf ?? "");
   const suffix = attentionSuffix(page);
   const base = (() => {
-    if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)} 0:00–${formatZonedTime(Number.isFinite(asOf) ? asOf : ctx.now ?? Date.now(), ctx.tz)} · ${COPY.todayCaption}`;
+    if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)}${Number.isFinite(asOf) ? ` 0:00–${formatZonedTime(asOf, ctx.tz)}` : ` · ${COPY.cutoffUnknown}`} · ${COPY.todayCaption}`;
     const text = rangeText(page, ctx);
     if (page.range?.preset === "since") return `${text} · ${COPY.presets.since}`; // 「10月20日–今天 · 开始算以来」
     // 看一天：固定了写「已固定」；没固定、又有渠道在读取时，页顶后面那句「其中 N 个渠道还在读取」已经说了，这里不再单独写「还在读取」（不连着出现两次）

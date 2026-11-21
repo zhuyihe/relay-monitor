@@ -6,7 +6,7 @@ import {
 } from "../lib/providers.js";
 import { isAccessTokenError } from "../lib/access-token-scopes.js";
 import { businessTimeZone, dayKeyInTz, dayRangeInTz, resolveBusinessWindow } from "../lib/business-time.js";
-import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
+import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, summarizeProfit } from "../lib/profit.js";
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
 import { errorCodeOf, errorDetail, ownStationErrorCode } from "../lib/error-copy.js";
 import { ownStationDisplayName, stationDisplayName } from "../lib/overview-actions.js";
@@ -167,14 +167,23 @@ export function reconcileUsageCost(apiUsd, historyUsd) {
 
 // 一个按用量计费的上游在 [startMs, endMs) 的实际扣费（美元）。用量接口返回 0 或失败时退回余额下降推算。
 // 我的站点的利润和账单核算的「未纳入核算的上游消费」共用，两处的账号级成本才对得上。
-export async function stationUsageCost(rt, station, { startMs, endMs, tz, today = false }) {
+export async function stationUsageCost(rt, station, { startMs, endMs, tz, today = false, daily = false }) {
   const historyUsd = () => rt.history?.usedBetween(station.id, startMs, endMs) ?? 0;
+  const historyDays = () => dayRangeInTz(dayKeyInTz(startMs, tz), dayKeyInTz(endMs - 1, tz), tz).map((day) => ({ date: day.date,
+    usd: rt.history?.usedBetween(station.id, Math.max(startMs, day.startMs), Math.min(endMs, day.endMs)) ?? 0 }));
   try {
     const u = await queryStationUsage(station, { startMs, endMs, granularity: "day", tz, wantToday: today });
     const apiUsd = today && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
-    return reconcileUsageCost(apiUsd, historyUsd());
+    const selected = reconcileUsageCost(apiUsd, historyUsd());
+    if (!daily) return selected;
+    const byDay = new Map();
+    for (const point of u.trend) {
+      const date = dayKeyInTz(point.t, tz);
+      byDay.set(date, (byDay.get(date) ?? 0) + point.cost);
+    }
+    return { ...selected, days: selected.mode === "history" ? historyDays() : [...byDay].map(([date, usd]) => ({ date, usd })) };
   } catch (err) {
-    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, ...resultError(err) };
+    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, ...resultError(err), ...(daily ? { days: historyDays() } : {}) };
   }
 }
 
@@ -391,6 +400,7 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz, sin
   return {
     users, adminSet, incomeUsd, adminUsageUsd,
     incomeDaily,
+    incomeDays: days.map((day) => ({ date: day.date, incomeUsd: day.incomeUsd, adminUsageUsd: day.adminUsageUsd, resoldUsd: day.resold.resoldUsd, resoldKeys: day.resold.breakdown })),
     resold: {
       incomeUsd, adminUsageUsd,
       resoldUsd: days.reduce((a, d) => a + d.resold.resoldUsd, 0),
@@ -429,14 +439,33 @@ export async function ownChannelList(rt, own, { beforeRead = null, refresh = fal
  * 用量接口返回 0 或不可用时退回余额下降推算。渠道 URL 匹配仅用于展示流量归属。
  * 窗口为 [startMs, now]：余额推算同样截止到 now，日报算昨天时不会混入今天的消耗。
  */
-export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }) {
+export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold, incomeDays = null }) {
   const { store } = rt;
   const r2 = (v) => Math.round(v * 100) / 100;
+  let incomeMoney = {};
   try {
+    const financialFacts = await rt.reconciliation?.financialFacts?.({ ownStationId: own.id, startMs, endMs: now, tz }) ?? [];
+    const savedCostRates = new Map(), savedIncomeRates = new Map();
+    for (const fact of financialFacts) {
+      const key = `${fact.upstreamStationId}|${fact.billDate}`;
+      if (!savedCostRates.has(key)) savedCostRates.set(key, fact.costRate ?? 1);
+      if (!savedIncomeRates.has(fact.billDate)) savedIncomeRates.set(fact.billDate, fact.revenueRate ?? 1);
+    }
+    const ownRate = rateSnapshotOf(own).cnyPerUsd;
+    const incomeRate = (date) => savedIncomeRates.get(date) ?? ownRate;
+    const incomeCny = r2(incomeDays ? incomeDays.reduce((sum, day) => sum + day.incomeUsd * incomeRate(day.date), 0) : incomeUsd * ownRate);
+    let cumulativeCny = 0, previousCents = 0;
+    const incomeDaily = incomeDays?.map((day) => {
+      cumulativeCny += day.incomeUsd * incomeRate(day.date);
+      const cents = Math.round(cumulativeCny * 100), incomeCny = (cents - previousCents) / 100;
+      previousCents = cents;
+      return { date: day.date, incomeCny };
+    });
+    incomeMoney = { incomeCny, adminUsageCny: r2(incomeDays ? incomeDays.reduce((sum, day) => sum + day.adminUsageUsd * incomeRate(day.date), 0) : (adminUsageUsd || 0) * ownRate), ...(incomeDaily ? { incomeDaily } : {}) };
     const channels = await ownChannelList(rt, own);
     const { included: upstreams, excluded: excludedUpstreams } = selectCostUpstreams(store.list(), own.id);
     const { matched, unmatched } = mapCostChannels(upstreams, channels);
-
+    const dates = dayRangeInTz(dayKeyInTz(startMs, tz), dayKeyInTz(now - 1, tz), tz).map((day) => day.date);
     const windowDays = (now - startMs) / 86400000;
 
     // 固定成本：无论是否匹配到渠道都计入（服务器租金这类可以完全不填地址）。
@@ -462,14 +491,23 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
         .map(async (station) => {
           const chNames = matched.get(station.id)?.channels || [NO_MATCHED_CHANNEL];
           const item = { stationId: station.id, name: station.name, channels: chNames };
-          const selected = await stationUsageCost(rt, station, { startMs, endMs: now, tz, today: range === "today" });
-          return { ...item, ...selected, cny: toCny(selected.usd, rateSnapshotOf(station)) };
+          const selected = await stationUsageCost(rt, station, { startMs, endMs: now, tz, today: range === "today", daily: true });
+          const currentRate = rateSnapshotOf(station).cnyPerUsd;
+          const rateOfDay = (date) => savedCostRates.get(`${station.id}|${date}`) ?? currentRate;
+          const rates = new Set(dates.map(rateOfDay));
+          let cny;
+          if (rates.size === 1) cny = selected.usd * [...rates][0];
+          else {
+            const total = selected.days.reduce((sum, day) => sum + day.usd, 0);
+            if (Math.abs(total - selected.usd) > 1e-6 * Math.max(1, selected.usd)) throw Object.assign(new Error(`${stationDisplayName(station)} 每日用量没读全，成本暂时算不出`), { code: "UPSTREAM_RESPONSE_INVALID" });
+            cny = selected.days.reduce((sum, day) => sum + day.usd * rateOfDay(day.date), 0);
+          }
+          const { days, ...cost } = selected;
+          return { ...item, ...cost, cny: r2(cny) };
         })
     );
     costs.push(...usageCosts);
 
-    const ownRate = rateSnapshotOf(own).cnyPerUsd;
-    const incomeCny = r2(incomeUsd * ownRate);
     const upstreamCostCny = r2(costs.filter((c) => c.mode !== "fixed").reduce((a, c) => a + c.cny, 0));
     const fixedCostCny = r2(costs.filter((c) => c.mode === "fixed").reduce((a, c) => a + c.cny, 0));
     const summary = summarizeProfit({ incomeCny, upstreamCostCny, fixedCostCny });
@@ -491,7 +529,7 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
     if (rateUnsetStations.length) warn("rate_unset", `${rateUnsetStations.map(stationDisplayName).join("、")} ${RATE_UNSET_PARITY}`);
     if (excludedUpstreams.length) warn("excluded_upstreams", `${excludedUpstreams.map(stationDisplayName).join("、")} 不算进利润`);
     return {
-      incomeCny,
+      ...incomeMoney,
       upstreamCostCny,
       fixedCostCny,
       ...summary,
@@ -499,10 +537,9 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       totalCostCny: r2(upstreamCostCny + fixedCostCny),
       profitCny: summary.netProfitCny,
       marginPct: summary.netMarginPct,
-      adminUsageCny: r2((adminUsageUsd || 0) * ownRate),
       // 转售管理员 Key 计入收入的部分（× 售价汇率），供前端拆分展示
-      resoldCny: resold ? r2((resold.resoldUsd || 0) * ownRate) : 0,
-      resoldKeys: resold ? resold.breakdown.map((b) => ({ ...b, cny: r2(b.usd * ownRate) })) : [],
+      resoldCny: incomeDays ? r2(incomeDays.reduce((sum, day) => sum + day.resoldUsd * incomeRate(day.date), 0)) : resold ? r2((resold.resoldUsd || 0) * ownRate) : 0,
+      resoldKeys: resold ? resold.breakdown.map((b) => ({ ...b, cny: r2(incomeDays ? incomeDays.reduce((sum, day) => sum + day.resoldKeys.filter((key) => key.username === b.username && key.tokenName === b.tokenName).reduce((total, key) => total + key.usd, 0) * incomeRate(day.date), 0) : b.usd * ownRate) })) : [],
       costs: costs.sort((a, b) => b.cny - a.cny),
       unmatched: unmatchedList,
       complete: !ownPriceUnset && rateUnsetStations.length === 0,
@@ -516,7 +553,7 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
   } catch (err) {
     // 整块读不到只会是读自营站点的渠道列表没成（各上游的用量读不到时改按余额变化估算，不到这里）。
     // error 是原文，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
-    return ownStationError(err);
+    return { ...incomeMoney, ...ownStationError(err) };
   }
 }
 

@@ -374,3 +374,9 @@ test("Key 标签的日子：「现在」和起始日同月不带月份、跨月�
   assert.notEqual(tag("2026-10-31T16:01:00Z"), COPY.table.keyActiveSince("6日"), "上海已经是 11-01：跨月，带月份");
   assert.match(tag("2026-10-31T16:01:00Z"), /10月6日/);
 });
+
+test("数据截止时间未确认时，页顶说明不回退到当前时间", () => {
+  const caption = rangeCaption(todayPage({ asOf: null }), ctx);
+  assert.match(caption, /数据截止时间未确认/);
+  assert.doesNotMatch(caption, /0:00–14:30/);
+});

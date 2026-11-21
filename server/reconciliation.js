@@ -4243,6 +4243,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     async upstreamTokens(stationId) {
       try { return (await api.getUpstreamKeys(stationId)).tokens; } catch { return null; }
     },
+    // 自营业务和日报复用每日已保存的系数；只读本地账本，不请求上游、不重结。
+    async financialFacts({ ownStationId, startMs, endMs, tz }) {
+      const rules = (await repository.listRules({ includeArchived: true })).filter((rule) => rule.ownStationId === ownStationId);
+      const byId = new Map(rules.map((rule) => [rule.id, rule]));
+      const facts = await repository.listLedgerDayFacts(rules.map((rule) => rule.id), dayKeyInTz(startMs, tz), dayKeyInTz(endMs - 1, tz));
+      return facts.map((fact) => ({ ...fact, upstreamStationId: byId.get(fact.ruleId).upstreamStationId }));
+    },
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
     async profitPage(rawInput = {}, { cacheOnly = false } = {}) {
@@ -4320,16 +4327,27 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         historicalRatePreview.costAfter += costInMainUnit(cost, fact.costRate ?? 1, fact.revenueRate ?? 1);
       }
       const current = labels.includes(todayLabel) ? results.filter((row) => !row.todayReading && (!cacheOnly || row.todayReadAtMs != null)) : [];
-      const incomeThroughMs = current.length ? Math.min(...current.map((row) => row.downstream?.dataThroughMs ?? row.todayReadAtMs ?? row.window.endMs)) : null;
-      const costThroughMs = current.length ? Math.min(...current.map((row) => row.upstream?.dataThroughMs ?? row.todayReadAtMs ?? row.window.endMs)) : null;
-      const timing = { incomeThroughMs, costThroughMs, provisional: current.length > 0 };
-      const coverage = response.coverage;
-      // 只读缓存：范围里有今天时，「数据截至」写那份数真实的时刻（轮询读它的截止点，没人看时可能是几分钟前），不写现在；还在读取的行不算
-      const readAts = [incomeThroughMs, costThroughMs].filter(Number.isFinite);
-      return { ...page, asOf: readAts.length ? new Date(Math.min(now, ...readAts)).toISOString() : response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny, fixedCostMain, accountingTotals, coverage, timing, historicalRatePreview,
+      const incomeThroughMs = current.length && current.every((row) => row.downstream?.state === "complete" && row.downstream.amountUsd != null)
+        ? Math.min(...current.map((row) => row.downstream.dataThroughMs ?? row.todayReadAtMs ?? row.window.endMs)) : null;
+      const costThroughMs = current.length && current.every((row) => row.rates?.costBasis === "fixed" || row.upstream?.state === "complete" && row.upstream.amountUsd != null)
+        ? Math.min(...current.map((row) => row.upstream?.dataThroughMs ?? row.todayReadAtMs ?? row.window.endMs)) : null;
+      const todayRequired = page.rows.some((row) => row.daily.some((day) => day.day === todayLabel && !["notStarted", "future"].includes(day.state)));
+      const timing = { incomeThroughMs, costThroughMs, provisional: todayRequired };
+      // 所选期间实际计入的渠道包括已解绑的历史渠道；当前绑定状态不代表历史金额范围。
+      const included = new Set(results.filter((result) => page.rows.some((row) => row.counted && row.ruleIds.includes(result.rule.id)))
+        .flatMap((result) => result.rule.channels.map((channel) => `${result.rule.ownStationId}|${channel.channelId}`)));
+      const channels = response.coverage.channels.map((channel) => included.has(`${channel.ownStationId}|${channel.channelId}`)
+        ? { ...channel, status: "accounted", issues: [], actions: [] }
+        : channel.status === "accounted" ? { ...channel, status: "billing_missing" } : channel);
+      const accountedChannelCount = channels.filter((channel) => channel.status === "accounted").length;
+      const coverage = { ...response.coverage, channels, accountedChannelCount,
+        state: response.coverage.catalogueState !== "verified" ? "unknown" : accountedChannelCount === channels.length ? "complete_known" : "partial" };
+      // 今日任一侧未读到时，不把查询时刻写成数据时刻；已结束且没有今日数据的范围保持固定结果。
+      const asOf = todayRequired ? incomeThroughMs != null && costThroughMs != null ? new Date(Math.min(now, incomeThroughMs, costThroughMs)).toISOString() : null : response.generatedAt;
+      return { ...page, asOf, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny, fixedCostMain, accountingTotals, coverage, timing, historicalRatePreview,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
-        unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
+        unlinkedChannelCount: coverage.channels.filter((channel) => channel.status === "unlinked").length,
         unsupportedChannels: await unsupportedChannels({ cacheOnly }), notCountedDays,
         rateUnset: [], fixedOffProfitStations: response.fixedOffProfitStations || [] };
     },

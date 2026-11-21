@@ -12,6 +12,7 @@ export const COPY = Object.freeze({
   pickRange: "请选开始和结束日期",
   // 页顶一句（设计稿 §2）：今天 / 已固定 / 几天已固定，今天实时 / 还在读取
   todayCaption: "今天的数还会变，过了零点自动固定",
+  cutoffUnknown: "数据截止时间未确认",
   fixed: "已固定",
   live: "实时",
   daysFixed: (n: number) => `${n} 天已固定`,
