@@ -93,7 +93,7 @@ export function UsersTab({
       render: (r) => (<span className="jy-cell-two jy-cell-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
       foot: weekOk ? money(list.totals.week, rate) : EMPTY,
     },
-    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => money(r.today, rate), foot: money(list.totals.today, rate) },
+    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => page.basicOnly ? EMPTY : money(r.today, rate), foot: page.basicOnly ? EMPTY : money(list.totals.today, rate) },
     {
       key: "balance", label: COPY.users.cols.balanceDays, sort: noop,
       render: (r) => (<span className="jy-cell-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
@@ -125,6 +125,7 @@ export function UsersTab({
       }
     >
       <div className="jy-users-filters" aria-busy={loading || undefined}>
+        {!page.basicOnly && <>
         <Seg<Scope>
           size="sm"
           className="jy-users-seg-scope"
@@ -155,6 +156,7 @@ export function UsersTab({
             count: list.counts.only[value] ?? undefined,
           }))}
         />
+        </>}
         {list.groups.length > 0 && (
           <>
             <span className="jy-users-filters-rule" aria-hidden="true" />
@@ -215,7 +217,7 @@ export function UsersTab({
       )}
       {pager}
     </Panel>
-    <UserGroups />
+    {!page.paused && <UserGroups />}
     </>
   );
 }

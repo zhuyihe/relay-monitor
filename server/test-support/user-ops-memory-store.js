@@ -2,7 +2,11 @@
 const PROGRESS_FIELDS = ["backfillCursorMs", "backfillTargetMs", "backfillStartedMs", "usageSyncedMs", "balanceSyncedMs", "alertPushedMs"];
 
 export class MemoryUserOpsStore {
-  constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0, usageRowsRead: 0 }; }
+  constructor() { this.usage = new Map(); this.points = new Map(); this.progress = new Map(); this.alerts = new Map(); this.directories = new Map(); this.calls = { upsertUsageHours: 0, addBalancePoints: 0, listUsageHours: 0, usageRowsRead: 0 }; }
+
+  async getDirectory(stationId) { return structuredClone(this.directories.get(stationId) ?? null); }
+
+  async saveDirectory(stationId, users, at) { this.directories.set(stationId, { stationId, at, users: structuredClone(users) }); }
 
   async upsertUsageHours(stationId, rows) {
     this.calls.upsertUsageHours += 1;
@@ -74,6 +78,7 @@ export class MemoryUserOpsStore {
   async deleteStation(stationId) {
     for (const map of [this.usage, this.points]) for (const [key, row] of map) if (row.stationId === stationId) map.delete(key);
     this.progress.delete(stationId);
+    this.directories.delete(stationId);
     for (const key of [...this.alerts.keys()]) if (key.startsWith(`${stationId}|`)) this.alerts.delete(key);
   }
 }

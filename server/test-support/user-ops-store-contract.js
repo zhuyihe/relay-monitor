@@ -83,9 +83,13 @@ export function defineUserOpsStoreContract({ name, create, cleanup = async () =>
       assert.equal((await store.listUsageHours(a, 0, 100 * H)).length, 1);
       assert.equal((await store.listBalancePoints(a, 0)).get(1).length, 1);
       await store.saveProgress(a, { usageSyncedMs: 1 });
+      const users = [{ id: 1, username: "u", quotaUsd: 0 }];
+      await store.saveDirectory(a, users, 50 * H);
+      assert.deepEqual(await store.getDirectory(a), { stationId: a, at: 50 * H, users });
       await store.saveAlertState(a, 1, { level: 1, notifiedAt: 1, lastBalanceUsd: 1 });
       await store.deleteStation(a);
       assert.deepEqual([(await store.listUsageHours(a, 0, 100 * H)).length, (await store.listBalancePoints(a, 0)).size, await store.getProgress(a), (await store.getAlertStates(a)).size], [0, 0, null, 0]);
+      assert.equal(await store.getDirectory(a), null);
     });
   });
 }

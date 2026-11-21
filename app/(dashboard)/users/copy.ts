@@ -13,6 +13,11 @@ export const COPY = Object.freeze({
   setupDesc: "用户运营会看自营站点上用户的消费、余额，谁在涨、谁在掉、谁快用完了。",
   setupFigure: "设置完成后，这里会列出每个用户近 7 天的消费和余额，快用完的会标出来。",
   unreadable: "读不到用户数据",
+  noData: "还没有用户数据",
+  syncDirectory: "同步用户数据",
+  syncPaused: "系统设置里关了「读取用户数据」。",
+  enableSync: "去打开",
+  basicOnly: "已读到用户和余额，消费统计还没准备好。",
   // 补数据（刚上线：每小时用量往回补 90 天，余额从那一刻开始记）
   backfill: (days: number, total: number, eta: string, withTrend: boolean) =>
     `数据补全中 ${days}/${total} 天，大约还要 ${eta}。${withTrend ? `趋势图先画补好的 ${days} 天；` : ""}「比前 7 天」「在下滑」「已流失」等补满再算；可用天数、快用完等余额记满 24 小时再算。`,
@@ -122,6 +127,7 @@ export const COPY = Object.freeze({
   }),
   // 流失页签（design 用户运营 流失 v1）
   churn: Object.freeze({
+    readModels: "读取主要模型",
     kpiLabel: "流失的四个数",
     kpiDown: "在下滑",
     kpiDownHint: "近 3 天日均比之前 14 天日均少一半以上的用户；损失是他们一天比之前少花的钱加起来",
@@ -183,6 +189,9 @@ export const COPY = Object.freeze({
   }),
   // 抽屉
   drawer: Object.freeze({
+    readBalance: "读取最新余额",
+    balanceReadAt: (time: string) => `余额读于 ${time}`,
+    balanceFailed: "读不到最新余额",
     group: "分组",
     created: "注册时间",
     used: "累计消费",

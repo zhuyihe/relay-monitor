@@ -24,10 +24,11 @@ function ChurnTag({ status }: { status: ChurnRow["status"] }) {
 }
 
 export function ChurnTab({
-  page, users, query, onQuery, onOpenUser, onShowReturned, loading,
+  page, users, query, onQuery, onOpenUser, onShowReturned, loading, onReadModels, modelsLoading,
 }: {
   page: ChurnPage; users: UsersPage; query: ChurnQuery; loading: boolean;
   onQuery: (patch: Partial<ChurnQuery>) => void; onOpenUser: (id: number) => void; onShowReturned: () => void;
+  onReadModels: () => void; modelsLoading: boolean;
 }) {
   const C = COPY.churn;
   const { list, rate } = page;
@@ -133,6 +134,7 @@ export function ChurnTab({
             <input type="checkbox" checked={query.big} onChange={(event) => onQuery({ big: event.target.checked })} />
             <span>{C.onlyBig(users.big.ready ? String(list.counts.big) : EMPTY)}</span>
           </label>
+          {!users.paused && <Button size="small" loading={modelsLoading} onClick={onReadModels}>{C.readModels}</Button>}
         </div>
         {returnedOnly && <p className="jy-caption jy-churn-note">{C.returnedNote}</p>}
         {phone ? (

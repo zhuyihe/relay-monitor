@@ -24,6 +24,8 @@ export type UsersList = {
 };
 export type UsersPage = {
   starting?: boolean; unset?: boolean; asOf: number; syncedMs: number; tz: string; today: string; rate: number; ownStationId: string; level1Days?: number;
+  basicOnly?: boolean; paused?: boolean; directoryError?: string | null;
+  balanceSyncedMs?: number; refreshIntervalMs?: number;
   ready: { backfillDone?: boolean; week?: boolean; compare?: boolean; churn?: boolean; down?: boolean; balance?: boolean; prepaidCompare?: boolean };
   availableDays: number; fresh: boolean;
   backfill: { done: boolean; core?: boolean; days: number; total: number };
@@ -38,7 +40,7 @@ export type UsersPage = {
 };
 export type DetailModels = { models: { model: string; cost: number; share: number }[] | null; others?: { count: number; cost: number; share: number } | null; total?: number; error: string | null };
 export type UserDetail = {
-  id: number; username: string; dayBars: { day: string; cost: number }[]; hourBars: { hourMs: number; cost: number }[];
+  id: number; username: string; dayBars?: { day: string; cost: number }[]; hourBars?: { hourMs: number; cost: number }[];
   balance: { t: number; usd: number }[]; recharges: { t: number; usd: number }[];
   user: UsersRow | null; rate: number; ready: UsersPage["ready"]; backfill: UsersPage["backfill"]; models: DetailModels;
 };

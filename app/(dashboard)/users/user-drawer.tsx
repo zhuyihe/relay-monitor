@@ -3,8 +3,9 @@
 // 从上到下：标题和状态、四个数、近 30 天每天的消费、今天每小时、按模型分、余额变化和充值。
 // 概览那句话里点用户名、用户页签里点一行，打开的是同一个抽屉；数据来自 /api/users/[id]（页面刷新时跟着再读一次）。
 import { useEffect, useRef, useState } from "react";
-import { Drawer, Grid } from "antd";
+import { Button, Drawer, Grid } from "antd";
 import { api } from "../../../lib/client";
+import { describeError, failureSentence } from "../../../lib/error-copy";
 import { EMPTY, axisMoney, formatDayKey, formatZonedDate, formatZonedTime, weekdayOfDayKey } from "../../../lib/format";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import { useDrawerEscape } from "../../components/drawer-escape";
@@ -42,38 +43,27 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
     if (!triggerRef.current) triggerRef.current = document.activeElement as HTMLElement | null;
     load(id, false);
   }, [id]);
-  // 整页刷新（asOf 变了）时抽屉里也悄悄刷新一次
-  useEffect(() => { if (id != null && state === "ready") load(id, true); }, [page.asOf]);
+  // 自动余额更新时，已打开的用户详情也跟着更新。
+  useEffect(() => { if (id != null && state === "ready") load(id, true); }, [page.balanceSyncedMs ?? page.asOf]);
   useDrawerEscape(open, onClose);
 
-  const row: UsersRow | null = detail?.user || null;
-  const rate = detail?.rate ?? page.rate, tz = page.tz;
+  const currentDetail = detail?.id === id ? detail : null;
+  const row: UsersRow | null = page.list.rows.find((user) => user.id === id) || currentDetail?.user || null;
+  const rate = currentDetail?.rate ?? page.rate, tz = page.tz;
   const m = (usd: number | null | undefined) => money(usd, rate);
-  const name = detail?.username || row?.username || "";
+  const name = currentDetail?.username || row?.username || "";
 
   const body = () => {
     if (state === "notFound") return <p className="jy-muted">{COPY.drawer.notFound}</p>;
     if (state === "failed") return <ErrorState what={COPY.drawer.failed} error={error} onRetry={id != null ? () => load(id, false) : undefined} />;
-    if (state === "loading" || !detail) return <div className="jy-stack" aria-busy="true"><Skeleton height={64} /><Skeleton height={140} /><Skeleton height={140} /></div>;
+    if (page.basicOnly) return <p className="jy-muted">{COPY.basicOnly}</p>;
+    const detail = currentDetail;
+    if (state === "loading" || !detail?.dayBars) return <div className="jy-stack" aria-busy="true"><Skeleton height={140} /><Skeleton height={140} /></div>;
     const dayItems = detail.dayBars.map((bar) => ({ key: bar.day, cost: bar.cost * rate }));
     const hourItems = detail.hourBars.map((bar) => ({ key: String(bar.hourMs), cost: bar.cost * rate }));
     const balanceDays = Math.max(1, Math.round(((detail.balance.at(-1)?.t ?? 0) - (detail.balance[0]?.t ?? 0)) / 86400000));
-    const week = row ? (page.ready.week ? m(row.week) : EMPTY) : EMPTY;
     return (
       <>
-        {row && (
-          <dl className="jy-users-drawer-meta">
-            <div><dt>{COPY.drawer.group}</dt><dd>{row.group || EMPTY}</dd></div>
-            <div><dt>{COPY.drawer.created}</dt><dd>{row.createdAtMs != null ? formatZonedDate(row.createdAtMs, tz, page.asOf) : EMPTY}</dd></div>
-            <div><dt>{COPY.drawer.used}</dt><dd>{m(row.usedUsd)}</dd></div>
-          </dl>
-        )}
-        <dl className="jy-kpis jy-users-drawer-kpis">
-          <div><dt>{COPY.drawer.kpiWeek}</dt><dd className="jy-kpi-figure">{week}</dd></div>
-          <div><dt>{COPY.drawer.kpiVs}</dt><dd className="jy-kpi-figure">{row && detail.ready.compare ? deltaText(row.week, row.prevWeek) : EMPTY}</dd></div>
-          <div><dt>{COPY.drawer.kpiBalance}</dt><dd className="jy-kpi-figure">{m(row?.balanceUsd)}</dd></div>
-          <div><dt>{COPY.drawer.kpiDays}</dt><dd className="jy-kpi-figure">{row && detail.ready.balance ? runwayText(row) : EMPTY}</dd></div>
-        </dl>
         <section className="jy-users-chart">
           <div className="jy-chart-sub"><h3>{COPY.drawer.dayTitle}</h3><span className="jy-caption">{COPY.drawer.daySub(formatZonedTime(page.asOf, tz))}</span></div>
           <Bars
@@ -136,13 +126,61 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
         </div>
       }
     >
+      {id != null && state !== "notFound" && (
+        <>
+          {row && (
+            <dl className="jy-users-drawer-meta">
+              <div><dt>{COPY.drawer.group}</dt><dd>{row.group || EMPTY}</dd></div>
+              <div><dt>{COPY.drawer.created}</dt><dd>{row.createdAtMs != null ? formatZonedDate(row.createdAtMs, tz, page.asOf) : EMPTY}</dd></div>
+              <div><dt>{COPY.drawer.used}</dt><dd>{m(row.usedUsd)}</dd></div>
+            </dl>
+          )}
+          <dl className="jy-kpis jy-users-drawer-kpis">
+            <div><dt>{COPY.drawer.kpiWeek}</dt><dd className="jy-kpi-figure">{row && page.ready.week ? m(row.week) : EMPTY}</dd></div>
+            <div><dt>{COPY.drawer.kpiVs}</dt><dd className="jy-kpi-figure">{row && page.ready.compare ? deltaText(row.week, row.prevWeek) : EMPTY}</dd></div>
+            <UserBalance key={`${page.ownStationId}:${id}`} id={id} page={page} cached={row?.balanceUsd} />
+            <div><dt>{COPY.drawer.kpiDays}</dt><dd className="jy-kpi-figure">{row && page.ready.balance ? runwayText(row) : EMPTY}</dd></div>
+          </dl>
+        </>
+      )}
       {body()}
     </Drawer>
   );
 }
 
+function UserBalance({ id, page, cached }: { id: number; page: UsersPage; cached: number | null | undefined }) {
+  const [latest, setLatest] = useState<{ balanceUsd: number; readMs: number } | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [loading, setLoading] = useState(false);
+  const automaticAt = page.balanceSyncedMs ?? page.syncedMs;
+  const shown = latest && latest.readMs >= automaticAt ? latest : { balanceUsd: cached, readMs: automaticAt };
+
+  async function readBalance() {
+    setLoading(true);
+    setError(null);
+    try {
+      setLatest(await api(`/api/users/${id}/balance`, { method: "POST" }));
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <dt>{COPY.drawer.kpiBalance}</dt>
+      <dd className="jy-kpi-figure">{money(shown.balanceUsd, page.rate)}</dd>
+      {shown.readMs != null && <dd className="jy-caption" role="status">{COPY.drawer.balanceReadAt(formatZonedTime(shown.readMs, page.tz))}</dd>}
+      {!page.paused && <dd><Button size="small" loading={loading} onClick={readBalance}>{COPY.drawer.readBalance}</Button></dd>}
+      {error != null && <dd className="jy-caption" role="alert">{failureSentence(COPY.drawer.balanceFailed, describeError(error).text)}</dd>}
+    </div>
+  );
+}
+
 // 按模型分：一行一个模型，名字，右边「46% · ¥200.87」，下面一根 6px 的条，最长的撑满；多的合成「其他 N 个模型」用灰条
 function Models({ models, rate }: { models: UserDetail["models"]; rate: number }) {
+  if (models.error === "USER_DATA_DISABLED") return <p className="jy-muted">{COPY.syncPaused}</p>;
   if (models.error === "BUSY") return <p className="jy-muted">{COPY.drawer.modelBusy}</p>;
   if (models.error || !models.models) return <p className="jy-muted">{COPY.drawer.modelFailed}</p>;
   if (!models.models.length) return <p className="jy-muted">{COPY.drawer.modelNone}</p>;

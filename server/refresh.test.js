@@ -28,6 +28,20 @@ function makeRt(t, { ownFails = false } = {}) {
 }
 const hits = (calls, host) => calls.filter((call) => call.startsWith(host)).length;
 
+test("用户余额共用供应商刷新节拍，历史回补在途时供应商刷新照常完成", async (t) => {
+  const { rt, calls } = makeRt(t);
+  let starts = 0, finish;
+  rt.pool = {};
+  rt.userOps = { runOnce: () => {
+    starts += 1;
+    return new Promise((resolve) => { finish = resolve; });
+  } };
+  await refreshAll(rt, { background: true, now: 1000000 });
+  assert.equal(starts, 1);
+  assert.equal(hits(calls, "up1.test"), 1);
+  finish();
+});
+
 test("后台轮询：上游站点每轮都读，自营站点每 5 分钟才读一次；手动刷新所有站点都读", async (t) => {
   const { rt, calls } = makeRt(t);
   let now = 1000000;

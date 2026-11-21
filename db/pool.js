@@ -490,6 +490,11 @@ export async function ensureSchema(pool) {
     balance_synced_ms BIGINT NULL,
     updated_at_ms BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ops_directory (
+    station_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    synced_ms BIGINT NOT NULL,
+    users JSON NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(`CREATE TABLE IF NOT EXISTS user_ops_alert (
     station_id VARCHAR(32) NOT NULL,
     user_id BIGINT NOT NULL,

@@ -3335,13 +3335,29 @@ function churnResponseOf(full, params) {
   const list = queryChurn(view, { only: params.get("only"), big: params.get("big") === "1", q: params.get("q"), page: params.get("page") });
   return { asOf: full.asOf, syncedMs: full.asOf, tz: full.tz, rate: 1, ownStationId: "own-1", fresh: true, backfill: full.backfill, ready: view.ready, sameUntilMs: Date.parse("2026-11-02T10:00:00+08:00"), summary: view.summary, modelsError: null, list };
 }
-async function openUsersPage(t, { viewport, search = "tab=users" } = {}) {
+async function openUsersPage(t, { viewport, search = "tab=users", initiallyEmpty = false } = {}) {
   const full = usersFixture(), requests = [];
+  full.balanceSyncedMs = USERS_NOW;
+  full.refreshIntervalMs = 60000;
+  let firstSync = initiallyEmpty;
+  const balanceReads = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/users") { requests.push(url.search); return fulfill(route, usersResponse(full, url.searchParams)); }
+    if (url.pathname === "/api/users") {
+      requests.push(url.search);
+      if (route.request().method() === "POST") firstSync = false;
+      const data = firstSync ? { ...full, starting: true, syncedMs: null, users: [] }
+        : initiallyEmpty ? { ...full, basicOnly: true, ready: {}, availableDays: 0 } : full;
+      return fulfill(route, usersResponse(data, url.searchParams));
+    }
     if (url.pathname === "/api/users/churn") { requests.push(`churn${url.search}`); return fulfill(route, churnResponseOf(full, url.searchParams)); }
+    if (/^\/api\/users\/\d+\/balance$/.test(url.pathname)) {
+      assert.equal(route.request().method(), "POST");
+      balanceReads.push(url.pathname);
+      if (balanceReads.length === 1) return fulfill(route, { balanceUsd: 0, readMs: USERS_NOW });
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "USER_DATA_BUSY" }) });
+    }
     const detail = url.pathname.match(/^\/api\/users\/(\d+)$/);
     if (detail) {
       const row = full.users.find((item) => item.id === Number(detail[1]));
@@ -3350,9 +3366,50 @@ async function openUsersPage(t, { viewport, search = "tab=users" } = {}) {
     throw new Error("unexpected users fixture API: " + url.pathname);
   }, viewport, USERS_NOW, null, `/users${search ? `?${search}` : ""}`);
   await page.getByRole("tab", { name: "概览" }).waitFor();
-  return { page, requests, full };
+  return { page, requests, full, balanceReads };
 }
 const usersGroup = (page, name) => page.getByRole("group", { name });
+
+test("用户运营·首次只同步名单，核对单人余额显示读取时间，失败保留上次余额", async (t) => {
+  const { page, balanceReads } = await openUsersPage(t, { search: "", initiallyEmpty: true, viewport: { width: 390, height: 844 } });
+  await page.getByText(USERS_COPY.noData, { exact: true }).waitFor();
+  await page.getByRole("button", { name: USERS_COPY.syncDirectory, exact: true }).click();
+  await page.getByText(USERS_COPY.basicOnly, { exact: true }).waitFor();
+  await page.getByRole("button", { name: USERS_COPY.users.rowOpen("u001"), exact: true }).click();
+  const drawer = page.getByRole("dialog");
+  const read = drawer.getByRole("button", { name: USERS_COPY.drawer.readBalance, exact: true });
+  await read.waitFor();
+  assert.deepEqual(balanceReads, [], "打开客户详情不会查即时余额");
+  await read.click();
+  await page.waitForFunction(() => {
+    const buttons = [...document.querySelectorAll(".jy-users-drawer button")];
+    return buttons.some((button) => button.textContent.includes("读取最新余额") && /0\.00/.test(button.closest("dl > div").textContent));
+  });
+  assert.match(await read.locator("xpath=../..").innerText(), /0\.00/);
+  await read.click();
+  await drawer.getByRole("alert").filter({ hasText: USERS_COPY.drawer.balanceFailed }).waitFor();
+  await drawer.getByText(/余额读于/).waitFor();
+  assert.equal(balanceReads.length, 2);
+});
+
+test("用户运营·余额自动刷新列表和已打开的详情，后续自动余额覆盖旧的手动读取", async (t) => {
+  const { page, full, balanceReads } = await openUsersPage(t);
+  await page.getByRole("button", { name: USERS_COPY.users.rowOpen("u001"), exact: true }).click();
+  const drawer = page.getByRole("dialog");
+  const read = drawer.getByRole("button", { name: USERS_COPY.drawer.readBalance, exact: true });
+  await read.click();
+  await page.waitForFunction(() => /0\.00/.test(document.querySelector(".jy-users-drawer-kpis > div:nth-child(3)")?.textContent || ""));
+  full.users.find((row) => row.username === "u001").balanceUsd = 123.45;
+  full.balanceSyncedMs += 60000;
+  const refreshed = page.waitForResponse((res) => new URL(res.url()).pathname === "/api/users");
+  await page.clock.fastForward(60000);
+  await refreshed;
+  await drawer.getByText("¥123.45", { exact: true }).waitFor();
+  assert.equal(balanceReads.length, 1, "自动刷新共用名单，每个用户不额外发余额请求");
+  await page.keyboard.press("Escape");
+  const row = page.locator("table.jy-data tbody tr").filter({ has: page.getByRole("button", { name: USERS_COPY.users.rowOpen("u001"), exact: true }) });
+  await row.getByText("¥123.45", { exact: true }).waitFor();
+});
 
 test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；范围、状态、分组、搜索、翻页都是服务端筛的，地址栏跟着变", async (t) => {
   const { page, requests } = await openUsersPage(t, { search: "tab=users" });

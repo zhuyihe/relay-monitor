@@ -9,7 +9,7 @@ import { Button } from "antd";
 import { api } from "../../../lib/client";
 import { visibleInterval } from "../../../lib/visible-interval.js";
 import { NAV_LABELS } from "../../../lib/brand";
-import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE } from "../../../lib/format";
+import { formatZonedTime, OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE } from "../../../lib/format";
 import { describeError } from "../../../lib/error-copy";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
@@ -28,7 +28,6 @@ import { UsersTab } from "./users-tab";
 import { OPEN_TABS, TABS, backfillLine, balanceWarmLine, churnQueryString, listQueryString, parseChurnOnly, parseGroups, parseOnly, parsePageNo, parseScope, parseSort, parseTab } from "./users-format";
 import type { ChurnPage, ChurnQuery, ListQuery, UsersPage } from "./users-format";
 
-const POLL_MS = 60_000;
 const SETUP = workflowAction("setup_own_station");
 const TAB_DEFS: TabDef<TabKey>[] = TABS.map((key) => ({
   key,
@@ -53,23 +52,22 @@ export default function UsersPageRoute() {
   const userId = /^\d+$/.test(params.get("user") || "") ? Number(params.get("user")) : null;
 
   const [page, setPage] = useState<UsersPage | null>(null);
-  const [asOf, setAsOf] = useState<number | null>(null);
+  const pollMs = Math.max(30_000, page?.refreshIntervalMs ?? 60_000);
   const [err, setErr] = useState<Error | null>(null);
   const [unset, setUnset] = useState(false);
   const [loading, setLoading] = useState(false);
   // 筛选连着改几次，只认最后一次发出去的那个请求的结果
   const latest = useRef(0);
 
-  const load = useCallback(async (rethrow = false) => {
+  const load = useCallback(async (rethrow = false, sync = false) => {
     const mine = ++latest.current;
     setLoading(true);
     try {
-      const res = await api(`/api/users${queryString ? `?${queryString}` : ""}`);
+      const res = await api(`/api/users${queryString ? `?${queryString}` : ""}`, sync ? { method: "POST" } : undefined);
       if (mine !== latest.current) return;
       setPage(res);
       setUnset(false);
       setErr(null);
-      setAsOf(Date.now());
     } catch (e: any) {
       if (mine !== latest.current) return;
       // 没设置自营站点是引导场景，不当错误（接口带 OWN_STATION_UNSET）
@@ -83,19 +81,21 @@ export default function UsersPageRoute() {
 
   useEffect(() => {
     load();
-    return visibleInterval(() => load(), POLL_MS);
-  }, [load]);
+    return visibleInterval(() => load(), pollMs);
+  }, [load, pollMs]);
 
   // 流失页签：打开才取（后台只读库、读一个近 30 天的流向），每 60 秒再取；筛选一变就重取
   const [churn, setChurn] = useState<ChurnPage | null>(null);
   const [churnErr, setChurnErr] = useState<Error | null>(null);
   const [churnLoading, setChurnLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const latestChurn = useRef(0);
-  const loadChurn = useCallback(async (rethrow = false) => {
+  const loadChurn = useCallback(async (rethrow = false, readModels = false) => {
     const mine = ++latestChurn.current;
     setChurnLoading(true);
+    if (readModels) setModelsLoading(true);
     try {
-      const res = await api(`/api/users/churn${churnQs ? `?${churnQs}` : ""}`);
+      const res = await api(`/api/users/churn${churnQs ? `?${churnQs}` : ""}`, readModels ? { method: "POST" } : undefined);
       if (mine !== latestChurn.current) return;
       setChurn(res);
       setChurnErr(null);
@@ -105,18 +105,19 @@ export default function UsersPageRoute() {
       if (rethrow) throw e;
     } finally {
       if (mine === latestChurn.current) setChurnLoading(false);
+      if (readModels) setModelsLoading(false);
     }
   }, [churnQs]);
-  const churnOn = tab === "churn" && !!page && !page.starting;
+  const churnOn = tab === "churn" && !!page && !page.starting && !page.basicOnly;
   useEffect(() => {
     if (!churnOn) return;
     loadChurn();
-    return visibleInterval(() => loadChurn(), POLL_MS);
-  }, [churnOn, loadChurn]);
+    return visibleInterval(() => loadChurn(), pollMs);
+  }, [churnOn, loadChurn, pollMs]);
 
   const onRefresh = useCallback(async () => { await Promise.all([load(true), churnOn ? loadChurn(true) : null]); }, [load, loadChurn, churnOn]);
   // 「数据截至」写后台最近一轮采集的时刻（页面取数的时刻不代表数据新）
-  useShellPage({ onRefresh, asOf: unset ? null : page && !page.starting ? page.syncedMs : asOf, autoRefreshMs: POLL_MS, tz: page?.tz });
+  useShellPage({ onRefresh, asOf: unset || !page || page.starting ? null : page.syncedMs, autoRefreshMs: pollMs, tz: page?.tz });
 
   // 换页签：两个表的筛选各是各的，地址栏里的筛选、页码、排法、搜索的字都清掉
   const setTab = (next: TabKey) => {
@@ -149,8 +150,10 @@ export default function UsersPageRoute() {
   const drawer = page ? <UserDrawer id={userId} page={page} onClose={closeUser} /> : null;
 
   // 补数据那一行：补数据没完写进度，补完了余额还没记满 24 小时写余额那一句；两件事都好了自己消失
-  const progress = page ? backfillLine(page, tab === "overview") || (page.starting ? null : balanceWarmLine(page)) : null;
-  const stale = !!page && !page.starting && page.fresh === false;
+  const progress = page && !page.starting && !page.basicOnly && !page.paused ? backfillLine(page, tab === "overview") || balanceWarmLine(page) : null;
+  const stale = !!page && !page.starting && !page.basicOnly && !page.paused && page.fresh === false;
+  const enableSync = <Link href="/settings">{COPY.enableSync}</Link>;
+  const userTable = page && <UsersTab page={page} query={query} loading={loading} onQuery={onQuery} onOpenUser={openUser} />;
 
   if (unset) {
     return (
@@ -184,9 +187,12 @@ export default function UsersPageRoute() {
 
   return (
     <div className="jy-page">
-      {err && <RefreshFailedBanner asOf={asOf} tz={page.tz} error={err} onRetry={() => load()} />}
-      {!err && tab === "churn" && churn && churnErr && <RefreshFailedBanner asOf={asOf} tz={page.tz} error={churnErr} onRetry={() => loadChurn()} />}
+      {err && !page.starting && <RefreshFailedBanner asOf={page.syncedMs} tz={page.tz} error={err} onRetry={() => load()} />}
+      {!err && tab === "churn" && churn && churnErr && <RefreshFailedBanner asOf={churn.syncedMs} tz={page.tz} error={churnErr} onRetry={() => loadChurn()} />}
       <Tabs<TabKey> tabs={TAB_DEFS} active={tab} onChange={setTab} idPrefix="users" label={COPY.tabsLabel} />
+      {page.balanceSyncedMs != null && <p className="jy-users-progress" role="status">{COPY.drawer.balanceReadAt(formatZonedTime(page.balanceSyncedMs, page.tz))}</p>}
+      {page.paused && <p className="jy-users-progress" role="status">{COPY.syncPaused}{enableSync}</p>}
+      {page.basicOnly && <p className="jy-users-progress" role="status">{COPY.basicOnly}</p>}
       {progress && (
         <p className="jy-users-progress" role="status">
           <span className="jy-spinning"><Icon name="refresh" /></span>
@@ -195,21 +201,27 @@ export default function UsersPageRoute() {
       )}
       {stale && <p className="jy-users-progress jy-muted">{COPY.users.staleNote}</p>}
       {page.starting ? (
-        <>
-          <PanelSkeleton title={COPY.overview.kpiToday} lines={2} />
-          <PanelSkeleton title={COPY.overview.chartTitle} height={300} />
-        </>
+        <Panel label={NAV_LABELS.users}>
+          {err || page.directoryError
+            ? <ErrorState center what={COPY.unreadable} error={err || { code: page.directoryError }} extra={
+              !page.paused && <Button type="primary" loading={loading} onClick={() => load(false, true)}>{COPY.syncDirectory}</Button>
+            } />
+            : <div className="jy-state jy-state--center">
+              <h3>{COPY.noData}</h3>
+              {!page.paused && <div className="actions"><Button type="primary" loading={loading} onClick={() => load(false, true)}>{COPY.syncDirectory}</Button></div>}
+            </div>}
+        </Panel>
       ) : (
         <div>
           <TabPanel idPrefix="users" tabKey="overview" active={tab === "overview"}>
-            <OverviewTab page={page} onOpenUser={openUser} />
+            {page.basicOnly ? tab === "overview" && userTable : <OverviewTab page={page} onOpenUser={openUser} />}
           </TabPanel>
           <TabPanel idPrefix="users" tabKey="users" active={tab === "users"}>
-            <UsersTab page={page} query={query} loading={loading} onQuery={onQuery} onOpenUser={openUser} />
+            {(!page.basicOnly || tab === "users") && userTable}
           </TabPanel>
           <TabPanel idPrefix="users" tabKey="churn" active={tab === "churn"}>
-            {tab === "churn" && (churn && !churn.starting
-              ? <ChurnTab page={churn} users={page} query={churnQuery} loading={churnLoading} onQuery={onChurnQuery} onOpenUser={openUser} onShowReturned={() => onChurnQuery({ only: "returned" })} />
+            {tab === "churn" && (page.basicOnly ? null : churn && !churn.starting
+              ? <ChurnTab page={churn} users={page} query={churnQuery} loading={churnLoading} onQuery={onChurnQuery} onOpenUser={openUser} onShowReturned={() => onChurnQuery({ only: "returned" })} onReadModels={() => loadChurn(false, true)} modelsLoading={modelsLoading} />
               : churnErr
                 ? <Panel label={COPY.tabs.churn}><ErrorState center what={COPY.unreadable} error={churnErr} onRetry={() => loadChurn()} /></Panel>
                 : <PanelSkeleton title={COPY.churn.tableTitle} lines={4} />)}

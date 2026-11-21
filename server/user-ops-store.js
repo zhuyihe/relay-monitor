@@ -15,6 +15,17 @@ const CHUNK = 2000;
 export class UserOpsStore {
   constructor(pool) { this.pool = pool; }
 
+  async getDirectory(stationId) {
+    const [[row]] = await this.pool.query("SELECT synced_ms, users FROM user_ops_directory WHERE station_id = ?", [stationId]);
+    return row ? { stationId, at: Number(row.synced_ms), users: row.users } : null;
+  }
+
+  async saveDirectory(stationId, users, at) {
+    await this.pool.query(
+      "INSERT INTO user_ops_directory (station_id, synced_ms, users) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE synced_ms = VALUES(synced_ms), users = VALUES(users)",
+      [stationId, at, JSON.stringify(users)]);
+  }
+
   async upsertUsageHours(stationId, rows) {
     let written = 0;
     for (let i = 0; i < rows.length; i += CHUNK) {
@@ -113,7 +124,7 @@ export class UserOpsStore {
 
   // 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）：全清
   async deleteStation(stationId) {
-    for (const table of ["user_balance_points", "user_usage_hours", "user_ops_progress", "user_ops_alert"]) {
+    for (const table of ["user_balance_points", "user_usage_hours", "user_ops_progress", "user_ops_alert", "user_ops_directory"]) {
       await this.pool.query(`DELETE FROM ${table} WHERE station_id = ?`, [stationId]);
     }
   }
