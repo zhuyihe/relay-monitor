@@ -291,7 +291,8 @@ test("整页：补完 90 天以后，用户表、概览的数、重点用户、�
   assert.ok(page.prevTrend.every((day) => day.available && day.cost > 0), "前 30 天也补到了");
   assert.ok(page.trend.every((day) => day.available));
   const big1 = page.users.find((row) => row.username === "big1");
-  assert.equal(big1.week, 5 * 24 * 7, "近 7 天（7 个整天）= 每小时 5 美元 × 168");
+  assert.equal(big1.week, 5 * 24 * 6 + big1.today, "近 7 天包含今天，只加此前 6 个完整日");
+  assert.equal(big1.closedWeek, 5 * 24 * 7, "完整日环比仍使用截至昨天的 7 天");
   assert.equal(big1.big, true);
   assert.equal(page.big.ready, true);
   assert.ok(page.big.count >= 3);

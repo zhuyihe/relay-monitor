@@ -1,6 +1,6 @@
 // 用户运营页的纯函数（概览那句话、五个数、用户表的地址栏和文字）：不依赖 React，单测直接跑（users-format.test.js）。
 // 用户表的筛选、排序、分页在服务端（lib/user-ops-view.js 的 queryUsers），这里只管怎么摆。
-// 钱从接口来都是美元，页面按自营站点的汇率（rate）换算；「近 7 天」是最近 7 个整天，不含今天。
+// 钱从接口来都是美元，页面按自营站点的汇率（rate）换算；近 7 天和近 14 天趋势包含今天；环比按截至昨天的完整日。
 import { EMPTY, formatDays, formatDayKey, formatDeltaPct, formatMoney, formatPct, formatZonedTime } from "../../../lib/format.js";
 import { dayKeyInTz } from "../../../lib/business-time.js";
 import { COPY } from "./copy";
@@ -8,7 +8,7 @@ import type { UserStatus, UsersTab } from "./copy";
 
 export type UsersRow = {
   id: number; username: string; big: boolean; disabled: boolean; group: string; createdAtMs: number | null; usedUsd: number | null; isNew: boolean;
-  week: number; prevWeek: number; today: number; balanceUsd: number | null;
+  week: number; closedWeek: number; prevWeek: number; today: number; balanceUsd: number | null;
   runwayState: string; days: number | null; burnPerDay: number | null; level: number;
   status: UserStatus | null; lastUsed: { ms: number; precise: boolean } | null; spark: number[];
 };
@@ -31,8 +31,8 @@ export type UsersPage = {
   backfill: { done: boolean; core?: boolean; days: number; total: number };
   big: { ready: boolean; ids: number[]; count: number };
   summary: {
-    todayCost: number; yesterdaySameTime: number; weekCost: number; prevWeekCost: number; weekUsers: number; prevWeekUsers: number;
-    weekNewUsers: number; prevWeekNewUsers: number; newUsers30: number; prevNewUsers30: number; prepaid: number; prepaidAgo: number | null; bigWeek: number;
+    todayCost: number; yesterdaySameTime: number; weekCost: number; closedWeekCost: number; prevWeekCost: number; weekUsers: number; closedWeekUsers: number; prevWeekUsers: number;
+    weekNewUsers: number; closedWeekNewUsers: number; prevWeekNewUsers: number; newUsers30: number; prevNewUsers30: number; prepaid: number; prepaidAgo: number | null; bigWeek: number;
   } | null;
   facts?: { riser: { id: number; username: string; delta: number } | null; down: { id: number; username: string }[]; soonBig: number };
   trend: TrendDay[]; prevTrend: { day: string; available: boolean; cost: number; users: number; newUsers: number }[];
@@ -80,8 +80,8 @@ export function bigTipText(row: UsersRow, page: UsersPage): string {
 // 个数跟着前面的筛选（范围）算：count 是当前范围里的重点用户数
 export const bigLabel = (page: UsersPage, count: number = page.big.count) => COPY.users.onlyBig(page.big.ready ? String(count) : EMPTY);
 
-// 小趋势线的 14 个点：补数据还没补到的天是 null（不画成 0）；补到的天数从昨天往前数
-export const sparkValues = (row: UsersRow, availableDays: number): (number | null)[] => row.spark.map((value, index) => (index >= row.spark.length - availableDays ? value : null));
+// 小趋势线的 14 个点包含今天；可用的完整日从昨天往前数，今天单独加一格
+export const sparkValues = (row: UsersRow, availableDays: number): (number | null)[] => row.spark.map((value, index) => (index >= row.spark.length - availableDays - 1 ? value : null));
 
 // 最近使用：今天 / 昨天 / 10月20日；最近两天有消费的那一小时是准的，抽屉里再带时间（用量按小时记，写那一小时的起点「今天 14:00」）
 export function lastUsedText(row: Pick<UsersRow, "lastUsed"> & { isNew?: boolean }, page: Pick<UsersPage, "asOf" | "tz" | "today">, withTime = false): string {
@@ -108,7 +108,7 @@ export function overviewSentence(page: UsersPage): SentencePart[] {
   const parts: SentencePart[] = [text(COPY.overview.weekLead(money(s.weekCost, rate)))];
   if (!page.ready.compare) return [...parts, text(`。${COPY.overview.afterFill}`)];
   if (s.prevWeekCost > 0) {
-    const change = (s.weekCost - s.prevWeekCost) / s.prevWeekCost;
+    const change = (s.closedWeekCost - s.prevWeekCost) / s.prevWeekCost;
     parts.push(text(`，${Math.abs(change) < 0.0005 ? COPY.overview.same : change > 0 ? COPY.overview.more(pctText(change)) : COPY.overview.less(pctText(change))}`));
   } else parts.push(text(`，${COPY.overview.prevNone}`));
   // 集中度：几个重点用户占近 7 天消费的百分之几（「5 个重点用户」是链接，到用户页签勾上「只看重点用户」）
@@ -146,9 +146,9 @@ export function overviewKpis(page: UsersPage): Kpi[] {
   const peopleVs = (cur: number, prev: number) => (cur === prev ? COPY.overview.usersSame : `${COPY.overview.vsPrevWeek} ${COPY.overview.usersDelta(cur - prev)}`);
   return [
     { key: "today", title: COPY.overview.kpiToday, value: money(s.todayCost, rate), sub: vs(COPY.overview.vsYesterday, s.todayCost, s.yesterdaySameTime) },
-    { key: "week", title: COPY.overview.kpiWeek, value: c.week ? money(s.weekCost, rate) : EMPTY, sub: c.compare ? vs(COPY.overview.vsPrevWeek, s.weekCost, s.prevWeekCost) : COPY.overview.afterFillCompare },
-    { key: "users", title: COPY.overview.kpiUsers, titleHint: COPY.overview.kpiUsersHint, value: c.week ? COPY.overview.usersCount(s.weekUsers) : EMPTY, sub: c.compare ? peopleVs(s.weekUsers, s.prevWeekUsers) : COPY.overview.afterFillCompare },
-    { key: "fresh", title: COPY.overview.kpiNew, titleHint: COPY.overview.kpiNewHint, value: c.week ? COPY.overview.usersCount(s.weekNewUsers) : EMPTY, sub: c.compare ? peopleVs(s.weekNewUsers, s.prevWeekNewUsers) : COPY.overview.afterFillCompare },
+    { key: "week", title: COPY.overview.kpiWeek, value: c.week ? money(s.weekCost, rate) : EMPTY, sub: c.compare ? vs(COPY.overview.vsPrevWeek, s.closedWeekCost, s.prevWeekCost) : COPY.overview.afterFillCompare },
+    { key: "users", title: COPY.overview.kpiUsers, titleHint: COPY.overview.kpiUsersHint, value: c.week ? COPY.overview.usersCount(s.weekUsers) : EMPTY, sub: c.compare ? peopleVs(s.closedWeekUsers, s.prevWeekUsers) : COPY.overview.afterFillCompare },
+    { key: "fresh", title: COPY.overview.kpiNew, titleHint: COPY.overview.kpiNewHint, value: c.week ? COPY.overview.usersCount(s.weekNewUsers) : EMPTY, sub: c.compare ? peopleVs(s.closedWeekNewUsers, s.prevWeekNewUsers) : COPY.overview.afterFillCompare },
     { key: "prepaid", title: COPY.overview.kpiPrepaid, titleHint: COPY.overview.prepaidTitle, value: money(s.prepaid, rate), sub: c.prepaidCompare && s.prepaidAgo != null ? vs(COPY.overview.vsWeekAgo, s.prepaid, s.prepaidAgo) : COPY.overview.afterWeekCompare },
   ];
 }

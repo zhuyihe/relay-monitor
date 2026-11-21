@@ -195,6 +195,7 @@ export default function UsersPageRoute() {
         {page.todaySyncedMs != null && <>{COPY.consumptionReadAt(formatZonedTime(page.todaySyncedMs, page.tz))} · </>}
         {page.balanceSyncedMs != null && COPY.drawer.balanceReadAt(formatZonedTime(page.balanceSyncedMs, page.tz))}
       </p>}
+      {tab !== "churn" && !page.basicOnly && <p className="jy-users-progress">{COPY.consumptionWindow}</p>}
       {!!page.syncErrors?.length && <p className="jy-users-progress" role="alert">{COPY.syncPartial}</p>}
       {page.paused && <p className="jy-users-progress" role="status">{COPY.syncPaused}{enableSync}</p>}
       {page.basicOnly && <p className="jy-users-progress" role="status">{COPY.basicOnly}</p>}

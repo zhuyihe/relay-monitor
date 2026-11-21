@@ -33,6 +33,7 @@ export const COPY = Object.freeze({
   bigTipPlain: "重点用户",
   disabled: "已禁用",
   syncPartial: "部分数据未能同步，请查看消费和余额的更新时间。",
+  consumptionWindow: "近 7 天消费和近 14 天趋势包含今天；消费对比截至昨天。",
   consumptionReadAt: (time: string) => `消费读于 ${time}`,
   // 概览
   overview: Object.freeze({

@@ -3341,8 +3341,8 @@ function churnResponseOf(full, params) {
   const list = queryChurn(view, { only: params.get("only"), big: params.get("big") === "1", q: params.get("q"), page: params.get("page") });
   return { asOf: full.asOf, syncedMs: full.asOf, tz: full.tz, rate: 1, ownStationId: "own-1", fresh: true, backfill: full.backfill, ready: view.ready, sameUntilMs: Date.parse("2026-11-02T10:00:00+08:00"), summary: view.summary, modelsError: null, list };
 }
-async function openUsersPage(t, { viewport, search = "tab=users", initiallyEmpty = false } = {}) {
-  const full = usersFixture(), requests = [];
+async function openUsersPage(t, { viewport, search = "tab=users", initiallyEmpty = false, full = usersFixture() } = {}) {
+  const requests = [];
   full.balanceSyncedMs = USERS_NOW;
   full.todaySyncedMs = USERS_NOW;
   full.refreshIntervalMs = 60000;
@@ -3599,4 +3599,42 @@ test("收入读取失败时，页顶和说明不冒充已读到现在，保留�
   await page.locator(".jy-profit-notes").getByText("收入截至 未确认", { exact: false }).waitFor();
   assert.equal(await page.locator(".jy-freshness").count(), 0);
   assert.doesNotMatch(await page.locator(".jy-profit-caption").innerText(), /0:00–11:00/);
+});
+
+test("用户运营·今天开始消费的用户：近7天和今天一致，14天趋势含今天，排序合计及详情一致", async (t) => {
+  const grid = dayGrid(USERS_NOW, USERS_TZ), todayStart = grid.starts.at(-1);
+  const amounts = [["grace123", 2396.48], ["Lucky-gangshen", 2174.51]];
+  const users = amounts.map(([username, amount], i) => ({ id: i + 1, username, role: 1, status: 1, quotaUsd: 6000, usedUsd: amount, group: "default" }));
+  const daily = new Map(amounts.map(([username, amount]) => [username, [...Array(grid.days - 1).fill(0), amount]]));
+  const recentHours = new Map(amounts.map(([username, amount]) => [username, new Map([[todayStart, amount]])]));
+  const view = buildUsersView({ now: USERS_NOW, tz: USERS_TZ, users, daily, recentHours, runways: new Map(), backfill: { done: true, days: 90, total: 90 } });
+  const full = { ...view, rate: 1, ownStationId: "own-1" };
+  const { page } = await openUsersPage(t, { full });
+  const rows = page.locator("table.jy-data tbody tr");
+  await rows.first().getByText("grace123", { exact: true }).waitFor();
+  assert.equal(await rows.count(), 2);
+  for (const [name, amount] of amounts) {
+    const row = rows.filter({ hasText: name });
+    const formatted = `¥${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    assert.equal(await row.locator(".jy-users-week").innerText(), formatted);
+    const cells = await row.locator("td").allInnerTexts();
+    assert.ok(cells.includes(formatted), "今天列显示同一金额");
+    const amountTops = await row.evaluate((element) => [".jy-users-week", ".jy-users-today", ".jy-users-balance"].map((selector) => {
+      const range = document.createRange();
+      range.selectNodeContents(element.querySelector(selector));
+      return range.getBoundingClientRect().top;
+    }));
+    assert.ok(Math.max(...amountTops) - Math.min(...amountTops) <= 1, `同一行的三个金额应对齐：${amountTops.join(", ")}`);
+    const values = full.users.find((user) => user.username === name).spark;
+    assert.equal(values.at(-1), amount);
+    assert.equal(values.slice(0, -1).reduce((sum, value) => sum + value, 0), 0);
+  }
+  await page.getByText(USERS_COPY.consumptionWindow, { exact: true }).waitFor();
+  assert.match(await page.locator("table.jy-data tfoot").innerText(), /¥4,570\.99/);
+  await page.getByRole("button", { name: USERS_COPY.users.cols.week, exact: true }).click();
+  await page.waitForURL(/sort=week/);
+  assert.match(await rows.first().innerText(), /grace123/);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-today-in-week.png` });
+  await rows.first().click();
+  await page.locator(".jy-users-drawer-kpis").getByText("¥2,396.48", { exact: true }).waitFor();
 });

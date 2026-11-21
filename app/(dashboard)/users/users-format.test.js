@@ -27,7 +27,7 @@ const { dayStartInTz } = await import("../../../lib/business-time.js");
 const TZ = "Asia/Shanghai";
 const NOW = dayStartInTz("2026-11-01", TZ) + 14.5 * 3600000; // 11-01 14:30 上海
 const row = (over) => ({
-  id: 1, username: "a", big: false, disabled: false, group: "default", createdAtMs: null, usedUsd: null, isNew: false, week: 100, prevWeek: 100, today: 10, balanceUsd: 50,
+  id: 1, username: "a", big: false, disabled: false, group: "default", createdAtMs: null, usedUsd: null, isNew: false, week: 100, closedWeek: over?.closedWeek ?? over?.week ?? 100, prevWeek: 100, today: 10, balanceUsd: 50,
   runwayState: "ok", days: 20, burnPerDay: 2.5, level: 0, status: null, lastUsed: null, spark: Array(14).fill(1), ...over,
 });
 const READY = { backfillDone: true, week: true, compare: true, churn: true, down: true, balance: true, prepaidCompare: true };
@@ -37,10 +37,14 @@ const SUMMARY = {
 };
 const FACTS = { riser: { id: 1, username: "orange-lab", delta: 60 }, down: [{ id: 2, username: "wang-lab" }], soonBig: 2 };
 const list = (over = {}) => ({ rows: [], total: 0, page: 1, pages: 1, pageSize: 50, totals: { count: 0, week: 0, prevWeek: 0, today: 0, balance: 0 }, counts: { scope: { active30: 0, all: 0 }, big: 0, only: { all: 0, soon: 0, down: 0, new: 0, churned: 0 } }, groups: [], ...over });
-const page = (over = {}) => ({
-  asOf: NOW, syncedMs: NOW - 60000, tz: TZ, today: "2026-11-01", rate: 1, ownStationId: "own1", level1Days: 3, ready: READY, availableDays: 30, fresh: true,
-  backfill: { done: true, core: true, days: 90, total: 90 }, big: { ready: true, ids: [], count: 5 }, summary: SUMMARY, facts: FACTS, trend: [], prevTrend: [], list: list(), ...over,
-});
+const page = (over = {}) => {
+  const s = over.summary === null ? null : over.summary ?? SUMMARY;
+  return {
+    asOf: NOW, syncedMs: NOW - 60000, tz: TZ, today: "2026-11-01", rate: 1, ownStationId: "own1", level1Days: 3, ready: READY, availableDays: 30, fresh: true,
+    backfill: { done: true, core: true, days: 90, total: 90 }, big: { ready: true, ids: [], count: 5 }, facts: FACTS, trend: [], prevTrend: [], list: list(), ...over,
+    summary: s && { ...s, closedWeekCost: s.closedWeekCost ?? s.weekCost, closedWeekUsers: s.closedWeekUsers ?? s.weekUsers, closedWeekNewUsers: s.closedWeekNewUsers ?? s.weekNewUsers },
+  };
+};
 const text = (parts) => parts.map((part) => part.text ?? part.name).join("");
 
 test("比前 7 天：带正负号；前 7 天是 0、这 7 天才有写「新」；两边都是 0 写「—」；减号是 −", () => {
@@ -95,8 +99,8 @@ test("最近使用：今天 / 昨天 / 10月20日；抽屉里带那一小时的�
 test("小趋势线：补数据还没补到的天是 null，从昨天往前数补到几天", () => {
   const r = row({ spark: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] });
   assert.deepEqual(sparkValues(r, 30), r.spark);
-  assert.deepEqual(sparkValues(r, 3), [...Array(11).fill(null), 12, 13, 14]);
-  assert.deepEqual(sparkValues(r, 0), Array(14).fill(null));
+  assert.deepEqual(sparkValues(r, 3), [...Array(10).fill(null), 11, 12, 13, 14]);
+  assert.deepEqual(sparkValues(r, 0), [...Array(13).fill(null), 14]);
 });
 
 test("概览那一句（补满以后）：近 7 天、比前 7 天、几个重点用户占多少、涨得最多、在下滑、几个重点用户快用完", () => {
@@ -309,4 +313,13 @@ test("流失页签的地址栏和查询串：不认识的筛选回到全部；�
   assert.equal(churnQueryString({ only: "all", big: false, page: 1, q: "" }), "");
   assert.equal(churnQueryString({ only: "down", big: true, page: 2, q: " nova " }), "only=down&big=1&page=2&q=nova");
   assert.deepEqual(CHURN_FILTERS, ["all", "todayLow", "down", "churned"]);
+});
+
+test("包含今天的周消费与完整日环比分别展示，今天增长不改变历史比较结果", () => {
+  const data = page({ summary: { ...SUMMARY, weekCost: 1500, closedWeekCost: 1000, weekUsers: 15, closedWeekUsers: 8, weekNewUsers: 5, closedWeekNewUsers: 3 } });
+  const kpis = overviewKpis(data);
+  assert.equal(kpis.find((kpi) => kpi.key === "week").value, "¥1,500.00");
+  assert.match(kpis.find((kpi) => kpi.key === "week").sub, /20\.0%/);
+  assert.match(kpis.find((kpi) => kpi.key === "users").sub, /−2 个/);
+  assert.equal(kpis.find((kpi) => kpi.key === "fresh").sub, "和前 7 天一样多");
 });

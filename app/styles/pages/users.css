@@ -23,6 +23,7 @@
 .jy-users-spark.is-gray .dot { fill: var(--jy-ink-3); }
 
 /* ─── 用户表 ─── */
+.jy-users-table table.jy-data tbody tr.is-clickable td { vertical-align: top; }
 .jy-users-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; }
 /* 「重点」的提示一句话放得下（antd 默认最宽 250px，会折成两行） */
 .jy-users-big-tip { max-width: min(460px, 92vw); }

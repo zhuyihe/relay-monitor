@@ -137,7 +137,7 @@ export function UserDrawer({ id, page, onClose }: { id: number | null; page: Use
           )}
           <dl className="jy-kpis jy-users-drawer-kpis">
             <div><dt>{COPY.drawer.kpiWeek}</dt><dd className="jy-kpi-figure">{row && page.ready.week ? m(row.week) : EMPTY}</dd></div>
-            <div><dt>{COPY.drawer.kpiVs}</dt><dd className="jy-kpi-figure">{row && page.ready.compare ? deltaText(row.week, row.prevWeek) : EMPTY}</dd></div>
+            <div><dt>{COPY.drawer.kpiVs}</dt><dd className="jy-kpi-figure">{row && page.ready.compare ? deltaText(row.closedWeek, row.prevWeek) : EMPTY}</dd></div>
             <UserBalance key={`${page.ownStationId}:${id}`} id={id} page={page} cached={row?.balanceUsd} />
             <div><dt>{COPY.drawer.kpiDays}</dt><dd className="jy-kpi-figure">{row && page.ready.balance ? runwayText(row) : EMPTY}</dd></div>
           </dl>

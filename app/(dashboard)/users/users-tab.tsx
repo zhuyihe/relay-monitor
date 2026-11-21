@@ -80,7 +80,7 @@ export function UsersTab({
     </span>
   );
   // 近 7 天消费：金额加粗，下面一行小字写比前 7 天
-  const vsText = (row: UsersRow) => (!compare ? EMPTY : row.prevWeek > 0 ? COPY.users.vsPrev(deltaText(row.week, row.prevWeek)) : row.week > 0 ? COPY.users.vsNone : EMPTY);
+  const vsText = (row: UsersRow) => (!compare ? EMPTY : row.prevWeek > 0 ? COPY.users.vsPrev(deltaText(row.closedWeek, row.prevWeek)) : row.closedWeek > 0 ? COPY.users.vsNone : EMPTY);
   const cols: Col<UsersRow>[] = [
     {
       key: "user", label: COPY.users.cols.user, sort: noop,
@@ -93,7 +93,7 @@ export function UsersTab({
       render: (r) => (<span className="jy-cell-two jy-cell-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
       foot: weekOk ? money(list.totals.week, rate) : EMPTY,
     },
-    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate), foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
+    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => <span className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate)}</span>, foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
     {
       key: "balance", label: COPY.users.cols.balanceDays, sort: noop,
       render: (r) => (<span className="jy-cell-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
@@ -190,7 +190,7 @@ export function UsersTab({
                   </span>
                   <span className="r2">
                     <SparkLine values={sparkValues(row, page.availableDays)} gray={row.status === "down" || row.status === "churned"} label={COPY.users.sparkLabel(row.username)} />
-                    <span className="jy-caption">{compare ? COPY.users.cardVs(deltaText(row.week, row.prevWeek), money(row.balanceUsd, rate)) : `${COPY.users.balanceWord} ${money(row.balanceUsd, rate)}`}</span>
+                    <span className="jy-caption">{compare ? COPY.users.cardVs(deltaText(row.closedWeek, row.prevWeek), money(row.balanceUsd, rate)) : `${COPY.users.balanceWord} ${money(row.balanceUsd, rate)}`}</span>
                   </span>
                   <span className="r3">
                     <span className="jy-caption">{COPY.users.cardLast(lastUsedText(row, page), row.group)}</span>
@@ -204,7 +204,7 @@ export function UsersTab({
           <p className="jy-users-empty jy-muted">{empty}</p>
         )
       ) : (
-        <DataTable<UsersRow>
+        <div className="jy-users-table"><DataTable<UsersRow>
           caption={COPY.users.tableTitle}
           rows={rows}
           rowKey={(row) => String(row.id)}
@@ -213,7 +213,7 @@ export function UsersTab({
           empty={empty}
           cols={cols}
           onRowClick={(row) => onOpenUser(row.id)}
-        />
+        /></div>
       )}
       {pager}
     </Panel>

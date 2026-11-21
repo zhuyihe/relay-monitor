@@ -155,7 +155,7 @@ export async function userModels(rt, own, username, { now = Date.now() } = {}) {
   if (request.broken || request.used + 1 > USER_OPS.BUDGET_MAX_USED) return { models: null, error: "BUSY" };
   const promise = (async () => {
     try {
-      const rows = await queryOwnData(own, now - 7 * DAY_MS, now, "model", { username });
+      const rows = await queryOwnData(own, dayStartInTz(shiftDayLabel(dayKeyInTz(now, businessTimeZone()), -6), businessTimeZone()), now, "model", { username });
       const byModel = new Map();
       for (const row of rows) byModel.set(row.key, (byModel.get(row.key) || 0) + row.cost);
       const sorted = [...byModel].map(([model, cost]) => ({ model, cost })).filter((item) => item.cost > 0).sort((a, b) => b.cost - a.cost || a.model.localeCompare(b.model));
