@@ -7,8 +7,8 @@
 .jy-stations-toolbar .jy-stations-type { width: 160px; }
 .jy-stations-panel { min-width: 0; }
 .jy-stations-table { min-width: 1080px; table-layout: fixed; }
-.jy-stations-col-name { width: 21%; }
-.jy-stations-col-status { width: 13%; }
+.jy-stations-col-name { width: 20%; }
+.jy-stations-col-status { width: 14%; }
 .jy-stations-col-ch { width: 8%; }
 .jy-stations-col-balance { width: 19%; }
 .jy-stations-col-burn { width: 12%; }

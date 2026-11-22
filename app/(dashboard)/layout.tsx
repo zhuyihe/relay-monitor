@@ -65,13 +65,14 @@ function useAttentionCount(enabled: boolean) {
     };
   }, [enabled]);
   return useMemo(() => {
-    if (!enabled || !source) return 0;
-    return buildOverviewActions(source.stations, {
+    if (!enabled || !source) return { count: 0, own: undefined };
+    const count = buildOverviewActions(source.stations, {
       tz: source.meta?.tz || undefined,
       rules: source.meta?.rules || {},
       settings: source.meta?.settings || {},
       workflowActions,
     }).all.length;
+    return { count, own: source.stations.find((station) => station.isOwn && !station.archivedAt) || null };
   }, [enabled, source, workflowActions]);
 }
 
@@ -92,7 +93,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const current = navItemFor(pathname);
   const title = passwordChangeRequired ? NAV_LABELS.settings : current?.label || BRAND.productName;
-  const attentionCount = useAttentionCount(!passwordChangeRequired);
+  const { count: attentionCount, own: ownStation } = useAttentionCount(!passwordChangeRequired);
 
   useEffect(() => {
     document.title = formatPageTitle(title);
@@ -179,18 +180,24 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const stale = asOf != null && now - asOf > STALE_MS;
   const initial = (username || "管").slice(0, 1).toUpperCase();
   const range = passwordChangeRequired ? null : page.range;
+  const workspaceLabel = ownStation ? `${ownStation.name}主站` : ownStation === null ? "设置主站" : "主站";
 
   return (
     <ShellContext.Provider value={shellApi}>
       <div className={`jy-shell${collapsed ? " is-collapsed" : ""}${navOpen ? " is-nav-open" : ""}`}>
         <aside className="jy-sider" id="jy-sider" ref={siderRef} aria-label="主导航">
           <Link href="/" className="jy-brand" aria-label={`${BRAND.productName}，回到${NAV_LABELS.home}`}>
-            <BrandMark size={28} />
+            <BrandMark size={34} />
             <div>
               <strong>{BRAND.name}</strong>
-              <small>控制台</small>
+              <small>运营控制台</small>
             </div>
           </Link>
+          {!passwordChangeRequired && <Link href="/my" className="jy-workspace" aria-label={`${workspaceLabel}，查看自营业务`} title={workspaceLabel}>
+            <span className={`jy-workspace-dot${ownStation ? " is-configured" : ""}`} aria-hidden="true" />
+            <span className="jy-workspace-name">{workspaceLabel}</span>
+            <Icon name="expand" />
+          </Link>}
           <nav className="jy-nav">
             {groups.map((g) => (
               <Fragment key={g.label}>
@@ -204,7 +211,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       href={it.path}
                       aria-current={active ? "page" : undefined}
                       aria-label={count > 0 ? `${it.label}，需处理 ${count} 项` : it.label}
-                      title={collapsed ? it.label : undefined}
+                      title={it.label}
                     >
                       <Icon name={it.icon as IconName} />
                       <span className="label">{it.label}</span>
@@ -229,6 +236,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               退出登录
             </button>
           </div>
+          {ownStation?.baseUrl && <a className="jy-open-own" href={ownStation.baseUrl} target="_blank" rel="noopener noreferrer">打开主站<Icon name="external" /></a>}
           <div className="jy-sider-foot">
             <span className="grow">{VERSION_LABEL} {pkg.version}</span>
             <button
@@ -257,7 +265,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             >
               <Icon name="menu" />
             </button>
-            <div className="jy-breadcrumb"><span>{BRAND.name}</span><span aria-hidden="true">/</span><span>{title}</span></div>
+            <div className="jy-breadcrumb"><span>{current?.key === "settings" || current?.key === "notifications" ? "管理" : ["stations", "usage", "analytics"].includes(current?.key || "") ? "资源与分析" : "工作空间"}</span><span aria-hidden="true">/</span><span>{title}</span></div>
             <div className="jy-topbar-spacer" />
             {asOf != null && (
               <span
@@ -315,7 +323,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </header>
 
           <main className={`jy-content${refreshing ? " is-refreshing" : ""}`} aria-busy={refreshing || undefined}>
-            <div className="jy-page-head"><h1>{title}</h1>{range ? <div className="jy-page-range">{range}</div> : null}</div>
+            <div className="jy-page-head"><div className="jy-page-title"><h1>{title}</h1>{page.subtitle ? <p>{page.subtitle}</p> : null}</div>{range || page.headingExtra ? <div className="jy-page-actions">{range ? <div className="jy-page-range">{range}</div> : null}{page.headingExtra}</div> : null}</div>
             {/* 页面用 useSearchParams 保存筛选状态，需要 Suspense 边界 */}
             <Suspense fallback={null}>{children}</Suspense>
           </main>

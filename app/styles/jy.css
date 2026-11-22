@@ -3,7 +3,6 @@
    类名统一 jy- 前缀，避免与 antd 和旧样式冲突。 */
 
 :root {
-  --jy-font: var(--jy-font-plex), "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
   --jy-focus-ring: 0 0 0 2px var(--jy-sheet), 0 0 0 4px var(--jy-cobalt);
 }
 
@@ -11,7 +10,7 @@ html, body { margin: 0; }
 body {
   font-family: var(--jy-font);
   font-size: 14px;
-  line-height: 22px;
+  line-height: 1.5;
   color: var(--jy-ink);
   background: var(--jy-plane);
   -webkit-font-smoothing: antialiased;
@@ -44,33 +43,44 @@ body {
   background: var(--jy-sider);
   border-right: 1px solid var(--jy-sider-edge);
   color: var(--jy-sider-ink);
-  padding: 20px 12px;
+  padding: 24px 14px 20px;
   overflow-y: auto;
 }
-.jy-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 24px; color: var(--jy-ink); text-decoration: none; }
+.jy-brand { display: flex; align-items: center; gap: 10px; padding: 0 9px; color: var(--jy-ink); text-decoration: none; }
 .jy-brand:hover { text-decoration: none; }
-.jy-brand strong { display: block; font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: .02em; }
-.jy-brand small { display: block; font-size: 12px; line-height: 16px; color: var(--jy-sider-ink-3); }
+.jy-brand strong { display: block; font-size: 17px; line-height: 24px; font-weight: 650; letter-spacing: .02em; }
+.jy-brand small { display: block; font-size: 11px; line-height: 16px; color: var(--jy-sider-ink-3); }
 
-.jy-nav { display: flex; flex-direction: column; gap: 2px; }
-.jy-nav-group { font-size: 12px; line-height: 18px; color: var(--jy-sider-ink-3); padding: 16px 12px 6px; }
-.jy-nav-group:first-child { padding-top: 0; }
+.jy-workspace { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 10px 12px; margin: 27px 4px 14px; border: 1px solid var(--jy-rule); border-radius: 6px; color: var(--jy-ink); background: var(--jy-sheet); font-size: 12px; text-decoration: none; }
+.jy-workspace:hover { color: var(--jy-ink); border-color: var(--jy-ink-dis); }
+.jy-workspace-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-workspace-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--jy-ink-dis); }
+.jy-workspace-dot.is-configured { background: var(--jy-good); }
+.jy-workspace > .jy-icon { width: 12px; height: 12px; margin-left: auto; color: var(--jy-ink-3); }
+.jy-open-own { display: flex; align-items: center; gap: 8px; margin: auto 12px 0; padding-top: 28px; color: var(--jy-ink-3); text-decoration: none; font-size: 12px; }
+.jy-open-own:hover { color: var(--jy-cobalt); }
+.jy-open-own .jy-icon { width: 13px; height: 13px; }
+.jy-open-own + .jy-sider-foot { margin-top: 0; padding-top: 12px; }
+.jy-nav { display: flex; flex-direction: column; gap: 3px; }
+.jy-nav-group { font-size: 11px; line-height: 18px; color: var(--jy-sider-ink-3); padding: 20px 12px 8px; }
+.jy-nav-group:first-child { padding-top: 20px; }
 .jy-nav a {
   position: relative;
-  display: flex; align-items: center; gap: 10px;
-  height: 40px; padding: 0 12px;
-  border-radius: var(--jy-r2);
+  display: flex; align-items: center; gap: 11px;
+  font-size: 14px; height: 40px; padding: 0 12px;
+  border-radius: 6px;
   color: var(--jy-sider-ink);
   text-decoration: none;
 }
 .jy-nav a:hover { background: var(--jy-sunken); color: var(--jy-ink); }
-.jy-nav a[aria-current="page"] { background: var(--jy-sider-active); color: var(--jy-cobalt); font-weight: 600; }
+.jy-nav a[aria-current="page"] { background: var(--jy-sider-active); color: var(--jy-ink); font-weight: 600; }
+.jy-nav a[aria-current="page"] .jy-icon { color: var(--jy-cobalt); }
 .jy-nav a:focus-visible { box-shadow: var(--jy-focus-ring); }
 .jy-nav .jy-icon { opacity: .9; }
 .jy-nav .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-nav-count {
   margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px;
-  border-radius: 10px; background: var(--jy-crit); color: #FFFFFF;
+  border-radius: 10px; background: var(--jy-rule); color: var(--jy-ink-2);
   font-size: 12px; line-height: 20px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .jy-sider-foot { margin-top: auto; padding: 12px; display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--jy-sider-ink-3); }
@@ -91,6 +101,8 @@ body {
 }
 .jy-collapse-btn:hover { background: var(--jy-sunken); color: var(--jy-ink); }
 
+.jy-shell.is-collapsed .jy-workspace,
+.jy-shell.is-collapsed .jy-open-own,
 .jy-shell.is-collapsed .jy-brand > div,
 .jy-shell.is-collapsed .jy-nav-group,
 .jy-shell.is-collapsed .jy-nav .label,
@@ -105,16 +117,21 @@ body {
 .jy-topbar {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 16px;
-  height: var(--jy-topbar-h); padding: 0 24px;
+  height: var(--jy-topbar-h); padding: 0 30px;
   background: var(--jy-plane);
 }
 .jy-breadcrumb { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; color: var(--jy-ink-3); }
 .jy-breadcrumb > span:last-child { color: var(--jy-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jy-page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; min-width: 0; }
-.jy-page-head h1 { margin: 0; color: var(--jy-ink); font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.02em; }
+.jy-page-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; min-width: 0; }
+.jy-page-head h1 { margin: 0; color: var(--jy-ink); font-size: 24px; line-height: 32px; font-weight: 650; letter-spacing: -.5px; }
+.jy-page-title p { margin: 5px 0 0; color: var(--jy-ink-3); font-size: 12px; line-height: 18px; }
+.jy-page-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; max-width: 100%; }
+.jy-page-actions > .ant-btn { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; font-size: 12px; box-shadow: none; }
+.jy-page-actions .jy-icon { width: 14px; height: 14px; }
 .jy-page-range { min-width: 0; max-width: 100%; }
 .jy-page-range .jy-range { flex-wrap: wrap; justify-content: flex-end; }
-.jy-page-range .jy-seg { overflow-x: auto; }
+.jy-page-range .jy-seg { overflow-x: auto; background: var(--jy-plane); border-radius: 7px; }
+.jy-page-range .jy-seg button { font-size: 12px; padding-inline: 17px; }
 .jy-topbar-spacer { flex: 1; }
 .jy-topbar .jy-menu-btn { display: none; }
 .jy-freshness { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
@@ -136,7 +153,7 @@ body {
 .jy-spinning .jy-icon { animation: jy-spin .7s linear infinite; }
 @keyframes jy-spin { to { transform: rotate(360deg); } }
 
-.jy-content { flex: 1; min-width: 0; margin: 0 8px 8px 0; padding: 24px; display: flex; flex-direction: column; gap: 24px; background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: 14px; }
+.jy-content { flex: 1; min-width: 0; margin: 0 8px 8px 0; padding: 26px 28px 12px; display: flex; flex-direction: column; gap: 24px; background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: 14px; }
 .jy-content > * { transition: opacity .15s; }
 .jy-content.is-refreshing > * { opacity: .6; }
 .jy-page { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
@@ -171,7 +188,7 @@ body {
 .jy-popover .jy-err { margin-top: 12px; }
 
 /* ─── 面板 ────────────────────────────────────────────── */
-.jy-panel { background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); min-width: 0; display: flex; flex-direction: column; }
+.jy-panel { background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: 10px; min-width: 0; display: flex; flex-direction: column; }
 .jy-panel-head { display: flex; align-items: baseline; gap: 12px; padding: 20px 20px 0; flex-wrap: wrap; }
 .jy-panel-head h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--jy-ink); }
 .jy-panel-head .spacer { flex: 1; }
@@ -607,6 +624,10 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .ant-dropdown .ant-dropdown-menu { padding: 4px; }
 
 /* ─── 响应式 ─────────────────────────────────────────── */
+@media (min-width: 1550px) {
+  .jy-shell:not(.is-collapsed) { grid-template-columns: 224px minmax(0, 1fr); }
+  .jy-content { padding-left: 36px; padding-right: 36px; }
+}
 @media (max-width: 1199px) {
   .jy-grid-2:not(.jy-grid-even) { grid-template-columns: minmax(0, 1fr); }
   .jy-grid-3 { grid-template-columns: minmax(0, 1fr); }
@@ -624,10 +645,14 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-eq-value .unit { font-size: 14px; }
   .jy-eq-term { padding-inline: 8px; }
 }
-@media (max-width: 991px) {
+@media (max-width: 1150px) {
+  .jy-sider { padding-inline: 8px; }
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
-  .jy-shell .jy-brand > div, .jy-shell .jy-nav-group, .jy-shell .jy-nav .label, .jy-shell .jy-sider-foot { display: none; }
-  .jy-shell .jy-brand { justify-content: center; padding: 4px 0 20px; }
+  .jy-shell .jy-workspace, .jy-shell .jy-open-own, .jy-shell .jy-brand > div, .jy-shell .jy-nav-group, .jy-shell .jy-nav .label, .jy-shell .jy-sider-foot { display: none; }
+  .jy-shell .jy-brand { justify-content: center; padding: 0; }
+  .jy-shell .jy-brand > :first-child { width: 32px; height: 32px; }
+  .jy-shell .jy-nav { margin-top: 32px; }
+  .jy-content { padding: 22px 22px 12px; }
   .jy-shell .jy-nav a { justify-content: center; padding: 0; }
   .jy-shell .jy-nav-count { position: absolute; top: 4px; right: 4px; min-width: 16px; height: 16px; font-size: 10px; line-height: 16px; padding: 0 4px; }
   .jy-grid-2, .jy-grid-2.jy-grid-even { grid-template-columns: minmax(0, 1fr); }
@@ -641,15 +666,19 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-onboard { grid-template-columns: 1fr; }
 
 }
-@media (max-width: 767px) {
+@media (max-width: 600px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
   .jy-sider {
     position: fixed; z-index: 50; left: 0; top: 0; width: 264px; visibility: hidden; transform: translateX(-100%); transition: transform .2s;
   }
+  .jy-shell .jy-sider .jy-workspace { display: flex; }
+  .jy-shell .jy-sider .jy-open-own { display: none; }
   .jy-shell .jy-sider .jy-brand > div, .jy-shell .jy-sider .jy-nav-group, .jy-shell .jy-sider .jy-nav .label { display: revert; }
   .jy-shell .jy-sider .jy-sider-foot { display: flex; margin-top: 0; padding-top: 4px; }
   .jy-shell .jy-sider .jy-sider-account { display: flex; }
-  .jy-shell .jy-sider .jy-brand { justify-content: flex-start; padding: 4px 8px 20px; }
+  .jy-shell .jy-sider .jy-brand { justify-content: flex-start; padding: 0 9px; }
+  .jy-shell .jy-sider .jy-brand > :first-child { width: 34px; height: 34px; }
+  .jy-shell .jy-sider .jy-nav { margin-top: 0; }
   .jy-shell .jy-sider .jy-nav a { justify-content: flex-start; padding: 0 12px; }
   .jy-shell .jy-sider .jy-nav-count { position: static; min-width: 20px; height: 20px; font-size: 12px; line-height: 20px; padding: 0 6px; }
   .jy-shell .jy-collapse-btn { display: none; }
@@ -657,18 +686,27 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-shell.is-nav-open .jy-scrim { opacity: 1; pointer-events: auto; }
   .jy-topbar .jy-menu-btn { display: inline-grid; margin-left: -8px; }
   .jy-topbar .jy-icon-btn { width: 40px; height: 44px; }
-  .jy-topbar { padding: 0 16px; gap: 8px; }
+  .jy-topbar { height: 52px; padding: 0 14px; gap: 8px; border-bottom: 1px solid var(--jy-rule); background: var(--jy-sheet); }
   .jy-breadcrumb > span:first-child, .jy-breadcrumb > span:nth-child(2) { display: none; }
   .jy-topbar .jy-avatar { display: none; }
   .jy-topbar .jy-freshness { flex: none; }
   .jy-page-head { gap: 12px; }
   .jy-page-head h1 { font-size: 22px; line-height: 30px; }
-  .jy-page-range { width: 100%; }
+  .jy-page-actions { width: 100%; }
+  .jy-page-range { flex: 1; }
   .jy-page-range .jy-range { flex-direction: column; align-items: stretch; gap: 6px; }
   .jy-page-range .jy-seg { width: 100%; overflow-x: auto; }
   .jy-page-range .jy-seg button { flex: 1 0 auto; padding: 0 8px; justify-content: center; }
   .jy-page-range .jy-range-wrap { width: 100%; }
-  .jy-content { margin: 0 8px 8px; padding: 20px 16px; gap: 20px; border-radius: 12px; }
+  .jy-content { margin: 0; padding: 22px 16px 14px; gap: 18px; border: 0; border-radius: 0; min-height: calc(100dvh - 52px); }
+  .jy-content:has(.jy-ov) .jy-page-head { flex-wrap: nowrap; align-items: center; gap: 10px; }
+  .jy-content:has(.jy-ov) .jy-page-title { min-width: 0; }
+  .jy-content:has(.jy-ov) .jy-page-title p { margin-top: 3px; font-size: 11px; line-height: 1.5; }
+  .jy-content:has(.jy-ov) .jy-page-actions { width: auto; flex: none; }
+  .jy-content:has(.jy-ov) .jy-page-actions > .ant-btn { display: none; }
+  .jy-content:has(.jy-ov) .jy-page-range .jy-seg button { min-height: 32px; padding-inline: 13px; }
+}
+@media (max-width: 767px) {
   .jy-page, .jy-tabpanel, .jy-stack { gap: 16px; }
   .jy-grid-2, .jy-grid-3, .jy-grid-8-4 { gap: 16px; }
   .jy-kpis { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }

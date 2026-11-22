@@ -22,7 +22,7 @@ async function openPage(t, { viewport = { width: 1440, height: 1000 }, dark = fa
     const body = url.pathname === "/api/overview" ? transform(overviewFixture(url.searchParams.get("preset") || "today"))
       : url.pathname === "/api/auth/me" ? { username: "fixture" }
       : url.pathname === "/api/meta" ? { types: [], rules: {}, settings: {} }
-      : url.pathname === "/api/stations" || url.pathname === "/api/refresh" ? { stations: [], settings: {} }
+      : url.pathname === "/api/stations" || url.pathname === "/api/refresh" ? { stations: [{ id: "own", name: "初光云序", isOwn: true, type: "newapi", baseUrl: "https://example.invalid" }], settings: {} }
       : url.pathname === "/api/channel-onboarding/accounts" ? { accounts: [], unverifiedResources: [], channels: [], actions: [] }
       : { results: [], actions: [], users: [] };
     return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
@@ -41,6 +41,8 @@ test("真实首页：分开全站消费与部分毛利、各自时间，初次�
   assert.match(await page.locator(".jy-ov-coverage").textContent(), /96\.8%/);
   assert.deepEqual(calls.filter(call => call.method !== "GET"), []);
   assert.equal(calls.some(call => /history/.test(call.path)), false);
+  assert.match(await page.locator(".jy-ov-attention-strip").textContent(), /昨日对账尚未齐全/);
+  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-currency").textContent(), "$");
 });
 
 test("昨天只切经营数据，当前客户余额不倒退；详情链接带选择日期", async t => {
@@ -115,15 +117,27 @@ for (const width of [1440, 768, 390]) for (const dark of [false, true]) test(`�
   const bars = await page.locator(".jy-ov-chart-bar").evaluateAll(nodes => nodes.map(node => ({ x: Number(node.getAttribute("x")), width: Number(node.getAttribute("width")) })));
   assert.equal(bars.length, 7);
   assert.ok(bars.at(-1).x - bars[0].x > 120, "柱形需横跨图表，不能在手机上挤在左侧");
+  if (width === 1440) {
+    const box = selector => page.locator(selector).first().boundingBox();
+    const [trend, row, customers, suppliers, heading, title, controls] = await Promise.all([box(".jy-ov-trend"), box(".jy-ov-customer-table tbody tr"), box(".jy-ov-customers"), box(".jy-ov-suppliers"), box(".jy-page-head"), box(".jy-page-title"), box(".jy-page-actions")]);
+    assert.ok(Math.abs(trend.height - 330) <= 1, `图表需保持确认稿约330px，实际${trend.height}`);
+    assert.ok(Math.abs(row.height - 62) <= 1, `客户行需保持62px，实际${row.height}`);
+    assert.ok(Math.abs(customers.y - suppliers.y) < 1 && Math.abs(customers.height - suppliers.height) < 1, "客户与上游面板需同起点同高度");
+    assert.ok(controls.x >= title.x + title.width && controls.y >= heading.y && controls.y + controls.height <= heading.y + heading.height + 1, "日期与数据说明需在标题同一区域");
+    assert.equal(await page.locator(".jy-ov-intro").count(), 0);
+  }
   if (process.env.UI_SHOT_DIR) {
     await mkdir(resolve(process.env.UI_SHOT_DIR), { recursive: true });
     await page.screenshot({ path: resolve(process.env.UI_SHOT_DIR, `overview-${width}-${dark ? "dark" : "light"}.png`), fullPage: true, animations: "disabled" });
   }
   if (width === 390) {
+    const trend = await page.locator(".jy-ov-trend").boundingBox(), suppliers = await page.locator(".jy-ov-suppliers").boundingBox();
+    assert.ok(trend.height > 300, "手机趋势图与脚注不能被面板裁掉");
+    assert.ok(suppliers.height < 400, "两个上游不应留下整屏空白");
     await page.getByRole("button", { name: "今日消费榜", exact: true }).click();
-    const firstSpend = page.locator(".jy-ov-mobile-spend").first();
+    const firstSpend = page.locator(".jy-ov-customer-table tbody tr td:nth-child(2)").first();
     assert.equal(await firstSpend.isVisible(), true);
-    assert.equal(await firstSpend.textContent(), "今天 $3,458.75");
+    assert.equal(await firstSpend.textContent(), "$3,458.75");
     assert.match(await page.locator(".jy-ov-customer-name").first().getAttribute("href"), /user=101$/);
   }
 });
