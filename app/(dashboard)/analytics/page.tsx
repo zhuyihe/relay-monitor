@@ -94,6 +94,8 @@ export default function AnalyticsPage() {
     () => (
       <RangePicker
         value={rangeValue}
+        tz={tz}
+        range={loadedStart === startDay ? profit?.range : undefined}
         options={RANGE_OPTIONS}
         onChange={(v) => setUrl({ range: v === "30d" ? null : v, start: null })}
         custom={{
@@ -104,7 +106,7 @@ export default function AnalyticsPage() {
         }}
       />
     ),
-    [rangeValue, customOk, rawStart, minDate, today, setUrl],
+    [rangeValue, customOk, rawStart, minDate, today, setUrl, tz, loadedStart, startDay, profit?.range],
   );
 
   useShellPage({

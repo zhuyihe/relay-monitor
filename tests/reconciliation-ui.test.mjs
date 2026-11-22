@@ -270,7 +270,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     assert.equal(profitReads.length, before);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "打开弹窗不横向溢出");
     await page.waitForFunction(() => {
-      const root = document.querySelector('.jy-profit-range-popup'), panel = root?.querySelector('[role="dialog"]');
+      const root = document.querySelector('.jy-time-range-popup'), panel = root?.querySelector('[role="dialog"]');
       return root && getComputedStyle(root).opacity === "1" && panel?.getBoundingClientRect().width > 200;
     });
     const box = await dialog.boundingBox();
@@ -1307,6 +1307,69 @@ test("成本估算：只有「上游成本构成」和「每天的上游成本�
 
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
+for (const path of ["/my", "/usage", "/analytics"]) for (const width of [1440, 390]) {
+  test(`统一时间组件：${path} 只在确认后按原查询范围读取，取消保留原范围（${width}）`, async (t) => {
+    const reads = [];
+    const target = path === "/analytics" ? "7d" : "30d";
+    const endpoint = path === "/my" ? "/api/own/analytics" : path === "/usage" ? "/api/usage" : "/api/reconciliation/profit";
+    const page = await openFixturePage(t, async (route) => {
+      const url = new URL(route.request().url()), name = url.pathname;
+      if (name === "/api/auth/me") return fulfill(route, { username: "fixture" });
+      if (name === "/api/settings") return fulfill(route, { tz: BUSINESS_TZ });
+      if (name === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+      if (name === endpoint) {
+        const now = Date.now(), range = url.searchParams.get("range") || "7d";
+        if (path === "/my") { reads.push({ range }); return fulfill(route, myLayoutAnalytics(range)); }
+        if (path === "/usage") { reads.push({ range }); return fulfill(route, { range, tz: BUSINESS_TZ, startMs: now - 86400000, endMs: now, granularity: "day", stations: [], generatedAt: new Date(now).toISOString() }); }
+        const input = route.request().postDataJSON(); reads.push(input);
+        return fulfill(route, { ...profitPage([]), range: { ...input, timezone: BUSINESS_TZ }, dailyCost: [] });
+      }
+      throw Error("unexpected range fixture API: " + name);
+    }, { width, height: 900 }, false, null, path);
+    const trigger = page.getByRole("button", { name: "选择时间范围", exact: true });
+    await trigger.waitFor();
+    await page.waitForFunction(() => !document.querySelector('.jy-page[aria-busy="true"]'));
+    const before = reads.length;
+    assert.ok(before > 0);
+    await trigger.click();
+    const picker = page.locator(".jy-time-range-panel");
+    await picker.waitFor();
+    await page.waitForFunction(() => { const p = document.querySelector('.jy-time-range-popup'); return p && p.getBoundingClientRect().width > 200 && getComputedStyle(p).opacity === '1'; });
+    if (path === "/analytics") {
+      assert.equal(await picker.getByLabel("结束日期", { exact: true }).getAttribute("readonly"), "");
+      assert.equal(await picker.getByRole("button", { name: "今天", exact: true }).count(), 0);
+    } else {
+      assert.equal(await picker.getByLabel("起始时间", { exact: true }).getAttribute("readonly"), "");
+      assert.equal(await picker.getByRole("button", { name: "自定义", exact: true }).count(), 0, "不开放该页不能查询的自定义时间");
+    }
+    await picker.getByRole("button", { name: RANGE_TEXT[target], exact: true }).click();
+    assert.equal(reads.length, before, "编辑草稿不发查询");
+    await page.waitForFunction(() => { const p = document.querySelector('.jy-time-range-popup'); return p && p.getBoundingClientRect().width > 200 && getComputedStyle(p).opacity === '1'; });
+    const popup = await page.locator(".jy-time-range-popup").boundingBox();
+    await shot(page, `time-range-${path.slice(1)}-${width}`);
+    const layout = await page.evaluate(() => ({ scrollY, trigger: document.querySelector('.jy-time-range-trigger')?.getBoundingClientRect().toJSON() }));
+    assert.ok(popup.y >= -1 && popup.y + popup.height <= 901, "时间弹窗完整留在视口内 " + JSON.stringify({popup,layout}));
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await shot(page, `time-range-${path.slice(1)}-${width}`);
+    await picker.getByRole("button", { name: "取消", exact: true }).click(); await picker.waitFor({ state: "hidden" });
+    assert.equal(reads.length, before);
+    const response = page.waitForResponse((response) => new URL(response.url()).pathname === endpoint);
+    await pickPreset(page, RANGE_TEXT[target]); await response;
+    if (path !== "/analytics") assert.equal(reads.at(-1).range, target);
+    else {
+      assert.equal(reads.at(-1).preset, "custom");
+      assert.equal(shanghaiDay(reads.at(-1).startMs), shiftDay(shanghaiDay(Date.now()), -6));
+      await trigger.click();
+      const from = shiftDay(shanghaiDay(Date.now()), -2);
+      await picker.getByRole("button", { name: "自定义", exact: true }).click();
+      await picker.getByLabel("开始日期", { exact: true }).fill(from);
+      const next = page.waitForResponse((response) => new URL(response.url()).pathname === endpoint);
+      await picker.getByRole("button", { name: "确认", exact: true }).click(); await next;
+      assert.equal(shanghaiDay(reads.at(-1).startMs), from, "自定义仍按业务时区从所选日查询到现在");
+    }
+  });
+}
+
 test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
   const analytics = myLayoutAnalytics;
   const adminKeys = [], paths = [];
@@ -1383,7 +1446,7 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
   assert.deepEqual(adminKeys, ["GET", "GET", "PUT"]);
   // 换范围、点顶栏刷新：一直没请求过 /api/analytics（逐个记下请求过的路径再查）
-  await page.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
+  await pickPreset(page, RANGE_TEXT["30d"]);
   await page.waitForURL(/range=30d/); await income.locator('a[href="/analytics?range=30d"]').waitFor();
   const ownReads = () => paths.filter((x) => x === "/api/own/analytics").length, before = ownReads();
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
@@ -1416,7 +1479,7 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   const chart = estIncome.locator(".jy-chart-stack"); await chart.focus(); await chart.press("End");
   assert.match(await estIncome.locator(".sr-only[aria-live]").innerText(), /收入 ≈/);
   // 选「今天」：这块只画收入，说明不再提净利
-  await unpriced.getByRole("button", { name: RANGE_TEXT.today, exact: true }).click();
+  await pickPreset(unpriced, RANGE_TEXT.today);
   const todayOnly = unpriced.getByRole("region", { name: "每日收入", exact: true });
   await todayOnly.getByText(/看每天的收入；/).waitFor();
   assert.doesNotMatch(await todayOnly.innerText(), /净利/);
@@ -2256,6 +2319,39 @@ async function openTrendDaily(t, dailySpend, { viewport } = {}) {
 }
 const dayKeys30 = (today = "2026-11-02") => Array.from({ length: 30 }, (_, i) => { const d = new Date(`${today}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - (29 - i)); return d.toISOString().slice(0, 10); });
 
+test("统一时间组件：余额趋势确认后才切换小时范围，用户分组展开后才读取并沿用原档位", async (t) => {
+  const { page, modal } = await openTrendDaily(t, { state: "ok", source: "upstream", days: dayKeys30().map((day) => ({ day, usd: 1 })) });
+  const history = [];
+  page.on("request", (request) => { if (/\/history\?hours=/.test(request.url())) history.push(request.url()); });
+  await modal.getByRole("button", { name: "查看范围", exact: true }).click();
+  const picker = page.locator(".jy-time-range-panel");
+  await picker.getByRole("button", { name: RANGE_TEXT["24h"], exact: true }).click();
+  assert.equal(history.length, 0);
+  const query = page.waitForRequest((request) => request.url().includes("/history?hours=24"));
+  await picker.getByRole("button", { name: "确认", exact: true }).click(); await query;
+  await picker.waitFor({ state: "hidden" });
+  assert.equal(await modal.isVisible(), true, "时间弹窗关闭后保留余额趋势");
+
+  const users = await openUsersPage(t);
+  const reads = [];
+  await users.page.route("**/api/own/analytics?*", (route) => { const range = new URL(route.request().url()).searchParams.get("range"); reads.push(range); return fulfill(route, myLayoutAnalytics(range)); });
+  assert.equal(reads.length, 0);
+  const section = users.page.getByRole("region", { name: USERS_COPY.groups.title, exact: true });
+  await section.getByRole("button", { name: USERS_COPY.groups.title, exact: true }).click();
+  const trigger = section.getByRole("button", { name: USERS_COPY.groups.rangeLabel, exact: true });
+  await trigger.waitFor();
+  await users.page.waitForFunction(() => document.querySelector('.jy-users-groups-body')?.getAttribute('aria-busy') !== 'true');
+  const before = reads.length;
+  await trigger.click();
+  const groupsPicker = users.page.locator(".jy-time-range-panel");
+  await groupsPicker.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
+  assert.ok(reads.every((range) => range === "7d"));
+  assert.equal(reads.length, before);
+  const groupsQuery = users.page.waitForRequest((request) => request.url().includes("/api/own/analytics?range=30d"));
+  await groupsPicker.getByRole("button", { name: "确认", exact: true }).click(); await groupsQuery;
+  assert.deepEqual(reads.slice(before), ["30d"]);
+});
+
 test("余额趋势「每天花了多少」：余额小标题和查看范围在一行、细线、近 30 天的柱子（今天浅色、加进来那天一条虚线）、悬停写花费；电脑 1440×900 弹窗不用滚", async (t) => {
   const keys = dayKeys30();
   const dailySpend = { state: "ok", source: "upstream", since: "2026-10-20", todayEstimate: false, days: keys.map((day, i) => ({ day, usd: i === 29 ? 3 : i === 24 ? 10.2 : i % 3 === 0 ? 0 : 5 })) };
@@ -2268,7 +2364,7 @@ test("余额趋势「每天花了多少」：余额小标题和查看范围在�
   // 在同一帧读取两个位置，避免弹窗进场动画期间两次跨帧测量产生假错位。
   const { head, seg } = await modal.locator(".jy-trend-sub").first().evaluate((node) => {
     const rect = (el) => { const box = el.getBoundingClientRect(); return { x: box.x, y: box.y, height: box.height }; };
-    return { head: rect(node.querySelector("h3")), seg: rect(node.querySelector(".jy-seg")) };
+    return { head: rect(node.querySelector("h3")), seg: rect(node.querySelector(".jy-time-range-trigger")) };
   });
   assert.ok(Math.abs((head.y + head.height / 2) - (seg.y + seg.height / 2)) < 12 && seg.x > head.x, "查看范围在余额小标题的右边");
   assert.equal(await modal.locator("hr.jy-trend-rule").count(), 1, "一条细线");

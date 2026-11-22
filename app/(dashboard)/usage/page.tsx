@@ -163,8 +163,8 @@ export default function UsagePage() {
   const loadError = err && err.range === range ? err.error : null;
 
   const rangePicker = useMemo(
-    () => <RangePicker value={range} options={USAGE_RANGES} onChange={(v) => setRange(v as Range)} />,
-    [range, setRange],
+    () => <RangePicker value={range} options={USAGE_RANGES} tz={current?.tz || Intl.DateTimeFormat().resolvedOptions().timeZone} range={current?.startMs != null ? current : undefined} onChange={(v) => setRange(v as Range)} />,
+    [range, setRange, current],
   );
   const asOf = current?.generatedAt ? Date.parse(current.generatedAt) : null;
   // 用量按浏览器时区分桶，接口把用的时区原样带回来；"数据截至"和图上的时段都按它显示

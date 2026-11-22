@@ -599,9 +599,9 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-trend-figs dd { margin: 2px 0 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
 .jy-trend-figs dd.fig { margin: 2px 0 4px; font-size: 20px; line-height: 28px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-trend-figs .jy-status .jy-sym { width: 10px; height: 10px; }
-.jy-trend-sub { display: flex; align-items: center; gap: 8px; }
+.jy-trend-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .jy-trend-sub h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
-.jy-trend-sub .jy-seg { margin-left: auto; }
+.jy-trend-sub .jy-range { margin-left: auto; max-width: 100%; }
 .jy-trend-rule { margin: 0; border: 0; border-top: 1px solid var(--jy-rule-soft); }
 .jy-trend-note { margin: -8px 0 0; }
 .jy-trend-daily { min-height: 148px; }

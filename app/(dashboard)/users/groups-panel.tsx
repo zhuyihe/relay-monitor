@@ -8,7 +8,7 @@ import { EMPTY, formatCompact, formatInt } from "../../../lib/format";
 import { ErrorState, PanelSkeleton } from "../../components/data-state";
 import { More } from "../../components/more";
 import { CountBadge } from "../../components/panel";
-import { Seg } from "../../components/seg";
+import { RangePicker } from "../../components/range-picker";
 import { COL_TEXT, DataTable, Delta, FLOW_UNREADABLE, MY_TEXT, RANGE_OPTIONS, TOKEN_NOTE, deltaSortValue, deriveOwn, money, perM } from "../my/shared";
 import type { OwnRange, UsageRow } from "../my/shared";
 import { COPY } from "./copy";
@@ -45,7 +45,7 @@ function GroupsBody() {
   const stale = !!data && data.range !== range;
 
   const seg = (
-    <Seg<OwnRange> size="sm" label={COPY.groups.rangeLabel} value={range} onChange={setRange} options={RANGE_OPTIONS} />
+    <RangePicker label={COPY.groups.rangeLabel} value={range} onChange={(value) => setRange(value as OwnRange)} options={RANGE_OPTIONS} tz={data?.tz} range={data?.range === range && data.startMs != null ? data : undefined} />
   );
   let body;
   if (error && (!view || stale)) body = <ErrorState what={COPY.groups.unreadable} error={error} onRetry={() => void load(range)} />;

@@ -11,6 +11,8 @@ import { Icon } from "../components/icons";
 import { Panel } from "../components/panel";
 import { EmptyState, ErrorState, PanelSkeleton } from "../components/data-state";
 import { Seg } from "../components/seg";
+import { RangePicker } from "../components/range-picker";
+import { presetTimeRange } from "../../lib/time-range";
 import { useShellPage } from "../components/shell-context";
 import { OverviewChart } from "./overview-chart";
 import type { OverviewPageData, OverviewPeriod } from "./overview-types";
@@ -51,7 +53,7 @@ export default function OverviewPage() {
     await load();
     if (results.some((result) => result.status === "rejected")) message.warning("部分数据刷新未完成，请查看各区块的读取时间。 ");
   };
-  const range = useMemo(() => <Seg<OverviewPeriod> label="经营时间范围" value={period} onChange={setPeriod} options={[{ value: "today", label: "今天" }, { value: "yesterday", label: "昨天" }]} />, [period]);
+  const range = useMemo(() => <RangePicker value={period} onChange={(value) => setPeriod(value as OverviewPeriod)} tz={data?.tz} range={data?.preset === period ? presetTimeRange(period, { tz: data.tz, now: data.now }) : undefined} options={[{ value: "today", label: "今天" }, { value: "yesterday", label: "昨天" }]} />, [period, data?.tz, data?.preset, data?.now]);
   const headingExtra = useMemo(() => <Button className="jy-ov-heading-info" onClick={() => setDialog("basis")}>数据说明 <Icon name="info" /></Button>, []);
   const subtitle = data && !data.unset ? `${formatDayKey(data.day, data.tz, data.now)} ${weekdayOfDayKey(data.day)} · ${data.preset === "today" ? `截至 ${data.financial.asOf == null ? "未同步" : formatZonedTime(data.financial.asOf, data.tz)}` : "已结束账期"}` : undefined;
   const asOfs = (data?.preset === "yesterday" ? [data?.users?.balanceAt, data?.users?.usageAt] : [data?.financial?.asOf, data?.users?.balanceAt, data?.profit?.asOf ? Date.parse(data.profit.asOf) : null]).filter((value): value is number => value != null && Number.isFinite(value));

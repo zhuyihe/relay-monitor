@@ -9,38 +9,6 @@
 .jy-profit-timing { font-size: 12px; line-height: 20px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
 .jy-profit-timing > span:last-child { margin-left: 12px; color: var(--jy-ink-3); }
 .jy-profit-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
-.jy-profit-range-trigger { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; max-width: 100%; padding: 9px 16px; border: 1px solid var(--jy-rule); border-radius: 999px; background: var(--jy-sunken); color: var(--jy-ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; font-variant-numeric: tabular-nums; }
-.jy-profit-range-trigger:hover { border-color: var(--jy-ink-3); }
-.jy-profit-range-trigger:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
-.jy-profit-range-trigger > .jy-icon { flex: none; width: 16px; height: 16px; color: var(--jy-ink-2); }
-.jy-profit-range-values { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.jy-profit-range-values time { display: flex; flex-wrap: wrap; gap: 2px 5px; }
-.jy-profit-range-to { color: var(--jy-ink-3); }
-.jy-profit-range-popup { max-width: calc(100vw - 24px); }
-.jy-profit-range-popup .ant-popover-container { padding: 20px; border: 1px solid var(--jy-rule); border-radius: 16px; background: var(--jy-sheet); box-shadow: var(--jy-shadow); }
-.jy-profit-range-panel { width: min(600px, calc(100vw - 66px)); color: var(--jy-ink); }
-.jy-profit-range-fields { display: grid; grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr); align-items: end; gap: 12px; }
-.jy-profit-range-fields label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--jy-ink-2); font-size: 13px; }
-.jy-profit-range-fields .ant-input { width: 100%; min-width: 0; min-height: 44px; border-radius: 999px; padding: 8px 12px; background: var(--jy-sheet); color: var(--jy-ink); font-size: 14px; font-variant-numeric: tabular-nums; }
-.jy-profit-range-separator { padding-bottom: 12px; color: var(--jy-ink-3); }
-.jy-profit-range-presets { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
-.jy-profit-range-presets button { min-height: 40px; padding: 6px; border: 1px solid transparent; border-radius: 999px; background: var(--jy-sunken); color: var(--jy-ink-2); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
-.jy-profit-range-presets button:hover { border-color: var(--jy-rule); color: var(--jy-ink); }
-.jy-profit-range-presets button[aria-pressed="true"] { background: var(--jy-cobalt-tint); color: var(--jy-cobalt); border-color: var(--jy-cobalt); }
-.jy-profit-range-presets button:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
-.jy-profit-range-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
-.jy-profit-range-foot .ant-btn { min-height: 40px; padding-inline: 20px; border-radius: 999px; }
-.jy-profit-range-error { margin: 12px 0 0; color: var(--jy-crit); font-size: 12px; line-height: 20px; }
-@media (max-width: 600px) {
-  .jy-profit-range-trigger { width: 100%; padding-inline: 12px; border-radius: 12px; }
-  .jy-profit-range-values { flex: 1; justify-content: space-between; }
-  .jy-profit-range-values time { flex-direction: column; }
-  .jy-profit-range-values time > span:last-child { font-size: 12px; color: var(--jy-ink-2); }
-  .jy-profit-range-fields { grid-template-columns: minmax(0, 1fr); gap: 14px; }
-  .jy-profit-range-separator { display: none; }
-  .jy-profit-range-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .jy-profit-range-presets button, .jy-profit-range-foot .ant-btn { min-height: 44px; }
-}
 /* 换了范围、新数据还没回来：旧数字属于别的范围，变淡且不能点 */
 .jy-profit-switching { opacity: .5; pointer-events: none; transition: opacity .2s; }
 

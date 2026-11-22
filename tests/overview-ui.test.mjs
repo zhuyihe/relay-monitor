@@ -49,7 +49,11 @@ test("昨天只切经营数据，当前客户余额不倒退；详情链接带�
   const { page } = await openPage(t);
   const balanceBefore = await page.locator(".jy-ov-customer-table").textContent();
   const response = page.waitForResponse(response => new URL(response.url()).pathname === "/api/overview" && response.url().includes("yesterday"));
-  await page.getByRole("button", { name: "昨天", exact: true }).click(); await response;
+  await page.getByRole("button", { name: "选择时间范围", exact: true }).click();
+  const picker = page.locator(".jy-time-range-panel");
+  await picker.getByRole("button", { name: "昨天", exact: true }).click();
+  await picker.getByRole("button", { name: "确认", exact: true }).click(); await response;
+  await picker.waitFor({ state: "hidden" });
   await page.waitForFunction(() => document.querySelector(".jy-ov-metric.is-lead .jy-ov-value")?.textContent === "$20,506.26");
   assert.equal(await page.locator(".jy-ov-customer-table").textContent(), balanceBefore);
   assert.match(await page.locator(".jy-ov-customers").textContent(), /当前余额/);

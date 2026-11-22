@@ -146,8 +146,8 @@ export default function MyStationPage() {
 
   // 外壳会把范围控件渲染两次，元素要稳定；没设置自营站点时不给范围
   const rangePicker = useMemo(
-    () => (unconfigured ? undefined : <RangePicker value={range} options={RANGE_OPTIONS} onChange={(x) => setRange(x as OwnRange)} />),
-    [unconfigured, range, setRange],
+    () => (unconfigured ? undefined : <RangePicker value={range} options={RANGE_OPTIONS} tz={data?.tz} range={data?.range === range && data.startMs != null ? data : undefined} onChange={(x) => setRange(x as OwnRange)} />),
+    [unconfigured, range, setRange, data],
   );
   useShellPage({ onRefresh, asOf, range: rangePicker, tz: data?.tz });
 
