@@ -3429,7 +3429,7 @@ test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；�
   const { page, requests } = await openUsersPage(t, { search: "tab=users" });
   const rows = () => page.locator("table.jy-data tbody tr");
   await rows().first().waitFor();
-  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "近 14 天", "近 7 天消费", "今日消费", "余额和可用时间", "最近使用"], "六列");
+  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "余额和可用时间", "今日消费", "近 7 天消费", "近 14 天", "最近使用"], "余额紧邻用户，消费和趋势在后面");
   assert.equal(await rows().count(), 50);
   await page.getByText("共 65 个，每页 50 个", { exact: true }).waitFor();
   assert.match(await usersGroup(page, USERS_COPY.users.scopeLabel).innerText(), /近 30 天有消费\s*65[\s\S]*全部\s*120/);
@@ -3522,8 +3522,21 @@ test("用户运营·手机：用户表是一人一张卡片，筛选三行、没
   assert.ok(scope.top < big.top && Math.abs(big.top - group.top) < 24 && big.left < group.left && Math.max(big.top, group.top) < status.top, JSON.stringify({ scope, big, group, status }));
   assert.deepEqual(await page.getByRole("tab").allInnerTexts().then((list) => list.map((text) => text.replace(/\s+/g, " ").trim())), ["概览", "用户", "流失"], "页签只有三个，都能点");
   assert.match(await cards.first().innerText(), /u001[\s\S]*vip · 最近使用/);
+  const hierarchy = await cards.first().evaluate((card) => {
+    const balance = card.querySelector(".jy-users-balance"), today = card.querySelector(".jy-users-today");
+    return {
+      balanceFirst: balance.getBoundingClientRect().top < today.getBoundingClientRect().top,
+      balanceSize: parseFloat(getComputedStyle(balance).fontSize), todaySize: parseFloat(getComputedStyle(today).fontSize),
+      primary: card.querySelector(".jy-users-card-balance").textContent,
+    };
+  });
+  assert.ok(hierarchy.balanceFirst && hierarchy.balanceSize > hierarchy.todaySize, "余额在消费上方，字号更大");
+  assert.match(hierarchy.primary, /当前余额[\s\S]*预计可用/);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "375px 不横向滚动");
   if (process.env.UI_SHOT_DIR) { await page.waitForTimeout(400); await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/users-users-375.png`, fullPage: false }); }
+  await page.setViewportSize({ width: 320, height: 812 });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px 分组筛选也不撑出横向滚动");
+  await page.setViewportSize({ width: 375, height: 812 });
   await cards.first().click();
   await page.getByText(USERS_COPY.drawer.created, { exact: true }).waitFor();
   assert.match(await page.locator(".jy-users-drawer-meta").innerText(), /分组\s*vip\s*注册时间[\s\S]*累计消费\s*¥/);

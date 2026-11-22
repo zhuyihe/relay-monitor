@@ -79,7 +79,7 @@ export function UsersTab({
       <StatusTag status={row.status} />
     </span>
   );
-  // 近 7 天消费：金额加粗，下面一行小字写比前 7 天
+  // 余额和预计可用时间是主信息；消费与趋势放在后面作参考。
   const vsText = (row: UsersRow) => (!compare ? EMPTY : row.prevWeek > 0 ? COPY.users.vsPrev(deltaText(row.closedWeek, row.prevWeek)) : row.closedWeek > 0 ? COPY.users.vsNone : EMPTY);
   const cols: Col<UsersRow>[] = [
     {
@@ -87,18 +87,18 @@ export function UsersTab({
       render: (r) => (<span className="jy-cell-two">{name(r)}{r.group && <span className="jy-caption">{r.group}</span>}</span>),
       foot: searching ? COPY.users.totalMatched(list.total) : COPY.users.total(list.total),
     },
-    { key: "spark", label: COPY.users.cols.spark, render: (r) => <SparkLine values={sparkValues(r, page.availableDays)} gray={r.status === "down" || r.status === "churned"} label={COPY.users.sparkLabel(r.username)} /> },
+    {
+      key: "balance", label: COPY.users.cols.balanceDays, num: true, sort: noop,
+      render: (r) => (<span className={`jy-cell-two jy-cell-two--r jy-users-balance-summary${r.status === "empty" || r.status === "soon" ? " is-low" : ""}`}><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
+      foot: <span className="jy-users-balance">{money(list.totals.balance, rate)}</span>,
+    },
+    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => <span className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate)}</span>, foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
     {
       key: "week", label: COPY.users.cols.week, num: true, sort: noop,
       render: (r) => (<span className="jy-cell-two jy-cell-two--r"><b className="jy-users-week">{weekOk ? money(r.week, rate) : EMPTY}</b><span className={`jy-caption${r.prevWeek > 0 ? "" : " jy-muted"}`}>{vsText(r)}</span></span>),
       foot: weekOk ? money(list.totals.week, rate) : EMPTY,
     },
-    { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => <span className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate)}</span>, foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
-    {
-      key: "balance", label: COPY.users.cols.balanceDays, num: true, sort: noop,
-      render: (r) => (<span className="jy-cell-two jy-cell-two--r"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
-      foot: <span className="jy-users-balance">{money(list.totals.balance, rate)}</span>,
-    },
+    { key: "spark", label: COPY.users.cols.spark, render: (r) => <SparkLine values={sparkValues(r, page.availableDays)} gray={r.status === "down" || r.status === "churned"} label={COPY.users.sparkLabel(r.username)} /> },
     { key: "last", label: COPY.users.cols.lastUsed, num: true, sort: noop, render: (r) => lastUsedText(r, page) },
   ];
   const empty = searching ? COPY.users.noMatch : list.counts.scope.all === 0 ? COPY.users.noUsers : COPY.users.noOnly;
@@ -173,7 +173,6 @@ export function UsersTab({
                 value={query.groups}
                 onChange={(value) => onQuery({ groups: value })}
                 options={list.groups.map((value) => ({ value, label: value }))}
-                style={{ minWidth: 140 }}
               />
             </label>
           </>
@@ -188,11 +187,13 @@ export function UsersTab({
                   <span className="r1">
                     <span className="jy-users-name"><b>{row.username}</b>{row.big && <BigTag plain tip={bigTipText(row, page)} />}<StatusTag status={row.status} /></span>
                   </span>
-                  <span className="jy-users-card-metrics">
-                    <span><span className="jy-caption">{COPY.users.cols.today}</span><b className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(row.today, rate)}</b></span>
-                    <span><span className="jy-caption">{COPY.users.cols.week}</span><b className="jy-users-week">{weekOk ? money(row.week, rate) : EMPTY}</b></span>
+                  <span className={`jy-users-card-balance jy-users-balance-summary${row.status === "empty" || row.status === "soon" ? " is-low" : ""}`}>
                     <span><span className="jy-caption">{COPY.users.currentBalance}</span><b className="jy-users-balance">{money(row.balanceUsd, rate)}</b></span>
-                    <span><span className="jy-caption">{COPY.users.expectedRunway}</span><RunwayCell row={row} page={page} /></span>
+                    <span className="jy-users-card-runway"><span className="jy-caption">{COPY.users.expectedRunway}</span><RunwayCell row={row} page={page} /></span>
+                  </span>
+                  <span className="jy-users-card-spend">
+                    <span><span className="jy-caption">{COPY.users.cols.today}</span><span className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(row.today, rate)}</span></span>
+                    <span><span className="jy-caption">{COPY.users.cols.week}</span><span className="jy-users-week">{weekOk ? money(row.week, rate) : EMPTY}</span></span>
                   </span>
                   <span className="r2">
                     <SparkLine values={sparkValues(row, page.availableDays)} gray={row.status === "down" || row.status === "churned"} label={COPY.users.sparkLabel(row.username)} />

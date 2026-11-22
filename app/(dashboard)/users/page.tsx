@@ -193,8 +193,8 @@ export default function UsersPageRoute() {
       <Tabs<TabKey> tabs={TAB_DEFS} active={tab} onChange={setTab} idPrefix="users" label={COPY.tabsLabel} />
       <div className="jy-users-data-note">
         {(page.todaySyncedMs != null || page.balanceSyncedMs != null) && <p className="jy-users-progress" role="status">
-          {page.todaySyncedMs != null && <span>{COPY.consumptionReadAt(formatZonedTime(page.todaySyncedMs, page.tz))}</span>}
           {page.balanceSyncedMs != null && <span>{COPY.drawer.balanceReadAt(formatZonedTime(page.balanceSyncedMs, page.tz))}</span>}
+          {page.todaySyncedMs != null && <span>{COPY.consumptionReadAt(formatZonedTime(page.todaySyncedMs, page.tz))}</span>}
         </p>}
         {tab !== "churn" && !page.basicOnly && <p className="jy-users-progress">{COPY.consumptionWindow}</p>}
       </div>

@@ -28,18 +28,19 @@
 .jy-users-table table.jy-data { min-width: 940px; }
 .jy-users-table table.jy-data th { background: var(--jy-sheet); }
 .jy-users-table table.jy-data tbody tr.is-clickable td { padding-block: 14px; vertical-align: top; line-height: 22px; }
-.jy-users-table table.jy-data th:first-child { width: 27%; }
-.jy-users-table table.jy-data th:nth-child(2) { width: 14%; }
-.jy-users-table table.jy-data th:nth-child(3) { width: 17%; }
-.jy-users-table table.jy-data th:nth-child(4) { width: 13%; }
-.jy-users-table table.jy-data th:nth-child(5) { width: 21%; }
-.jy-users-table table.jy-data th:last-child { width: 8%; }
+.jy-users-table table.jy-data th:first-child { width: 25%; }
+.jy-users-table table.jy-data th:nth-child(2) { width: 23%; }
+.jy-users-table table.jy-data th:nth-child(3) { width: 13%; }
+.jy-users-table table.jy-data th:nth-child(4) { width: 16%; }
+.jy-users-table table.jy-data th:nth-child(5) { width: 13%; }
+.jy-users-table table.jy-data th:last-child { width: 10%; }
 .jy-users-table .jy-cell-two { gap: 3px; line-height: 22px; }
 .jy-users-table .jy-cell-two .jy-caption { font-size: 12px; line-height: 18px; }
 .jy-users-table .jy-users-spark { height: 42px; }
 .jy-users-table .jy-users-today, .jy-users-table .jy-users-balance, .jy-users-week { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.jy-users-table .jy-users-today { color: var(--jy-cobalt); font-weight: 600; }
-.jy-users-table .jy-users-balance { font-weight: 500; }
+.jy-users-table .jy-users-today { color: var(--jy-ink-2); }
+.jy-users-table .jy-users-balance { font-size: 16px; font-weight: 600; }
+.jy-users-balance-summary.is-low .jy-users-balance, .jy-users-balance-summary.is-low .jy-cell-runway { color: var(--jy-crit-ink); }
 .jy-users-table .r .jy-my-sort { justify-content: flex-end; }
 .jy-users-table .jy-cell-runway { justify-content: flex-end; gap: 8px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
 .jy-users-table .jy-cell-runway .jy-mini-track { width: 68px; }
@@ -49,7 +50,7 @@
 .jy-users-big-tip { max-width: min(460px, 92vw); }
 /* 名字太长时一行放不下就截断（悬停看全名），不撑高行 */
 .jy-users-name .jy-users-linkbtn { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jy-users-week { font-weight: 600; font-variant-numeric: tabular-nums; }
+.jy-users-week { font-weight: 500; font-variant-numeric: tabular-nums; }
 /* 重点用户小标记：灰框白底、11px、深灰字，不填色，比状态标签还轻 */
 .jy-users-big {
   display: inline-block; flex: none; padding: 0 5px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r1);
@@ -69,27 +70,31 @@
 .jy-users-groups-head p { margin: 0; }
 .jy-users-groups-head .spacer { flex: 1; }
 
-/* 手机：一人一张卡片，三行 */
+/* 手机：先看余额与可用时间，消费和趋势作为次要信息。 */
 .jy-users-cards { list-style: none; margin: 0; padding: 0; }
 .jy-users-card {
-  display: flex; flex-direction: column; gap: 14px; width: 100%; padding: 16px; border: 0; border-top: 1px solid var(--jy-rule-soft);
+  display: flex; flex-direction: column; gap: 12px; width: 100%; padding: 16px; border: 0; border-top: 1px solid var(--jy-rule-soft);
   background: var(--jy-sheet); font: inherit; color: inherit; text-align: left; cursor: pointer;
 }
 .jy-users-card:focus-visible { outline: none; box-shadow: inset var(--jy-focus-ring); }
 .jy-users-card .r1, .jy-users-card .r2, .jy-users-card .r3 { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .jy-users-card .r1 .jy-users-name { flex: 1 1 auto; flex-wrap: wrap; }
+.jy-users-card .r1 .jy-users-name > b { overflow-wrap: anywhere; }
 .jy-users-card .r2 { justify-content: space-between; }
 .jy-users-card .r2 .jy-caption { text-align: right; font-size: 12px; }
 .jy-users-card .r2 .jy-users-spark { width: 96px; height: 28px; flex: none; }
 .jy-users-card .jy-mini-track { width: 72px; }
-.jy-users-card-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; width: 100%; }
-.jy-users-card-metrics > span { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 0; }
-.jy-users-card-metrics .jy-caption { font-size: 12px; line-height: 18px; }
-.jy-users-card-metrics b { font-size: 16px; line-height: 22px; font-weight: 500; }
-.jy-users-card-metrics .jy-users-today { color: var(--jy-cobalt); font-weight: 600; }
-.jy-users-card-metrics .jy-cell-runway { gap: 6px; justify-content: flex-end; line-height: 22px; font-size: 14px; }
-.jy-users-card-metrics .jy-cell-runway .jy-mini-track { width: 46px; }
-.jy-users-card-metrics .jy-cell-runway .v { min-width: 0; }
+.jy-users-card-balance { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px; width: 100%; }
+.jy-users-card-balance > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.jy-users-card-balance .jy-caption { font-size: 12px; line-height: 18px; }
+.jy-users-card-balance .jy-users-balance { font-size: clamp(20px, 6vw, 24px); line-height: 32px; font-weight: 600; overflow-wrap: anywhere; }
+.jy-users-card-balance > .jy-users-card-runway { align-items: flex-end; }
+.jy-users-card-balance .jy-cell-runway { flex-direction: column-reverse; align-items: flex-end; gap: 6px; font-size: 18px; line-height: 24px; }
+.jy-users-card-balance .jy-cell-runway .jy-mini-track { width: 80px; height: 5px; }
+.jy-users-card-balance .jy-cell-runway .v { min-width: 0; }
+.jy-users-card-spend { display: flex; flex-wrap: wrap; gap: 4px 20px; color: var(--jy-ink-2); font-size: 13px; line-height: 20px; }
+.jy-users-card-spend > span { display: inline-flex; align-items: baseline; gap: 6px; }
+.jy-users-card-spend .jy-caption { font-size: 12px; }
 
 /* ─── 抽屉 ─── */
 .jy-users-drawer .ant-drawer-title { flex: 1; min-width: 0; }
@@ -118,7 +123,9 @@
   .jy-users-data-note { gap: 2px; }
   .jy-users-progress { font-size: 12px; line-height: 18px; }
   .jy-users-filters { padding-inline: 16px; gap: 8px 12px; }
-  .jy-users-filters .jy-seg { overflow-x: auto; }
+  .jy-users-filters .jy-seg { overflow-x: auto; scrollbar-width: none; }
+  .jy-users-page .jy-tabs { overflow-y: hidden; scrollbar-width: none; }
+  .jy-users-filters .jy-seg::-webkit-scrollbar, .jy-users-page .jy-tabs::-webkit-scrollbar { display: none; }
   .jy-users-filters-rule { display: none; }
   /* 手机上筛选三行（设计 v8）：范围一整行；勾选框在左、分组下拉在右；状态一整行，横着滑 */
   .jy-users-seg-scope { order: 1; flex: 1 0 100%; }
@@ -134,6 +141,10 @@
   .jy-users-drawer-kpis > div + div { padding-left: 0; border-left: 0; }
 }
 
+@media (max-width: 359px) {
+  .jy-users-group { flex-basis: 100%; }
+}
+
 /* 概览：五个数；手机两两一排，第五格占满一行 */
 .jy-users-chartnote { margin: 0 0 8px; }
 @media (max-width: 767px) {
@@ -143,6 +154,7 @@
 .jy-users-balance { font-variant-numeric: tabular-nums; }
 .jy-users-group { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--jy-ink-2); }
 .jy-users-group > span { flex: none; white-space: nowrap; }
+.jy-users-group .ant-select { min-width: 140px; }
 .jy-users-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 20px; border-top: 1px solid var(--jy-rule-soft); }
 .jy-users-pages { display: inline-flex; align-items: center; gap: 12px; }
 @media (max-width: 767px) {
