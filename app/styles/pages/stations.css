@@ -8,7 +8,8 @@
 .jy-stations-order { display: inline-flex; align-items: center; gap: 8px; color: var(--jy-ink-2); font-size: 13px; }
 .jy-stations-order .ant-select { width: 180px; }
 .jy-stations-panel { min-width: 0; }
-.jy-stations-table { min-width: 1080px; table-layout: fixed; }
+/* 隐藏的读屏说明也定位在表内，随横向滚动容器裁切，避免把平板整页撑宽。 */
+.jy-stations-table { position: relative; min-width: 1080px; table-layout: fixed; }
 .jy-stations-col-name { width: 19%; }
 .jy-stations-col-status { width: 14%; }
 .jy-stations-col-ch { width: 10%; }

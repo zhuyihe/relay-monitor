@@ -2577,7 +2577,7 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
     throw new Error("unexpected API: " + path);
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
   const table = page.locator(".jy-stations-table");
-  for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [2560, 1440]]) {
+  for (const [width, height] of [[768, 900], [1280, 800], [1440, 900], [1920, 1080], [2560, 1440]]) {
     await page.setViewportSize({ width, height });
     await table.locator("tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByText("2 个", { exact: true }).waitFor();
     for (const [name, text] of [["主力上游", "2 个"], ["没有渠道上游", "没有渠道"], ["只用 Key", "—"]]) {
@@ -2590,8 +2590,9 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
     assert.ok((await table.locator("thead th").nth(2).locator("xpath=.").boundingBox()).height <= 48, "表头不折行");
     const fit = await page.evaluate(() => {
       const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"), sub = t.querySelector("tbody .jy-stations-sub > span");
-      return { wrap: w.clientWidth, table: t.scrollWidth, subLines: Math.round(sub.getBoundingClientRect().height / parseFloat(getComputedStyle(sub).lineHeight)) };
+      return { wrap: w.clientWidth, table: t.scrollWidth, subLines: Math.round(sub.getBoundingClientRect().height / parseFloat(getComputedStyle(sub).lineHeight)), overflow: document.documentElement.scrollWidth > innerWidth };
     });
+    assert.equal(fit.overflow, false, `${width} 宽：表格内部横向滚动不能撑宽整页`);
     if (width >= 1440) assert.ok(fit.table <= fit.wrap, `${width} 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
     else if (process.env.UI_SHOT_DIR) console.log(`${width} 宽：表 ${fit.table}，容器 ${fit.wrap}，要左右拖 ${fit.table - fit.wrap}px`);
     if (width >= 1920) assert.equal(fit.subLines, 1, `${width} 宽位置够，状态小字该一行放下`);
