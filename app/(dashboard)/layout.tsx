@@ -10,7 +10,7 @@ import { visibleInterval } from "../../lib/visible-interval.js";
 import { formatAsOf, formatAsOfTime } from "../../lib/format";
 import { failureText } from "../../lib/error-copy";
 import { workflowActionMeta } from "../../lib/workflow-actions";
-import { BRAND, formatPageTitle, NAV_LABELS, VERSION_LABEL } from "../../lib/brand";
+import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
 import { NAV_GROUPS, NAV_ITEMS, navItemFor } from "../../lib/nav";
 import { buildOverviewActions } from "../../lib/overview-actions";
 import BrandMark from "../components/brand-mark";
@@ -20,7 +20,6 @@ import { ShellContext } from "../components/shell-context";
 import type { ShellPage } from "../components/shell-context";
 import { useThemeMode } from "../providers";
 import { useWorkflowActions } from "../components/use-workflow-actions";
-import pkg from "../../package.json";
 
 const SIDER_KEY = "jy-sider";
 const COUNT_POLL_MS = 60_000;
@@ -180,24 +179,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const stale = asOf != null && now - asOf > STALE_MS;
   const initial = (username || "管").slice(0, 1).toUpperCase();
   const range = passwordChangeRequired ? null : page.range;
-  const workspaceLabel = ownStation ? `${ownStation.name}主站` : ownStation === null ? "设置主站" : "主站";
 
   return (
     <ShellContext.Provider value={shellApi}>
       <div className={`jy-shell${collapsed ? " is-collapsed" : ""}${navOpen ? " is-nav-open" : ""}`}>
         <aside className="jy-sider" id="jy-sider" ref={siderRef} aria-label="主导航">
-          <Link href="/" className="jy-brand" aria-label={`${BRAND.productName}，回到${NAV_LABELS.home}`}>
-            <BrandMark size={34} />
-            <div>
-              <strong>{BRAND.name}</strong>
-              <small>运营控制台</small>
-            </div>
-          </Link>
-          {!passwordChangeRequired && <Link href="/my" className="jy-workspace" aria-label={`${workspaceLabel}，查看自营业务`} title={workspaceLabel}>
-            <span className={`jy-workspace-dot${ownStation ? " is-configured" : ""}`} aria-hidden="true" />
-            <span className="jy-workspace-name">{workspaceLabel}</span>
-            <Icon name="expand" />
-          </Link>}
+          <div className="jy-brand-row">
+            <Link href="/" className="jy-brand" aria-label={`${BRAND.productName}，回到${NAV_LABELS.home}`}>
+              <BrandMark size={34} />
+              <div>
+                <strong>{BRAND.name}</strong>
+                <small>运营控制台</small>
+              </div>
+            </Link>
+            <button
+              type="button"
+              className="jy-collapse-btn"
+              onClick={toggleCollapsed}
+              aria-label={collapsed ? "展开导航" : "收起导航"}
+              aria-expanded={!collapsed}
+            >
+              <Icon name={collapsed ? "expand" : "collapse"} />
+            </button>
+          </div>
+          {!passwordChangeRequired && ownStation?.baseUrl && <a className="jy-workspace" href={`${ownStation.baseUrl.replace(/\/+$/, "")}/dashboard`} target="_blank" rel="noopener noreferrer" aria-label={`${ownStation.name}主站，打开主站控制台`} title="打开主站控制台">
+            <span className="jy-workspace-dot" aria-hidden="true" />
+            <span className="jy-workspace-name">{ownStation.name}主站</span>
+            <Icon name="external" />
+          </a>}
           <nav className="jy-nav">
             {groups.map((g) => (
               <Fragment key={g.label}>
@@ -234,19 +243,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <button type="button" className="jy-sider-logout" onClick={onLogout}>
               <Icon name="logout" />
               退出登录
-            </button>
-          </div>
-          {ownStation?.baseUrl && <a className="jy-open-own" href={ownStation.baseUrl} target="_blank" rel="noopener noreferrer">打开主站<Icon name="external" /></a>}
-          <div className="jy-sider-foot">
-            <span className="grow">{VERSION_LABEL} {pkg.version}</span>
-            <button
-              type="button"
-              className="jy-collapse-btn"
-              onClick={toggleCollapsed}
-              aria-label={collapsed ? "展开导航" : "收起导航"}
-              aria-expanded={!collapsed}
-            >
-              <Icon name={collapsed ? "expand" : "collapse"} />
             </button>
           </div>
         </aside>

@@ -38,36 +38,33 @@ body {
 .jy-shell.is-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
 
 .jy-sider {
-  position: sticky; top: 0; height: 100vh; z-index: 30;
+  position: sticky; top: 0; height: 100dvh; z-index: 30;
   display: flex; flex-direction: column;
   background: var(--jy-sider);
   border-right: 1px solid var(--jy-sider-edge);
   color: var(--jy-sider-ink);
-  padding: 24px 14px 20px;
-  overflow-y: auto;
+  padding: 20px 16px 16px;
+  overflow: hidden;
 }
+.jy-brand-row { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; }
 .jy-brand { display: flex; align-items: center; gap: 10px; padding: 0 9px; color: var(--jy-ink); text-decoration: none; }
 .jy-brand:hover { text-decoration: none; }
 .jy-brand strong { display: block; font-size: 17px; line-height: 24px; font-weight: 650; letter-spacing: .02em; }
 .jy-brand small { display: block; font-size: 11px; line-height: 16px; color: var(--jy-sider-ink-3); }
 
-.jy-workspace { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 10px 12px; margin: 27px 4px 14px; border: 1px solid var(--jy-rule); border-radius: 6px; color: var(--jy-ink); background: var(--jy-sheet); font-size: 12px; text-decoration: none; }
-.jy-workspace:hover { color: var(--jy-ink); border-color: var(--jy-ink-dis); }
-.jy-workspace-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jy-workspace-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--jy-ink-dis); }
-.jy-workspace-dot.is-configured { background: var(--jy-good); }
+.jy-workspace { display: flex; flex: none; align-items: center; gap: 8px; min-height: 38px; margin: 18px 4px 4px; padding: 9px 12px; border: 1px solid var(--jy-rule); border-radius: 6px; background: var(--jy-sheet); color: var(--jy-ink); font-size: 12px; text-decoration: none; }
+.jy-workspace:hover { border-color: var(--jy-ink-dis); color: var(--jy-cobalt); }
+.jy-workspace-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--jy-good); }
+.jy-workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jy-workspace > .jy-icon { width: 12px; height: 12px; margin-left: auto; color: var(--jy-ink-3); }
-.jy-open-own { display: flex; align-items: center; gap: 8px; margin: auto 12px 0; padding-top: 28px; color: var(--jy-ink-3); text-decoration: none; font-size: 12px; }
-.jy-open-own:hover { color: var(--jy-cobalt); }
-.jy-open-own .jy-icon { width: 13px; height: 13px; }
-.jy-open-own + .jy-sider-foot { margin-top: 0; padding-top: 12px; }
-.jy-nav { display: flex; flex-direction: column; gap: 3px; }
-.jy-nav-group { font-size: 11px; line-height: 18px; color: var(--jy-sider-ink-3); padding: 20px 12px 8px; }
-.jy-nav-group:first-child { padding-top: 20px; }
+.jy-nav { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 2px; margin-top: 12px; overflow-y: auto; scrollbar-width: none; }
+.jy-nav::-webkit-scrollbar { display: none; }
+.jy-nav-group { flex-shrink: 0; font-size: 11px; line-height: 18px; color: var(--jy-sider-ink-3); padding: 12px 12px 6px; }
+.jy-nav-group:first-child { padding-top: 6px; }
 .jy-nav a {
   position: relative;
   display: flex; align-items: center; gap: 11px;
-  font-size: 14px; height: 40px; padding: 0 12px;
+  font-size: 14px; flex-shrink: 0; height: 38px; padding: 0 12px;
   border-radius: 6px;
   color: var(--jy-sider-ink);
   text-decoration: none;
@@ -83,10 +80,8 @@ body {
   border-radius: 10px; background: var(--jy-rule); color: var(--jy-ink-2);
   font-size: 12px; line-height: 20px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums;
 }
-.jy-sider-foot { margin-top: auto; padding: 12px; display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--jy-sider-ink-3); }
-.jy-sider-foot .grow { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 导航抽屉里的账户行：只在窄屏出现（顶栏放不下账户菜单时） */
-.jy-sider-account { display: none; align-items: center; gap: 10px; margin: auto 12px 0; padding: 12px 0; border-top: 1px solid var(--jy-rule); font-size: 13px; line-height: 20px; color: var(--jy-sider-ink); }
+.jy-sider-account { flex-shrink: 0; display: none; align-items: center; gap: 10px; margin: auto 12px 0; padding: 12px 0; border-top: 1px solid var(--jy-rule); font-size: 13px; line-height: 20px; color: var(--jy-sider-ink); }
 .jy-sider-account .jy-avatar { cursor: default; flex: none; }
 .jy-sider-account .grow { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-sider-logout {
@@ -102,15 +97,13 @@ body {
 .jy-collapse-btn:hover { background: var(--jy-sunken); color: var(--jy-ink); }
 
 .jy-shell.is-collapsed .jy-workspace,
-.jy-shell.is-collapsed .jy-open-own,
 .jy-shell.is-collapsed .jy-brand > div,
 .jy-shell.is-collapsed .jy-nav-group,
-.jy-shell.is-collapsed .jy-nav .label,
-.jy-shell.is-collapsed .jy-sider-foot .grow { display: none; }
-.jy-shell.is-collapsed .jy-brand { justify-content: center; padding: 4px 0 20px; }
+.jy-shell.is-collapsed .jy-nav .label { display: none; }
+.jy-shell.is-collapsed .jy-brand-row { flex-direction: column; gap: 12px; }
+.jy-shell.is-collapsed .jy-brand { justify-content: center; padding: 0; }
 .jy-shell.is-collapsed .jy-nav a { justify-content: center; padding: 0; }
 .jy-shell.is-collapsed .jy-nav-count { position: absolute; top: 4px; right: 4px; min-width: 16px; height: 16px; font-size: 10px; line-height: 16px; padding: 0 4px; }
-.jy-shell.is-collapsed .jy-sider-foot { justify-content: center; padding: 12px 0; }
 
 .jy-main { min-width: 0; display: flex; flex-direction: column; }
 
@@ -625,7 +618,6 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 
 /* ─── 响应式 ─────────────────────────────────────────── */
 @media (min-width: 1550px) {
-  .jy-shell:not(.is-collapsed) { grid-template-columns: 224px minmax(0, 1fr); }
   .jy-content { padding-left: 36px; padding-right: 36px; }
 }
 @media (max-width: 1199px) {
@@ -648,7 +640,9 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 @media (max-width: 1150px) {
   .jy-sider { padding-inline: 8px; }
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
-  .jy-shell .jy-workspace, .jy-shell .jy-open-own, .jy-shell .jy-brand > div, .jy-shell .jy-nav-group, .jy-shell .jy-nav .label, .jy-shell .jy-sider-foot { display: none; }
+  .jy-shell .jy-workspace, .jy-shell .jy-brand > div, .jy-shell .jy-nav-group, .jy-shell .jy-nav .label { display: none; }
+  .jy-shell .jy-brand-row { justify-content: center; }
+  .jy-shell .jy-brand-row > .jy-collapse-btn { display: none; }
   .jy-shell .jy-brand { justify-content: center; padding: 0; }
   .jy-shell .jy-brand > :first-child { width: 32px; height: 32px; }
   .jy-shell .jy-nav { margin-top: 32px; }
@@ -669,17 +663,16 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 @media (max-width: 600px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
   .jy-sider {
-    position: fixed; z-index: 50; left: 0; top: 0; width: 264px; visibility: hidden; transform: translateX(-100%); transition: transform .2s;
+    position: fixed; z-index: 50; left: 0; top: 0; width: 280px; visibility: hidden; transform: translateX(-100%); transition: transform .2s;
   }
-  .jy-shell .jy-sider .jy-workspace { display: flex; }
-  .jy-shell .jy-sider .jy-open-own { display: none; }
+  .jy-shell .jy-sider .jy-workspace { display: flex; min-height: 44px; }
   .jy-shell .jy-sider .jy-brand > div, .jy-shell .jy-sider .jy-nav-group, .jy-shell .jy-sider .jy-nav .label { display: revert; }
-  .jy-shell .jy-sider .jy-sider-foot { display: flex; margin-top: 0; padding-top: 4px; }
   .jy-shell .jy-sider .jy-sider-account { display: flex; }
+  .jy-shell .jy-sider .jy-brand-row { justify-content: flex-start; }
   .jy-shell .jy-sider .jy-brand { justify-content: flex-start; padding: 0 9px; }
   .jy-shell .jy-sider .jy-brand > :first-child { width: 34px; height: 34px; }
-  .jy-shell .jy-sider .jy-nav { margin-top: 0; }
-  .jy-shell .jy-sider .jy-nav a { justify-content: flex-start; padding: 0 12px; }
+  .jy-shell .jy-sider .jy-nav { margin-top: 16px; }
+  .jy-shell .jy-sider .jy-nav a { justify-content: flex-start; min-height: 44px; padding: 0 12px; }
   .jy-shell .jy-sider .jy-nav-count { position: static; min-width: 20px; height: 20px; font-size: 12px; line-height: 20px; padding: 0 6px; }
   .jy-shell .jy-collapse-btn { display: none; }
   .jy-shell.is-nav-open .jy-sider { visibility: visible; transform: none; }

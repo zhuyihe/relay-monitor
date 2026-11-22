@@ -22,7 +22,7 @@ async function openPage(t, { viewport = { width: 1440, height: 1000 }, dark = fa
     const body = url.pathname === "/api/overview" ? transform(overviewFixture(url.searchParams.get("preset") || "today"))
       : url.pathname === "/api/auth/me" ? { username: "fixture" }
       : url.pathname === "/api/meta" ? { types: [], rules: {}, settings: {} }
-      : url.pathname === "/api/stations" || url.pathname === "/api/refresh" ? { stations: [{ id: "own", name: "初光云序", isOwn: true, type: "newapi", baseUrl: "https://example.invalid" }], settings: {} }
+      : url.pathname === "/api/stations" || url.pathname === "/api/refresh" ? { stations: [{ id: "own", name: "初光云序", isOwn: true, type: "newapi", baseUrl: "https://example.invalid/" }], settings: {} }
       : url.pathname === "/api/channel-onboarding/accounts" ? { accounts: [], unverifiedResources: [], channels: [], actions: [] }
       : { results: [], actions: [], users: [] };
     return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
@@ -140,4 +140,53 @@ for (const width of [1440, 768, 390]) for (const dark of [false, true]) test(`�
     assert.equal(await firstSpend.textContent(), "$3,458.75");
     assert.match(await page.locator(".jy-ov-customer-name").first().getAttribute("href"), /user=101$/);
   }
+});
+
+test("侧栏保留一个主站控制台入口，常见桌面高度无需滚动，支持收起展开", async t => {
+  const { page } = await openPage(t, { viewport: { width: 1440, height: 640 } });
+  const sidebar = page.locator('.jy-sider');
+  const main = sidebar.getByRole('link', { name: '初光云序主站，打开主站控制台', exact: true });
+  await main.waitFor();
+  assert.equal(await main.getAttribute('href'), 'https://example.invalid/dashboard');
+  assert.equal(await main.getAttribute('target'), '_blank');
+  assert.equal(await sidebar.getByText('打开主站', { exact: true }).count(), 0);
+  assert.doesNotMatch(await sidebar.innerText(), /软件版本|2\.2\.0/);
+  for (const height of [640, 720, 900]) {
+    await page.setViewportSize({ width: 1440, height });
+    const layout = await sidebar.evaluate(sidebar => {
+      const nav = sidebar.querySelector('.jy-nav'), last = nav.lastElementChild.getBoundingClientRect(), rect = sidebar.getBoundingClientRect();
+      return { width: rect.width, outside: sidebar.scrollHeight > sidebar.clientHeight + 1, inside: nav.scrollHeight > nav.clientHeight + 1, lastBottom: last.bottom, bottom: rect.bottom };
+    });
+    assert.equal(layout.width, 240);
+    assert.equal(layout.outside, false, JSON.stringify(layout));
+    assert.equal(layout.inside, false, JSON.stringify(layout));
+    assert.ok(layout.lastBottom < layout.bottom, JSON.stringify(layout));
+  }
+  await page.getByRole('button', { name: '收起导航', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.jy-sider').getBoundingClientRect().width === 64);
+  await page.getByRole('button', { name: '展开导航', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.jy-sider').getBoundingClientRect().width === 240);
+  await main.waitFor();
+  await page.context().route('https://example.invalid/dashboard', route => route.fulfill({ contentType: 'text/html', body: '<title>Main console</title>' }));
+  const popup = page.waitForEvent('popup');
+  await main.click();
+  const target = await popup;
+  await target.waitForURL('https://example.invalid/dashboard');
+});
+
+test("手机短窗口主站入口可见，菜单可滚动且不露出侧栏滚动条", async t => {
+  const { page } = await openPage(t, { viewport: { width: 390, height: 667 } });
+  await page.getByRole('button', { name: '打开导航', exact: true }).click();
+  await page.locator('.jy-shell.is-nav-open').waitFor();
+  await page.locator('.jy-workspace').waitFor();
+  const scroll = await page.locator('.jy-nav').evaluate(nav => {
+    nav.scrollTop = nav.scrollHeight;
+    return { top: nav.scrollTop, hidden: getComputedStyle(nav).scrollbarWidth, webkit: getComputedStyle(nav, '::-webkit-scrollbar').display };
+  });
+  assert.ok(scroll.top > 0, '短窗口保留菜单滚动操作');
+  assert.equal(scroll.hidden, 'none');
+  assert.equal(scroll.webkit, 'none');
+  await page.getByRole('button', { name: '退出登录', exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.jy-sider')).visibility === 'hidden');
 });
