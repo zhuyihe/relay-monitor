@@ -1100,7 +1100,7 @@ test("上游列表：不是登录问题（连不上）的气泡没有「更新�
   if (process.env.UI_SHOT_DIR) { await mobile.page.waitForTimeout(500); await mobile.page.screenshot({ path: `${process.env.UI_SHOT_DIR}/issue-pop-375x812.png` }); }
 });
 
-test("上游列表手机卡片：没设置汇率时余额照写「（没设置汇率）」，不让人当成人民币；设了汇率只写金额", async (t) => {
+test("上游列表：默认 1:1 只显示余额，手机和电脑不重复提示没设置汇率；设置过的换算照常显示", async (t) => {
   const now = Date.now();
   const station = (id, name, cnyPerUsd) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, cnyPerUsd,
     balance: { ok: true, remaining: 12.3, checkedAt: new Date(now).toISOString() }, prediction: { etaDays: 30, burnPerDay: 0.4, basis: "近 3 小时" }, spark: [] });
@@ -1113,8 +1113,14 @@ test("上游列表手机卡片：没设置汇率时余额照写「（没设置�
     throw new Error("unexpected API: " + path);
   }, { width: 390, height: 844 }, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: new Date(now).toISOString() }), "/stations");
   const card = (name) => mobile.locator(".jy-stations-m li", { hasText: name }).first();
-  await card("Unset 上游").getByText(`${formatMoney(12.3)}（没设置汇率）`, { exact: true }).waitFor();
+  await card("Unset 上游").getByText(formatMoney(12.3), { exact: true }).waitFor();
+  assert.equal(await mobile.locator('.jy-stations-m').getByText(/没设置汇率/).count(), 0);
   await card("Set 上游").getByText("$12.30", { exact: true }).waitFor();
+  await mobile.setViewportSize({ width: 1440, height: 900 });
+  const table = mobile.locator('.jy-stations-table');
+  await table.getByText("$12.30", { exact: true }).waitFor();
+  assert.equal(await table.getByText(/没设置汇率/).count(), 0);
+  await table.getByText("约 ¥88.56", { exact: true }).waitFor();
 });
 
 test("删除上游要输入这个上游的名字：不一致时按钮不能点、回车也不删，一致后才发出删除", async (t) => {

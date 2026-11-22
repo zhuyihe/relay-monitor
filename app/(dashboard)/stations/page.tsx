@@ -14,7 +14,7 @@ import { keepOrder } from "../../../lib/keep-order.js";
 import { OWN_LOAD } from "../../../lib/own-load.js";
 import { orderUpstreams } from "../../../lib/upstream-order.js";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
-import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
+import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { balanceMoneyOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
@@ -750,8 +750,7 @@ export default function StationsPage() {
     );
   };
 
-  // 余额的写法和运营总览同一处（balanceMoneyOf）：按上游自己的币种写，设了汇率下面写「约 ¥88.56」，
-  // 没设置汇率下面写「没设置汇率」，悬停是整句
+  // 沿用余额的现有单位；有换算金额时补一行，默认 1:1 不重复提示。
   // 「渠道」一列：这个上游下挂了几个渠道、几个要处理；不能挂渠道的上游类型写「—」。都能点开右边的抽屉
   const channelCell = (v: StationView) => {
     const listed = channelOptions.options?.ok ? channelOptions.options.channels.filter((item) => item.upstreamStationId === v.id) : null;
@@ -765,14 +764,14 @@ export default function StationsPage() {
     const b = v.s.balance;
     if (v.fixed || !b?.ok) return <span className="jy-muted">{EMPTY}</span>;
     const m = balanceMoneyOf(v.s, Number(b.remaining));
-    // 上一行近 48 小时的小图在左、余额在右（没有小图的行留同样宽的空位，金额上下对齐），下一行换算或「没设置汇率」
+    // 小图在左、余额在右，没有小图的行保留同样的金额位置。
     return (
       <>
         <span className="jy-stations-money">
           <span className="jy-stations-spark">{sparkButton(v)}</span>
           <strong className="jy-stations-balance">{m.text}</strong>
         </span>
-        <span className="jy-sub-money" title={m.note}>{m.cny || RATE_UNSET}</span>
+        {m.cny && <span className="jy-sub-money" title={m.note}>{m.cny}</span>}
       </>
     );
   };
@@ -1049,8 +1048,7 @@ export default function StationsPage() {
             const todo = todoAction(v, true);
             const refreshing = !!refreshingIds[v.s.id];
             // 手机上一张卡片两行（ui-design-spec §4.7、§5.2）：名称、状态、「⋯」；余额 · 可用天数，后面带正在刷新或数据截至。
-            // 有要处理的事时多一行：那件事的标题（放不下省略）和按钮。余额设了汇率只写金额，没设置汇率照写「（没设置汇率）」，
-            // 不让人当成人民币。小图、刷新、编辑、余额趋势都在「⋯」里，点名称也能编辑
+            // 有要处理的事时多一行标题和按钮。余额只写金额；小图、刷新、编辑、余额趋势都在「⋯」里。
             return (
               <li key={v.id}>
                 <span className="m-name">
@@ -1065,7 +1063,7 @@ export default function StationsPage() {
                   {v.fixed ? (
                     <span className="m-metric"><small>{COPY.col.burn}</small><b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
                   ) : (
-                    <span className="m-metric" title={money?.cny ? `${money.full}，${money.note}` : money?.note}><small>{COPY.col.balance}</small><b>{money ? (money.cny ? money.text : money.full) : EMPTY}</b></span>
+                    <span className="m-metric" title={money?.cny ? `${money.full}，${money.note}` : undefined}><small>{COPY.col.balance}</small><b>{money ? money.text : EMPTY}</b></span>
                   )}
                   <span className="m-metric"><small>{COPY.col.days}</small><b>{v.runway?.text || EMPTY}</b></span>
                   {!v.fixed && !v.archived ? <span className="m-metric m-metric--wide"><small>{COPY.col.burn}</small><span className="m-value">{burnCell(v)}</span></span> : null}
