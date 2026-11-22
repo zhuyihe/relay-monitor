@@ -21,7 +21,7 @@ export async function handleChannelProfitRequest(request, rt, operation) {
     rt.reconciliation ||= createReconciliationModule(rt);
     if (!rt.channelOnboarding) await startChannelOnboarding(rt);
     const module = rt.channelProfit ||= createChannelProfitModule(rt);
-    const result = operation === "options" ? await module.options(ownStationId)
+    const result = operation === "options" ? await module.options(ownStationId, { force: search.get("force") === "true" })
       : operation === "key-usage" ? await rt.reconciliation.checkKeyUsage({ ownStationId, channelId: search.get("channelId"), upstreamStationId: search.get("upstreamStationId"), tokenId: search.get("tokenId") })
       : operation === "select-key" ? await module.selectKey({ ownStationId, channelId: body.channelId, upstreamStationId: body.upstreamStationId ?? null, tokenId: body.tokenId })
       : await module.stop({ ownStationId, channelIds: body.channelIds });

@@ -230,6 +230,7 @@ function publicMetadata(metadata) {
     version: metadata.version,
     groups: metadata.groups,
     platform: metadata.platform,
+    readAt: metadata.readAt ?? null,
     capability: metadata.capability,
     billingTimezone: metadata.billingTimezone,
     tokens: metadata.tokens.map((token) => ({
@@ -238,6 +239,7 @@ function publicMetadata(metadata) {
       status: token.status,
       group: token.group,
       crossGroupRetry: token.crossGroupRetry,
+      currentRatio: metadata.platform === "sub2api" ? metadata.keyGroupRatios?.[token.group] ?? null : metadata.groups?.[token.group]?.ratio ?? null,
     })),
   };
 }
@@ -1031,6 +1033,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const known = !force && reuseIdentity && identityCurrent ? { accountId: cached.value.accountId,
       status: cached.value.platform === "newapi" ? { quotaPerUnit: cached.value.quotaPerUnit, version: cached.value.version } : null } : null;
     const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore, known });
+    value.readAt = Date.now();
     // 只缓存读全了的：分组没读到（groupsAvailable 为 false）的这份不留，下一轮照常重读（读失败的本来就不缓存）
     if (value?.groupsAvailable === false) metadataCache.delete(cacheKey);
     else metadataCache.set(cacheKey, { at: now, identityAt: known ? cached.identityAt : now, credential, value });
@@ -4282,9 +4285,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     previewKeyScope,
     createPreviewReadContext,
     listRules: (options = {}) => repository.listRules(options),
-    // 上游资源的抽屉用：上游的 Key 列表（名、分组、能不能用），走现有的 5 分钟缓存、不强制刷新；读不到是 null
-    async upstreamTokens(stationId) {
-      try { return (await api.getUpstreamKeys(stationId)).tokens; } catch { return null; }
+    // 上游资源用：Key 列表及当前倍率共用 5 分钟目录缓存；手动刷新可跳过，读不到是 null。
+    async upstreamTokens(stationId, { force = false } = {}) {
+      try {
+        const metadata = await api.getUpstreamKeys(stationId, { force });
+        return metadata.tokens.map((token) => ({ ...token, ratioReadAt: token.currentRatio != null ? metadata.readAt : null }));
+      } catch { return null; }
     },
     // 自营业务和日报复用每日已保存的系数；只读本地账本，不请求上游、不重结。
     async financialFacts({ ownStationId, startMs, endMs, tz }) {

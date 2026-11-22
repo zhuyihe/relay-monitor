@@ -43,7 +43,7 @@ export type PublicResource = {
   balance: any; lowBalanceUsd: number | null; cnyPerUsd: number | null; includeInProfit: boolean; noRenewal: boolean;
   hasAccessToken: boolean; hasApiKey: boolean; hasPassword: boolean;
 };
-export type SafeToken = { id: number; name: string; status: number; group?: string; crossGroupRetry?: boolean; maskedKey?: string };
+export type SafeToken = { id: number; name: string; status: number; group?: string; crossGroupRetry?: boolean; maskedKey?: string; currentRatio?: number | null };
 export type GroupBasis = {
   ownSource: OwnSource; sourceVersion: string; channelRevisions: Record<string, string>;
   resourceVersions: Record<string, { authVersion: number; resourceVersion: string }>;

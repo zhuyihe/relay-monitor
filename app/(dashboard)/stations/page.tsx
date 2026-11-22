@@ -43,7 +43,7 @@ import { MergeNotice, useMergeUpstreams } from "../../components/merge-upstreams
 import type { MergeCounts } from "../../components/merge-upstreams";
 import { MERGE_TEXT } from "../../../lib/upstream-merge-view.js";
 import { StationDrawer } from "./station-drawer";
-import { BindChannelModal, ChannelsDrawer, SwapKeyModal, UnbindModal, useChannelOptions } from "./channel-binding";
+import { BindChannelModal, ChannelsDrawer, KeyRatio, SwapKeyModal, UnbindModal, useChannelOptions } from "./channel-binding";
 import type { ChannelOption, Upstream } from "./channel-binding";
 import { BINDABLE_UPSTREAM_TYPES } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
@@ -229,7 +229,7 @@ export default function StationsPage() {
   const drawerRef = useRef<StationDrawerHandle>(null);
   // 上游下面的渠道：右边抽屉 + 「绑定渠道」「解绑」小窗口；只管绑定、解绑，和利润没有关系；数据只有 /api/reconciliation/channels/options 一个读
   const ownStation = stations.find((item: any) => item.isOwn && !item.archivedAt);
-  const channelOptions = useChannelOptions(ownStation?.id);
+  const channelOptions = useChannelOptions(ownStation?.id, accountsToken);
   // 绑定、解绑以后重读渠道，也刷新需处理（解绑的渠道那条「Key 没用量」要跟着消失）
   const afterChannelChange = async () => { await channelOptions.reload(); void loadWorkflowActions(true, ["bills"]); };
   const [channelsOf, setChannelsOf] = useState<Upstream | null>(null);
@@ -314,7 +314,7 @@ export default function StationsPage() {
     return () => clearInterval(t);
   }, [refreshSec, reload]);
 
-  // 顶部和列表工具栏共用同一刷新范围：仅更新上游余额。
+  // 顶部和列表工具栏共用同一刷新范围：更新上游余额和 Key 当前倍率。
   useShellPage({
     onRefresh: () => onRefreshAll(),
     asOf: refreshedAt,
@@ -369,7 +369,7 @@ export default function StationsPage() {
       // 刷新已经做完：读列表失败时由列表顶上的「读取失败」交代，这里照旧报刷新结果
       await reload().catch(() => {});
       if (metaError || !types.length) await loadMeta();
-      if (channelsOf) await channelOptions.reload();
+      await channelOptions.reload(true);
       // 和运营总览同一句：有读不到余额的说几个
       const done = refreshAllText(r?.stations);
       if (done.failed) message.warning(done.text);
@@ -756,9 +756,14 @@ export default function StationsPage() {
     const listed = channelOptions.options?.ok ? channelOptions.options.channels.filter((item) => item.upstreamStationId === v.id) : null;
     if (v.archived || v.s.isOwn || !BINDABLE_UPSTREAM_TYPES.includes(v.s.type) || !listed) return <span className="jy-muted">{CHANNEL_BINDING.cell.unsupported}</span>;
     const name = stationDisplayName(v.s);
-    return <button type="button" className="jy-link-btn jy-stations-channels" aria-label={CHANNEL_BINDING.drawerTitle(name)} onClick={() => setChannelsOf({ id: v.id, name, address: hostOf(v.s.baseUrl) })}>
-      {listed.length ? CHANNEL_BINDING.cell.count(listed.length) : CHANNEL_BINDING.cell.none}
-    </button>;
+    // 共用 Key、相同倍率只显示一次；不同倍率各占一行，展开后看渠道与 Key 的对应关系。
+    const ratios = [...new Map(listed.map((channel) => [channel.tokenRatio ?? null, channel])).values()];
+    return <span className="jy-stations-channel-cell">
+      <button type="button" className="jy-link-btn jy-stations-channels" aria-label={CHANNEL_BINDING.drawerTitle(name)} onClick={() => setChannelsOf({ id: v.id, name, address: hostOf(v.s.baseUrl) })}>
+        {listed.length ? CHANNEL_BINDING.cell.count(listed.length) : CHANNEL_BINDING.cell.none}
+      </button>
+      {ratios.map((channel) => <KeyRatio key={channel.tokenRatio ?? "unread"} channel={channel} tz={tz} />)}
+    </span>;
   };
   const balanceCell = (v: StationView) => {
     const b = v.s.balance;

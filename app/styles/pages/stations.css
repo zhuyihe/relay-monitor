@@ -9,10 +9,10 @@
 .jy-stations-order .ant-select { width: 180px; }
 .jy-stations-panel { min-width: 0; }
 .jy-stations-table { min-width: 1080px; table-layout: fixed; }
-.jy-stations-col-name { width: 20%; }
+.jy-stations-col-name { width: 19%; }
 .jy-stations-col-status { width: 14%; }
-.jy-stations-col-ch { width: 8%; }
-.jy-stations-col-balance { width: 19%; }
+.jy-stations-col-ch { width: 10%; }
+.jy-stations-col-balance { width: 18%; }
 .jy-stations-col-burn { width: 12%; }
 .jy-stations-col-days { width: 15%; }
 .jy-stations-col-actions { width: 12%; }
@@ -187,6 +187,12 @@ table.jy-data.jy-stations-table td { padding-block: 14px; line-height: 22px; fon
 
 /* 上游列表「渠道」一列和右边的渠道抽屉 */
 .jy-stations-channels { padding: 0; border: 0; background: none; color: var(--jy-link, #2f54eb); cursor: pointer; font: inherit; text-align: left; }
+.jy-stations-channel-cell { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: 100%; }
+.jy-key-ratio { color: var(--jy-ink-3); font-size: 12px; line-height: 18px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.jy-key-ratio > span { color: var(--jy-ink-2); }
+.jy-channels-ratio { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px; margin-top: 4px; }
+.jy-stations-m .m-links > span:first-child { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.jy-stations-m .jy-stations-channel-cell { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
 .jy-channels-top { margin-bottom: 12px; }
 .jy-channels-empty { padding: 24px 0; }
 

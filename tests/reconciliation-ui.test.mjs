@@ -2452,6 +2452,60 @@ test("加上游只填地址和访问令牌：离开令牌栏就试读，下面�
   assert.deepEqual([creates[0].type, creates[0].name, creates[0].accessToken, creates[0].userId, creates[0].baseUrl], ["newapi", "演示·主力账号", "pat-123", "7", "https://api.example.com"]);
 });
 
+test("上游资源：渠道列展示实际 Key 倍率，共用 Key 不重复、不同倍率分开、零值和缺失区分；详情有时间，手动刷新立即更新（桌面和手机）", async (t) => {
+  const at = Date.now(), reads = [];
+  let refreshed = false;
+  const up = (id, name) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() } });
+  const stations = [{ ...up("own", "我的站"), isOwn: true }, up("up1", "共用 Key 上游"), up("up2", "不同倍率上游"), up("up3", "零倍率上游")];
+  const channel = (channelId, upstreamStationId, tokenId, tokenRatio) => ({ channelId, name: `渠道 ${channelId}`, upstreamStationId, tokenId, tokenName: `Key ${tokenId}`, tokenGroup: "default", tokenRatio, tokenRatioReadAt: tokenRatio == null ? null : at, ruleId: `r${channelId}`, sinceDay: "2026-11-22" });
+  const channels = () => [channel(1, "up1", 9, refreshed ? 1.05 : 0.9), channel(2, "up1", 9, refreshed ? 1.05 : 0.9), channel(3, "up2", 10, 1.4), channel(4, "up2", 11, null), channel(5, "up3", 12, 0)];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60 }, generatedAt: new Date().toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: [] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/refresh") return fulfill(route, { stations });
+    if (path === "/api/reconciliation/channels/options") {
+      reads.push(url.searchParams.get("force"));
+      if (url.searchParams.get("force") === "true") refreshed = true;
+      return fulfill(route, { ok: true, channels: channels(), upstreams: stations.slice(1) });
+    }
+    throw Error("unexpected API: " + path);
+  }, { width: 1440, height: 900 }, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [] }), "/stations");
+  const cell = (name) => page.locator(".jy-stations-table tbody tr", { hasText: name }).first().locator("td").nth(2);
+  await cell("共用 Key 上游").getByText("倍率 0.90×", { exact: true }).waitFor();
+  assert.equal(await cell("共用 Key 上游").locator(".jy-key-ratio").count(), 1);
+  await cell("共用 Key 上游").getByText("2 个", { exact: true }).waitFor();
+  await cell("不同倍率上游").getByText("倍率 1.40×", { exact: true }).waitFor();
+  await cell("不同倍率上游").getByText("倍率 —", { exact: true }).waitFor();
+  await cell("零倍率上游").getByText("倍率 0.00×", { exact: true }).waitFor();
+  await shot(page, "stations-key-ratios-1440");
+  await cell("不同倍率上游").getByRole("button").click();
+  const drawer = page.getByRole("dialog", { name: "不同倍率上游的渠道" });
+  await drawer.getByText("倍率 1.40×", { exact: true }).waitFor();
+  assert.match(await drawer.innerText(), /Key 10.*读取于/s);
+  assert.match(await drawer.locator(".jy-key-ratio").first().getAttribute("title"), /上游当前分组配置/);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  await cell("共用 Key 上游").getByText("倍率 1.05×", { exact: true }).waitFor();
+  assert.ok(reads.includes("true"));
+  for (const width of [768, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    if (width < 768) {
+      const card = page.locator(".jy-stations-m li", { hasText: "不同倍率上游" }).first();
+      await card.getByText("倍率 1.40×", { exact: true }).waitFor();
+      await card.getByRole("button", { name: "不同倍率上游的渠道", exact: true }).click();
+      await drawer.getByText("倍率 1.40×", { exact: true }).waitFor();
+      await page.waitForFunction(() => { const r = document.querySelector(".jy-channels-drawer")?.getBoundingClientRect(); return r && r.width > 250 && r.right <= innerWidth + 1 && r.left >= -1; });
+      await shot(page, `stations-key-ratio-drawer-${width}`);
+      await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+    }
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px 页面不能横向溢出`);
+    await shot(page, `stations-key-ratios-${width}`);
+  }
+});
+
 test("上游资源：「渠道」一列写几个或「没有渠道」，不能挂渠道的类型写「—」；点开右边抽屉，绑定渠道（渠道默认选第一个、Key 只剩一把替你选好）发 select-key", async (t) => {
   const posts = [];
   const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" }, ...extra });
@@ -2528,7 +2582,8 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
     await table.locator("tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByText("2 个", { exact: true }).waitFor();
     for (const [name, text] of [["主力上游", "2 个"], ["没有渠道上游", "没有渠道"], ["只用 Key", "—"]]) {
       const cell = table.locator("tbody tr", { hasText: name }).first().locator("td").nth(2);
-      assert.equal((await cell.innerText()).trim(), text);
+      if (name === "主力上游") await cell.getByText("倍率 —", { exact: true }).waitFor();
+      else assert.equal((await cell.innerText()).trim(), text);
       const box = await cell.getByText(text, { exact: true }).boundingBox();
       assert.ok(box.height <= 24, `${width} 宽：「${text}」应占一行，实际高 ${box.height}`);
     }

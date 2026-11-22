@@ -2430,6 +2430,23 @@ test("多分段两侧取数并行发出", async (t) => {
   }
 });
 
+test("上游渠道倍率：只读取当前分组配置，共用目录缓存；立即刷新读到新倍率与时间，读取失败不猜倍率", async (t) => {
+  let ratio = 2.4, unavailable = false;
+  const { module, state } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }], metadataGroups: () => ({ g1: { ratio: unavailable ? null : ratio } }) });
+  const first = await module.upstreamTokens("upstream");
+  assert.equal(first[0].currentRatio, 2.4);
+  assert.ok(first[0].ratioReadAt > 0);
+  ratio = 1.9;
+  assert.deepEqual(await module.upstreamTokens("upstream"), first, "普通读取保留真实的上次读取时间");
+  assert.equal(state.requests.filter((r) => r.path === "/api/token/").length, 1);
+  assert.equal((await module.upstreamTokens("upstream", { force: true }))[0].currentRatio, 1.9);
+  unavailable = true;
+  const unread = await module.upstreamTokens("upstream", { force: true });
+  assert.deepEqual([unread[0].currentRatio, unread[0].ratioReadAt], [null, null]);
+  assert.equal(state.statCalls.length, 0, "展示当前倍率不采集用量账单");
+  assert.deepEqual(state.ratioWrites, [], "不写历史账本倍率");
+});
+
 test("站点凭据原地改写后，元数据和渠道目录缓存不再复用旧凭据读到的数据", async (t) => {
   let hold = null;
   const { stations, state, module } = liveReconciliationFixture(t, {
@@ -4244,6 +4261,7 @@ function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
     if (url.pathname === "/api/v1/auth/me") return reply(200, { id: sub2.accountId });
     if (url.pathname === "/api/v1/keys") return reply(200, { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }] });
     if (url.pathname.startsWith("/api/v1/keys/")) { sub2.controls += 1; return reply(404, {}); }
+    if (url.pathname !== "/api/v1/usage/stats") return reply(404, {});
     sub2.stats.push(Object.fromEntries(url.searchParams));
     if (sub2.missing) return reply(200, { total_cost: 100 });
     const cost = url.searchParams.get("api_key_id") === "9" ? sub2.costs[url.searchParams.get("start_date")] ?? 0 : 0;
