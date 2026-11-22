@@ -2452,13 +2452,13 @@ test("加上游只填地址和访问令牌：离开令牌栏就试读，下面�
   assert.deepEqual([creates[0].type, creates[0].name, creates[0].accessToken, creates[0].userId, creates[0].baseUrl], ["newapi", "演示·主力账号", "pat-123", "7", "https://api.example.com"]);
 });
 
-test("上游资源：渠道列展示实际 Key 倍率，共用 Key 不重复、不同倍率分开、零值和缺失区分；详情有时间，手动刷新立即更新（桌面和手机）", async (t) => {
+test("上游资源：采购倍率只在渠道弹窗展示，乘采购系数、默认 1；零值和缺失区分，刷新更新（桌面、平板和手机）", async (t) => {
   const at = Date.now(), reads = [];
   let refreshed = false;
   const up = (id, name) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() } });
-  const stations = [{ ...up("own", "我的站"), isOwn: true }, up("up1", "共用 Key 上游"), up("up2", "不同倍率上游"), up("up3", "零倍率上游")];
+  const stations = [{ ...up("own", "我的站"), isOwn: true }, { ...up("up1", "共用 Key 上游"), cnyPerUsd: 2.4 }, { ...up("up2", "不同倍率上游"), cnyPerUsd: 2 }, up("up3", "零倍率上游")];
   const channel = (channelId, upstreamStationId, tokenId, tokenRatio) => ({ channelId, name: `渠道 ${channelId}`, upstreamStationId, tokenId, tokenName: `Key ${tokenId}`, tokenGroup: "default", tokenRatio, tokenRatioReadAt: tokenRatio == null ? null : at, ruleId: `r${channelId}`, sinceDay: "2026-11-22" });
-  const channels = () => [channel(1, "up1", 9, refreshed ? 1.05 : 0.9), channel(2, "up1", 9, refreshed ? 1.05 : 0.9), channel(3, "up2", 10, 1.4), channel(4, "up2", 11, null), channel(5, "up3", 12, 0)];
+  const channels = () => [channel(1, "up1", 9, refreshed ? 1.1 : 1), channel(2, "up1", 9, refreshed ? 1.1 : 1), channel(3, "up2", 10, 1.4), channel(4, "up2", 11, null), channel(5, "up3", 12, 0)];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
@@ -2474,33 +2474,46 @@ test("上游资源：渠道列展示实际 Key 倍率，共用 Key 不重复、�
     throw Error("unexpected API: " + path);
   }, { width: 1440, height: 900 }, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [] }), "/stations");
   const cell = (name) => page.locator(".jy-stations-table tbody tr", { hasText: name }).first().locator("td").nth(2);
-  await cell("共用 Key 上游").getByText("倍率 0.90×", { exact: true }).waitFor();
-  assert.equal(await cell("共用 Key 上游").locator(".jy-key-ratio").count(), 1);
   await cell("共用 Key 上游").getByText("2 个", { exact: true }).waitFor();
-  await cell("不同倍率上游").getByText("倍率 1.40×", { exact: true }).waitFor();
-  await cell("不同倍率上游").getByText("倍率 —", { exact: true }).waitFor();
-  await cell("零倍率上游").getByText("倍率 0.00×", { exact: true }).waitFor();
+  assert.equal((await cell("不同倍率上游").innerText()).trim(), "2 个");
+  assert.equal(await page.locator(".jy-stations-table .jy-key-ratio, .jy-stations-m .jy-key-ratio").count(), 0, "列表只保留渠道数量");
   await shot(page, "stations-key-ratios-1440");
+  await cell("共用 Key 上游").getByRole("button").click();
+  const shared = page.getByRole("dialog", { name: "共用 Key 上游的渠道" });
+  await shared.getByText("采购倍率 2.40×", { exact: true }).first().waitFor();
+  assert.equal(await shared.getByText("采购倍率 2.40×", { exact: true }).count(), 2, "同一把 Key 的渠道使用同一个采购系数");
+  await shared.getByText("上游倍率 1.00× × 采购系数 2.40", { exact: true }).first().waitFor();
+  await page.keyboard.press("Escape"); await shared.waitFor({ state: "hidden" });
   await cell("不同倍率上游").getByRole("button").click();
   const drawer = page.getByRole("dialog", { name: "不同倍率上游的渠道" });
-  await drawer.getByText("倍率 1.40×", { exact: true }).waitFor();
+  await drawer.getByText("采购倍率 2.80×", { exact: true }).waitFor();
+  await drawer.getByText("采购倍率 —", { exact: true }).waitFor();
+  await drawer.getByText("上游倍率 1.40× × 采购系数 2.00", { exact: true }).waitFor();
   assert.match(await drawer.innerText(), /Key 10.*读取于/s);
   assert.match(await drawer.locator(".jy-key-ratio").first().getAttribute("title"), /上游当前分组配置/);
+  await page.waitForFunction(() => { const r = document.querySelector(".jy-channels-drawer")?.getBoundingClientRect(); return r && r.width > 250 && r.right <= innerWidth + 1; });
+  await shot(page, "stations-purchase-ratio-drawer-1440");
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  await cell("零倍率上游").getByRole("button").click();
+  const zero = page.getByRole("dialog", { name: "零倍率上游的渠道" });
+  await zero.getByText("采购倍率 0.00×", { exact: true }).waitFor();
+  await zero.getByText("上游倍率 0.00× × 采购系数 1.00", { exact: true }).waitFor();
+  await page.keyboard.press("Escape"); await zero.waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
-  await cell("共用 Key 上游").getByText("倍率 1.05×", { exact: true }).waitFor();
+  await cell("共用 Key 上游").getByRole("button").click();
+  await shared.getByText("采购倍率 2.64×", { exact: true }).first().waitFor();
   assert.ok(reads.includes("true"));
+  await page.keyboard.press("Escape"); await shared.waitFor({ state: "hidden" });
   for (const width of [768, 390, 320]) {
     await page.setViewportSize({ width, height: 900 });
-    if (width < 768) {
-      const card = page.locator(".jy-stations-m li", { hasText: "不同倍率上游" }).first();
-      await card.getByText("倍率 1.40×", { exact: true }).waitFor();
-      await card.getByRole("button", { name: "不同倍率上游的渠道", exact: true }).click();
-      await drawer.getByText("倍率 1.40×", { exact: true }).waitFor();
-      await page.waitForFunction(() => { const r = document.querySelector(".jy-channels-drawer")?.getBoundingClientRect(); return r && r.width > 250 && r.right <= innerWidth + 1 && r.left >= -1; });
-      await shot(page, `stations-key-ratio-drawer-${width}`);
-      await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    }
+    const container = width < 768 ? page.locator(".jy-stations-m li", { hasText: "不同倍率上游" }).first() : cell("不同倍率上游");
+    assert.equal(await container.locator(".jy-key-ratio").count(), 0);
+    await container.getByRole("button", { name: "不同倍率上游的渠道", exact: true }).click();
+    await drawer.getByText("采购倍率 2.80×", { exact: true }).waitFor();
+    await drawer.getByText("上游倍率 1.40× × 采购系数 2.00", { exact: true }).waitFor();
+    await page.waitForFunction(() => { const r = document.querySelector(".jy-channels-drawer")?.getBoundingClientRect(); return r && r.width > 250 && r.right <= innerWidth + 1 && r.left >= -1; });
+    await shot(page, `stations-key-ratio-drawer-${width}`);
+    await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px 页面不能横向溢出`);
     await shot(page, `stations-key-ratios-${width}`);
   }
@@ -2582,8 +2595,7 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
     await table.locator("tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByText("2 个", { exact: true }).waitFor();
     for (const [name, text] of [["主力上游", "2 个"], ["没有渠道上游", "没有渠道"], ["只用 Key", "—"]]) {
       const cell = table.locator("tbody tr", { hasText: name }).first().locator("td").nth(2);
-      if (name === "主力上游") await cell.getByText("倍率 —", { exact: true }).waitFor();
-      else assert.equal((await cell.innerText()).trim(), text);
+      assert.equal((await cell.innerText()).trim(), text);
       const box = await cell.getByText(text, { exact: true }).boundingBox();
       assert.ok(box.height <= 24, `${width} 宽：「${text}」应占一行，实际高 ${box.height}`);
     }

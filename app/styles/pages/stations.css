@@ -10,10 +10,10 @@
 .jy-stations-panel { min-width: 0; }
 /* 隐藏的读屏说明也定位在表内，随横向滚动容器裁切，避免把平板整页撑宽。 */
 .jy-stations-table { position: relative; min-width: 1080px; table-layout: fixed; }
-.jy-stations-col-name { width: 19%; }
+.jy-stations-col-name { width: 20%; }
 .jy-stations-col-status { width: 14%; }
-.jy-stations-col-ch { width: 10%; }
-.jy-stations-col-balance { width: 18%; }
+.jy-stations-col-ch { width: 8%; }
+.jy-stations-col-balance { width: 19%; }
 .jy-stations-col-burn { width: 12%; }
 .jy-stations-col-days { width: 15%; }
 .jy-stations-col-actions { width: 12%; }
@@ -188,12 +188,12 @@ table.jy-data.jy-stations-table td { padding-block: 14px; line-height: 22px; fon
 
 /* 上游列表「渠道」一列和右边的渠道抽屉 */
 .jy-stations-channels { padding: 0; border: 0; background: none; color: var(--jy-link, #2f54eb); cursor: pointer; font: inherit; text-align: left; }
-.jy-stations-channel-cell { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: 100%; }
-.jy-key-ratio { color: var(--jy-ink-3); font-size: 12px; line-height: 18px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.jy-key-ratio > span { color: var(--jy-ink-2); }
-.jy-channels-ratio { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px; margin-top: 4px; }
-.jy-stations-m .m-links > span:first-child { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.jy-stations-m .jy-stations-channel-cell { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.jy-key-ratio { color: var(--jy-ink-2); font-size: 14px; line-height: 22px; font-variant-numeric: tabular-nums; }
+.jy-key-ratio b { color: var(--jy-ink); font-weight: 600; white-space: nowrap; }
+.jy-channels-ratio { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.jy-key-ratio-formula { color: var(--jy-ink-3); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
+.jy-key-ratio-formula > span { white-space: nowrap; }
+.jy-channels-table th:nth-child(3), .jy-channels-table td:nth-child(3), .jy-channels-table th:last-child, .jy-channels-table td:last-child { white-space: nowrap; }
 .jy-channels-top { margin-bottom: 12px; }
 .jy-channels-empty { padding: 24px 0; }
 

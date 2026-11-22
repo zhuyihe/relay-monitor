@@ -16,7 +16,7 @@ import { orderUpstreams } from "../../../lib/upstream-order.js";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
 import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
-import { balanceMoneyOf } from "../../../lib/profit";
+import { balanceMoneyOf, rateSnapshotOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { failureText, refreshAllText, refreshOneText } from "../../../lib/error-copy";
@@ -43,7 +43,7 @@ import { MergeNotice, useMergeUpstreams } from "../../components/merge-upstreams
 import type { MergeCounts } from "../../components/merge-upstreams";
 import { MERGE_TEXT } from "../../../lib/upstream-merge-view.js";
 import { StationDrawer } from "./station-drawer";
-import { BindChannelModal, ChannelsDrawer, KeyRatio, SwapKeyModal, UnbindModal, useChannelOptions } from "./channel-binding";
+import { BindChannelModal, ChannelsDrawer, SwapKeyModal, UnbindModal, useChannelOptions } from "./channel-binding";
 import type { ChannelOption, Upstream } from "./channel-binding";
 import { BINDABLE_UPSTREAM_TYPES } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
@@ -756,14 +756,9 @@ export default function StationsPage() {
     const listed = channelOptions.options?.ok ? channelOptions.options.channels.filter((item) => item.upstreamStationId === v.id) : null;
     if (v.archived || v.s.isOwn || !BINDABLE_UPSTREAM_TYPES.includes(v.s.type) || !listed) return <span className="jy-muted">{CHANNEL_BINDING.cell.unsupported}</span>;
     const name = stationDisplayName(v.s);
-    // 共用 Key、相同倍率只显示一次；不同倍率各占一行，展开后看渠道与 Key 的对应关系。
-    const ratios = [...new Map(listed.map((channel) => [channel.tokenRatio ?? null, channel])).values()];
-    return <span className="jy-stations-channel-cell">
-      <button type="button" className="jy-link-btn jy-stations-channels" aria-label={CHANNEL_BINDING.drawerTitle(name)} onClick={() => setChannelsOf({ id: v.id, name, address: hostOf(v.s.baseUrl) })}>
-        {listed.length ? CHANNEL_BINDING.cell.count(listed.length) : CHANNEL_BINDING.cell.none}
-      </button>
-      {ratios.map((channel) => <KeyRatio key={channel.tokenRatio ?? "unread"} channel={channel} tz={tz} />)}
-    </span>;
+    return <button type="button" className="jy-link-btn jy-stations-channels" aria-label={CHANNEL_BINDING.drawerTitle(name)} onClick={() => setChannelsOf({ id: v.id, name, address: hostOf(v.s.baseUrl) })}>
+      {listed.length ? CHANNEL_BINDING.cell.count(listed.length) : CHANNEL_BINDING.cell.none}
+    </button>;
   };
   const balanceCell = (v: StationView) => {
     const b = v.s.balance;
@@ -1241,7 +1236,7 @@ export default function StationsPage() {
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} onOpenChange={setEditorOpen} />
-      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); setSwapping(null); }}
+      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} purchaseRate={rateSnapshotOf(stations.find((station) => station.id === channelsOf?.id)).cnyPerUsd} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); setSwapping(null); }}
         onBind={() => setBinding(true)} onUnbind={setUnbinding} onSwap={setSwapping} />
       {ownStation ? <>
         <BindChannelModal upstream={binding ? channelsOf : null} ownStationId={ownStation.id} options={channelOptions.options} onClose={() => setBinding(false)} onDone={afterChannelChange} />
