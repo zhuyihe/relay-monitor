@@ -28,6 +28,7 @@ import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { Seg } from "../../components/seg";
+import { SortHeader } from "../../components/sort-header";
 import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
@@ -51,7 +52,7 @@ import type { StationDrawerHandle } from "./station-drawer";
 
 const FILTERS = ["all", "attention", "ok", "archived"] as const;
 type Filter = (typeof FILTERS)[number];
-const SORTS = ["", "days", "-days"] as const;
+const SORTS = ["", "balance", "-balance", "days", "-days", "burn", "-burn"] as const;
 type Sort = (typeof SORTS)[number];
 const COLS = 7;
 
@@ -135,6 +136,14 @@ const COPY = Object.freeze({
   byStatus: "按状态筛选",
   byType: "按类型筛选",
   allTypes: "全部类型",
+  sortLabel: "排序",
+  sortAria: "上游排序",
+  sortOptions: [
+    { value: "", label: "需处理优先" },
+    { value: "balance", label: "余额从低到高" }, { value: "-balance", label: "余额从高到低" },
+    { value: "days", label: "可用时间从短到长" }, { value: "-days", label: "可用时间从长到短" },
+    { value: "-burn", label: "日均花费从高到低" }, { value: "burn", label: "日均花费从低到高" },
+  ],
   filter: Object.freeze({ all: "全部", attention: ATTENTION, ok: "无需处理", archived: "已归档" }),
   unownedBefore: (n: number) => `另有 ${n} 件需处理的事不在某一个上游上，在`,
   unownedAfter: "里处理。",
@@ -145,7 +154,7 @@ const COPY = Object.freeze({
 const actionKey = (s: any) => String(s.id || stationDisplayName(s));
 
 
-function compareDays(a: number | null, b: number | null, dir: 1 | -1) {
+function compareNumbers(a: number | null, b: number | null, dir: 1 | -1) {
   if (a === b) return 0;
   if (a == null) return 1; // 无法计算的永远排最后
   if (b == null) return -1;
@@ -556,10 +565,17 @@ export default function StationsPage() {
     .filter((v) => !typeFilter || v.s.type === typeFilter)
     .filter((v) => !q || [v.s.name, v.s.baseUrl, v.host, v.s.balance?.account].some((x) => String(x || "").toLowerCase().includes(q)));
   // 默认排法（lib/upstream-order.js）：要马上动手的 → 正在花钱的（照最近的花法还能撑多少小时）→ 没在花钱的（按余额）→ 自营站点和不再续费的；点表头排序和已归档标签页照旧
-  const byDays = (dir: 1 | -1) => (a: StationView, b: StationView) => compareDays(a.sortDays, b.sortDays, dir) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
+  const byDays = (dir: 1 | -1) => (a: StationView, b: StationView) => compareNumbers(a.sortDays, b.sortDays, dir) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
+  const sortKey = sort.replace(/^-/, "");
+  const sortDirection = sort.startsWith("-") ? "desc" : "asc";
+  const sortValue = (v: StationView) => {
+    if (sortKey === "days") return v.sortDays;
+    if (sortKey === "balance") return !v.fixed && v.s.balance?.ok ? Number(v.s.balance.remaining) * v.rate : null;
+    if (v.archived) return null;
+    return v.fixed ? v.fx?.daily ?? null : v.s.prediction?.burnPerDay != null ? v.s.prediction.burnPerDay * v.rate : null;
+  };
   const orderedViews = (() => {
-    if (sort === "days") return [...matched].sort(byDays(1));
-    if (sort === "-days") return [...matched].sort(byDays(-1));
+    if (sort) return [...matched].sort((a, b) => compareNumbers(sortValue(a), sortValue(b), sortDirection === "asc" ? 1 : -1) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN"));
     if (filter === "archived") return [...matched].sort((a, b) => rankOf(a) - rankOf(b) || byDays(1)(a, b));
     const byId = new Map(matched.map((v) => [v.id, v]));
     return orderUpstreams(matched.map((v) => {
@@ -584,8 +600,7 @@ export default function StationsPage() {
     lastWrittenQuery.current = "";
     setParams({ filter: null, type: null, q: null });
   };
-  const nextSort: Record<Sort, Sort> = { "": "days", days: "-days", "-days": "" };
-  const ariaSort = sort === "days" ? "ascending" : sort === "-days" ? "descending" : undefined;
+  const onSort = (key: "balance" | "days" | "burn") => setSort(sortKey === key ? (sortDirection === "asc" ? `-${key}` : key) : key === "burn" ? "-burn" : key);
 
   // 弹窗内 KPI 用列表里的最新站点数据（轮询会更新）
   const trendCur = trendStation ? stations.find((x) => x.id === trendStation.id) || trendStation : null;
@@ -987,14 +1002,9 @@ export default function StationsPage() {
                 <th scope="col" className="jy-stations-pin-l">{COPY.col.name}</th>
                 <th scope="col">{COPY.col.status}</th>
                 <th scope="col" className="r jy-stations-ch">{CHANNEL_BINDING.column}</th>
-                <th scope="col" className="r">{COPY.col.balance}</th>
-                <th scope="col" className="r">{COPY.col.burn}</th>
-                <th scope="col" className="r" aria-sort={ariaSort}>
-                  <button type="button" className="jy-stations-sort" onClick={() => setSort(nextSort[sort])}>
-                    {COPY.col.days}
-                    {sort ? <Icon name={sort === "days" ? "sort" : "sort-down"} /> : null}
-                  </button>
-                </th>
+                <th scope="col" className="r" aria-sort={sortKey === "balance" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><SortHeader label={COPY.col.balance} direction={sortKey === "balance" ? sortDirection : undefined} onClick={() => onSort("balance")} /></th>
+                <th scope="col" className="r" aria-sort={sortKey === "burn" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><SortHeader label={COPY.col.burn} direction={sortKey === "burn" ? sortDirection : undefined} onClick={() => onSort("burn")} /></th>
+                <th scope="col" className="r" aria-sort={sortKey === "days" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><SortHeader label={COPY.col.days} direction={sortKey === "days" ? sortDirection : undefined} onClick={() => onSort("days")} /></th>
                 <th scope="col" className="r jy-stations-pin-r">{COPY.col.actions}</th>
               </tr>
             </thead>
@@ -1135,6 +1145,7 @@ export default function StationsPage() {
               onChange={(value: string) => setTypeFilter(value)}
               options={[{ value: "", label: COPY.allTypes }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
             />
+            <label className="jy-stations-order"><span>{COPY.sortLabel}</span><Select aria-label={COPY.sortAria} value={sort} options={COPY.sortOptions} onChange={setSort} /></label>
             <span className="spacer" />
             {/* 与顶栏共用：向正在监控的上游重新读取余额。 */}
             <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>{REFRESH}</Button>

@@ -77,11 +77,11 @@ test("「重点」小标签的提示：这位占近 7 天消费的百分之几�
   assert.equal(bigTipText(row({ week: 260 }), page({ summary: { ...SUMMARY, weekCost: 0 } })), COPY.bigTipPlain);
 });
 
-test("可用天数那一格：约 13 天、近期没有消费、余额用完和算不出写「—」", () => {
+test("可用天数那一格：约 13 天、近期没有消费、余额用完，算不出写「—」", () => {
   assert.equal(runwayText(row({ runwayState: "ok", days: 13 })), "约 13 天");
   assert.equal(runwayText(row({ runwayState: "soon", days: 0.4 })), "约 10 小时");
   assert.equal(runwayText(row({ runwayState: "none", days: null })), COPY.users.noSpend);
-  assert.equal(runwayText(row({ runwayState: "empty", days: null })), EMPTY);
+  assert.equal(runwayText(row({ runwayState: "empty", days: null })), COPY.status.empty);
   assert.equal(runwayText(row({ runwayState: "warming", days: null })), EMPTY);
 });
 
@@ -225,9 +225,11 @@ test("地址栏：不认识的页签回到概览，不认识的筛选、范围�
   assert.equal(parseScope("all"), "all");
   assert.equal(parseScope("bogus"), "active30");
   assert.deepEqual(parseSort("balance", "asc"), { key: "balance", dir: "asc" });
-  assert.deepEqual(parseSort("balance", "x"), { key: "balance", dir: "desc" });
-  assert.deepEqual(parseSort(null, null), { key: "today", dir: "desc" });
-  assert.deepEqual(parseSort("vs", "asc"), { key: "today", dir: "desc" });
+  assert.deepEqual(parseSort("balance", "x"), { key: "balance", dir: "asc" });
+  assert.deepEqual(parseSort(null, null), { key: "balance", dir: "asc" });
+  assert.deepEqual(parseSort("vs", "asc"), { key: "balance", dir: "asc" });
+  assert.deepEqual(parseSort("days", null), { key: "days", dir: "asc" });
+  assert.deepEqual(parseSort("days", "desc"), { key: "days", dir: "desc" });
   assert.deepEqual(parseSort("week", "desc"), { key: "week", dir: "desc" }, "已有的手动排序链接仍然有效");
   assert.deepEqual(parseGroups("vip, default,"), ["vip", "default"]);
   assert.deepEqual(parseGroups(null), []);
@@ -235,12 +237,14 @@ test("地址栏：不认识的页签回到概览，不认识的筛选、范围�
 });
 
 test("用户表的查询串：默认值不写，和接口、地址栏同一套写法", () => {
-  const base = { scope: "active30", big: false, only: "all", groups: [], sort: "today", dir: "desc", page: 1, q: "" };
+  const base = { scope: "active30", big: false, only: "all", groups: [], sort: "balance", dir: "asc", page: 1, q: "" };
   assert.equal(listQueryString(base), "");
   assert.equal(listQueryString({ ...base, scope: "all", big: true, only: "soon", groups: ["vip", "default"], sort: "user", dir: "asc", page: 2, q: " ali " }), "scope=all&big=1&only=soon&group=vip%2Cdefault&sort=user&dir=asc&page=2&q=ali");
   assert.equal(listQueryString({ ...base, sort: "week", dir: "asc" }), "sort=week&dir=asc", "近 7 天消费从低到高也要写出来");
   assert.equal(listQueryString({ ...base, sort: "week", dir: "desc" }), "sort=week&dir=desc", "近 7 天消费从高到低已不是默认，需要保留查询参数");
   assert.equal(listQueryString({ ...base, sort: "today", dir: "asc" }), "sort=today&dir=asc");
+  assert.equal(listQueryString({ ...base, sort: "today", dir: "desc" }), "sort=today&dir=desc");
+  assert.equal(listQueryString({ ...base, sort: "days", dir: "asc" }), "sort=days&dir=asc");
 });
 
 // ---- 流失页签 ----

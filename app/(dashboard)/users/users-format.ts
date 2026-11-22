@@ -15,7 +15,7 @@ export type UsersRow = {
 export type TrendDay = { day: string; available: boolean; cost: number; users: number; newUsers: number; newTop: { username: string; cost: number }[]; top: { username: string; cost: number }[] };
 export type Only = "all" | "soon" | "down" | "new" | "churned";
 export type Scope = "active30" | "all";
-export type SortKey = "user" | "week" | "today" | "balance" | "last";
+export type SortKey = "user" | "week" | "today" | "balance" | "days" | "last";
 export type UsersList = {
   rows: UsersRow[]; total: number; page: number; pages: number; pageSize: number;
   totals: { count: number; week: number; prevWeek: number; today: number; balance: number };
@@ -92,9 +92,10 @@ export function lastUsedText(row: Pick<UsersRow, "lastUsed"> & { isNew?: boolean
   return withTime && row.lastUsed.precise ? `${day} ${formatZonedTime(row.lastUsed.ms - 3600000, page.tz)}` : day;
 }
 
-// 可用天数那一格的字：快用完、够用写「约 13 天」，余额用完写「—」，近期没有消费、还算不出写原话
+// 可用时间：已用完明确写状态，和时间未知的「—」区分。
 export function runwayText(row: UsersRow): string {
   if (row.runwayState === "soon" || row.runwayState === "ok") return formatDays(row.days);
+  if (row.runwayState === "empty") return COPY.status.empty;
   if (row.runwayState === "none") return COPY.users.noSpend;
   return EMPTY;
 }
@@ -157,9 +158,9 @@ export function overviewKpis(page: UsersPage): Kpi[] {
 export const parseTab = (raw: string | null): UsersTab => (raw === "users" || raw === "churn" ? raw : "overview");
 export const parseOnly = (raw: string | null): Only => ((ONLY_VALUES as readonly string[]).includes(raw ?? "") ? (raw as Only) : "all");
 export const parseScope = (raw: string | null): Scope => (raw === "all" ? "all" : "active30");
-export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "last"];
+export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "days", "last"];
 export const parseSort = (raw: string | null, dir: string | null): { key: SortKey; dir: "asc" | "desc" } =>
-  ((SORT_KEYS as readonly string[]).includes(raw ?? "") ? { key: raw as SortKey, dir: dir === "asc" ? "asc" : "desc" } : { key: "today", dir: "desc" });
+  ((SORT_KEYS as readonly string[]).includes(raw ?? "") ? { key: raw as SortKey, dir: dir === "asc" ? "asc" : dir === "desc" ? "desc" : ["balance", "days", "user"].includes(raw!) ? "asc" : "desc" } : { key: "balance", dir: "asc" });
 export const parseGroups = (raw: string | null): string[] => (raw ? raw.split(",").map((value) => value.trim()).filter(Boolean) : []);
 export const parsePageNo = (raw: string | null): number => (/^\d+$/.test(raw || "") && Number(raw) >= 1 ? Number(raw) : 1);
 
@@ -171,7 +172,7 @@ export function listQueryString(query: ListQuery): string {
   if (query.big) params.set("big", "1");
   if (query.only !== "all") params.set("only", query.only);
   if (query.groups.length) params.set("group", query.groups.join(","));
-  if (query.sort !== "today" || query.dir !== "desc") { params.set("sort", query.sort); params.set("dir", query.dir); }
+  if (query.sort !== "balance" || query.dir !== "asc") { params.set("sort", query.sort); params.set("dir", query.dir); }
   if (query.page > 1) params.set("page", String(query.page));
   if (query.q.trim()) params.set("q", query.q.trim());
   return params.toString();

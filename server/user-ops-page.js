@@ -63,7 +63,7 @@ export async function localUsersPage(rt, ops, store, { now = Date.now() } = {}) 
 }
 
 // 接口给页面的：概览要的数照旧，全部用户的行换成筛、排、切片以后的一页（一页 50 个）和个数、合计。
-// 地址栏的写法：scope=all、big=1、only=soon|down|new|churned、group=vip（可以多个，逗号分开）、q=搜索、sort=user|week|today|balance|last、dir=asc|desc、page=2
+// 地址栏的写法：scope=all、big=1、only=soon|down|new|churned、group=vip（可以多个，逗号分开）、q=搜索、sort=user|week|today|balance|days|last、dir=asc|desc、page=2
 export function usersResponse(page, params) {
   const { users, ...rest } = page;
   const query = {

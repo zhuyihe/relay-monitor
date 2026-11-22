@@ -25,15 +25,16 @@
 .jy-users-spark.is-gray .dot { fill: var(--jy-ink-3); }
 
 /* ─── 用户表 ─── */
-.jy-users-table table.jy-data { min-width: 940px; }
+.jy-users-table table.jy-data { min-width: 1040px; }
 .jy-users-table table.jy-data th { background: var(--jy-sheet); }
 .jy-users-table table.jy-data tbody tr.is-clickable td { padding-block: 14px; vertical-align: top; line-height: 22px; }
-.jy-users-table table.jy-data th:first-child { width: 25%; }
-.jy-users-table table.jy-data th:nth-child(2) { width: 23%; }
-.jy-users-table table.jy-data th:nth-child(3) { width: 13%; }
-.jy-users-table table.jy-data th:nth-child(4) { width: 16%; }
-.jy-users-table table.jy-data th:nth-child(5) { width: 13%; }
-.jy-users-table table.jy-data th:last-child { width: 10%; }
+.jy-users-table table.jy-data th:first-child { width: 23%; }
+.jy-users-table table.jy-data th:nth-child(2) { width: 14%; }
+.jy-users-table table.jy-data th:nth-child(3) { width: 16%; }
+.jy-users-table table.jy-data th:nth-child(4) { width: 12%; }
+.jy-users-table table.jy-data th:nth-child(5) { width: 14%; }
+.jy-users-table table.jy-data th:nth-child(6) { width: 12%; }
+.jy-users-table table.jy-data th:last-child { width: 9%; }
 .jy-users-table .jy-cell-two { gap: 3px; line-height: 22px; }
 .jy-users-table .jy-cell-two .jy-caption { font-size: 12px; line-height: 18px; }
 .jy-users-table .jy-users-spark { height: 42px; }
@@ -132,6 +133,9 @@
   .jy-users-bigcheck { order: 2; flex: 0 0 auto; min-height: 44px; }
   .jy-users-group { order: 3; flex: 1 1 0; min-width: 0; }
   .jy-users-seg-status { order: 4; flex: 1 0 100%; }
+  .jy-users-sort { order: 5; display: flex; align-items: center; gap: 8px; flex: 1 0 100%; color: var(--jy-ink-2); font-size: 13px; }
+  .jy-users-sort > span { flex: none; }
+  .jy-users-sort .ant-select { flex: 1; min-width: 0; min-height: 44px; }
   .jy-users-search { width: 100%; }
   .jy-users-group .ant-select-selector { min-height: 40px; }
   .jy-users-group .ant-select { min-height: 40px; }

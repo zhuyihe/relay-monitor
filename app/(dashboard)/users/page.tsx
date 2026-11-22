@@ -134,7 +134,7 @@ export default function UsersPageRoute() {
   const onQuery = (patch: Partial<ListQuery>) => {
     if ("q" in patch) setQ(patch.q || "");
     const next = { ...urlQuery, ...patch };
-    const defaultSort = next.sort === "today" && next.dir === "desc";
+    const defaultSort = next.sort === "balance" && next.dir === "asc";
     setParams({
       scope: next.scope === "active30" ? null : next.scope,
       big: next.big ? "1" : null,

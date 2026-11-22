@@ -691,7 +691,7 @@ test("今天消费和余额自动同步：更新排名、今日合计和详情�
   f.clock.now += MIN;
   await f.ops.runOnce();
   const page = await localUsersPage(f.rt, f.ops, f.store, { now: f.clock.now });
-  const rows = usersResponse(page, new URLSearchParams()).list.rows;
+  const rows = usersResponse(page, new URLSearchParams("sort=today&dir=desc")).list.rows;
   assert.equal(rows[0].username, "today");
   assert.ok(rows[0].today > first.users.find((row) => row.id === 2).today);
   assert.equal(page.todaySyncedMs, f.clock.now);
@@ -842,7 +842,8 @@ test("整页：用户表在服务端筛选、分页——范围、重点、状�
   assert.deepEqual([first.rows.length, first.total, first.pages, first.pageSize], [50, 83, 2, 50], "默认范围：近 30 天有消费的（crowd 里 13 位在花钱的 + 70 位），不含 quiet、idle 这类没消费的");
   assert.equal(first.counts.scope.all, 85);
   assert.equal(ask("scope=all").total, 85);
-  assert.deepEqual(first.rows.map((row) => row.username).slice(0, 2), ["big1", "big2"], "默认按近 7 天消费从高到低");
+  assert.ok(first.rows.every((row, i) => i === 0 || first.rows[i - 1].balanceUsd <= row.balanceUsd), "默认按余额从低到高");
+  assert.deepEqual(ask("sort=week&dir=desc").rows.map((row) => row.username).slice(0, 2), ["big1", "big2"], "消费排序仍可手动选择");
   const second = ask("page=2");
   assert.equal(second.rows.length, 33);
   assert.equal(new Set([...first.rows, ...second.rows].map((row) => row.id)).size, 83, "两页没有重复");

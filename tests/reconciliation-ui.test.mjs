@@ -2618,6 +2618,55 @@ test("上游列表默认排法：手机卡片的顺序和电脑一样", async (t
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/order-375x812.png` });
 });
 
+test("上游列表排序：余额和日均花费沿用换算系数，零余额正常排序、未知余额始终在后，刷新和返回默认均有效", async (t) => {
+  const { page, state } = await openOrderPage(t);
+  const update = (id, remaining, rate = 1) => Object.assign(state.stations.find((s) => s.id === id), { cnyPerUsd: rate, balance: { ok: true, remaining, checkedAt: new Date().toISOString() } });
+  update("a", 10, 2); update("b", 15); update("c", 0); update("n", -5);
+  state.stations.find((s) => s.id === "q").balance = { ok: false, code: "UPSTREAM_UNREACHABLE" };
+  await page.reload();
+  const head = page.locator(".jy-stations-table thead");
+  const balance = head.getByRole("button", { name: "余额", exact: true });
+  await balance.click(); await page.waitForURL(/sort=balance/);
+  assert.deepEqual((await orderOf(page)).slice(0, 4), ["N 不再续费", "C 上游", "B 上游", "A 上游"], "10 × 2 排在 15 后面");
+  assert.equal(await head.locator('th[aria-sort="ascending"]').innerText(), "余额");
+  await balance.click(); await page.waitForURL(/sort=-balance/);
+  assert.deepEqual((await orderOf(page)).slice(0, 4), ["A 上游", "B 上游", "C 上游", "N 不再续费"]);
+  assert.deepEqual(new Set((await orderOf(page)).slice(-2)), new Set(["我的站", "Q 没在花钱"]));
+  await page.reload();
+  await page.locator(".jy-stations-table tbody .jy-stations-name-line > button.link").first().waitFor();
+  assert.deepEqual((await orderOf(page)).slice(0, 4), ["A 上游", "B 上游", "C 上游", "N 不再续费"]);
+  await head.getByRole("button", { name: "日均花费", exact: true }).click();
+  await page.waitForURL(/sort=-burn/);
+  assert.deepEqual((await orderOf(page)).slice(0, 4), ["A 上游", "N 不再续费", "B 上游", "C 上游"]);
+  await head.getByRole("button", { name: "可用天数", exact: true }).click();
+  await page.waitForURL(/sort=days/);
+  assert.equal(await head.locator('th[aria-sort="ascending"]').innerText(), "可用天数");
+  await page.getByRole("combobox", { name: "上游排序", exact: true }).click();
+  await page.locator('.ant-select-item-option[title="需处理优先"]').click();
+  await page.waitForURL((url) => !url.searchParams.has("sort"));
+  assert.equal(await head.locator('th[aria-sort="ascending"],th[aria-sort="descending"]').count(), 0);
+});
+
+test("上游列表排序：手机下拉可选余额和可用时间，刷新保留选择，窄屏不横向滚动", async (t) => {
+  const { page } = await openOrderPage(t, { width: 375, height: 812 });
+  const choose = async (name) => {
+    await page.getByRole("combobox", { name: "上游排序", exact: true }).click();
+    await page.locator(`.ant-select-item-option[title="${name}"]`).click();
+  };
+  await choose("余额从低到高"); await page.waitForURL(/sort=balance/);
+  assert.deepEqual((await orderOf(page, true)).slice(0, 3), ["N 不再续费", "C 上游", "B 上游"]);
+  await choose("可用时间从短到长"); await page.waitForURL(/sort=days/);
+  assert.equal((await orderOf(page, true))[0], "N 不再续费");
+  await page.reload();
+  await page.locator(".jy-stations-m li").first().waitFor();
+  assert.equal((await orderOf(page, true))[0], "N 不再续费");
+  await page.setViewportSize({ width: 320, height: 812 });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-sort-320.png` });
+  await page.setViewportSize({ width: 768, height: 900 });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "平板仅表格内部滚动，整页不横向滚动");
+});
+
 test("上游资源：「去上游资源」的地址（/stations?action=channels&stationId=）打开那个上游的渠道抽屉，地址栏的参数去掉", async (t) => {
   const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },
     { id: "up1", name: "主力上游", type: "newapi", baseUrl: "https://up1.test", monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" } }];
@@ -3429,7 +3478,7 @@ test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；�
   const { page, requests } = await openUsersPage(t, { search: "tab=users" });
   const rows = () => page.locator("table.jy-data tbody tr");
   await rows().first().waitFor();
-  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "余额和可用时间", "今日消费", "近 7 天消费", "近 14 天", "最近使用"], "余额紧邻用户，消费和趋势在后面");
+  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "当前余额", "预计可用", "今日消费", "近 7 天消费", "近 14 天", "最近使用"], "余额和可用时间分别排序，紧邻用户");
   assert.equal(await rows().count(), 50);
   await page.getByText("共 65 个，每页 50 个", { exact: true }).waitFor();
   assert.match(await usersGroup(page, USERS_COPY.users.scopeLabel).innerText(), /近 30 天有消费\s*65[\s\S]*全部\s*120/);
@@ -3478,15 +3527,28 @@ test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；�
   assert.ok(names.length > 0 && names.every((name) => Number(name.replace("u", "")) % 2 === 0), "只剩 default 组（编号是偶数）的人");
 });
 
-test("用户运营·默认按今天消费排序，顶部刷新同步当前用户数据并保留手动排序", async (t) => {
+test("用户运营·默认按余额从低到高排序，表头分别切换余额和可用时间，顶部刷新保留手动排序", async (t) => {
   const { page, full, syncReads } = await openUsersPage(t);
-  full.users.find((row) => row.id === 55).today = 200;
-  full.users.find((row) => row.id === 1).today = 1;
+  full.users.find((row) => row.id === 55).balanceUsd = -1;
+  full.users.find((row) => row.id === 55).days = 0.1;
+  full.users.find((row) => row.id === 1).balanceUsd = 1;
   const rows = page.locator("table.jy-data tbody tr");
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
   await page.waitForFunction(() => document.querySelector("table.jy-data tbody tr")?.textContent.includes("u055"));
   assert.equal(syncReads.length, 1, "顶部按钮执行主动同步 POST");
   assert.match(await rows.first().innerText(), /u055/);
+  const head = page.locator(".jy-users-table thead");
+  assert.equal(await head.locator('th[aria-sort="ascending"]').innerText(), USERS_COPY.users.currentBalance);
+  assert.equal(await head.locator("button .jy-icon").count(), 6, "每个可排序表头都有箭头");
+  await head.getByRole("button", { name: USERS_COPY.users.currentBalance, exact: true }).click();
+  await page.waitForURL(/sort=balance&dir=desc/);
+  await rows.first().getByText("u085", { exact: true }).waitFor();
+  await head.getByRole("button", { name: USERS_COPY.users.expectedRunway, exact: true }).click();
+  await page.waitForURL(/sort=days&dir=asc/);
+  await rows.first().getByText("u055", { exact: true }).waitFor();
+  await head.getByRole("button", { name: USERS_COPY.users.expectedRunway, exact: true }).click();
+  await page.waitForURL(/sort=days&dir=desc/);
+  await rows.first().getByText("u002", { exact: true }).waitFor();
   await page.getByRole("button", { name: USERS_COPY.users.cols.week, exact: true }).click();
   await page.waitForURL(/sort=week/);
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
@@ -3537,6 +3599,15 @@ test("用户运营·手机：用户表是一人一张卡片，筛选三行、没
   await page.setViewportSize({ width: 320, height: 812 });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px 分组筛选也不撑出横向滚动");
   await page.setViewportSize({ width: 375, height: 812 });
+  await page.getByRole("combobox", { name: USERS_COPY.users.sortAria, exact: true }).click();
+  await page.locator('.ant-select-item-option[title="余额从高到低"]').click();
+  await cards.first().getByText("u085", { exact: true }).waitFor();
+  await page.reload();
+  await cards.first().getByText("u085", { exact: true }).waitFor();
+  await page.getByRole("combobox", { name: USERS_COPY.users.sortAria, exact: true }).click();
+  await page.locator('.ant-select-item-option[title="可用时间从短到长"]').click();
+  await page.waitForURL(/sort=days&dir=asc/);
+  await cards.first().getByText("u001", { exact: true }).waitFor();
   await cards.first().click();
   await page.getByText(USERS_COPY.drawer.created, { exact: true }).waitFor();
   assert.match(await page.locator(".jy-users-drawer-meta").innerText(), /分组\s*vip\s*注册时间[\s\S]*累计消费\s*¥/);

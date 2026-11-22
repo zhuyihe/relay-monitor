@@ -5,6 +5,8 @@
 .jy-stations-toolbar .jy-seg { max-width: 100%; }
 .jy-stations-toolbar .spacer { min-width: 0; }
 .jy-stations-toolbar .jy-stations-type { width: 160px; }
+.jy-stations-order { display: inline-flex; align-items: center; gap: 8px; color: var(--jy-ink-2); font-size: 13px; }
+.jy-stations-order .ant-select { width: 180px; }
 .jy-stations-panel { min-width: 0; }
 .jy-stations-table { min-width: 1080px; table-layout: fixed; }
 .jy-stations-col-name { width: 20%; }
@@ -55,14 +57,6 @@ table.jy-data.jy-stations-table td { padding-block: 14px; line-height: 22px; fon
 .jy-stations-table td.jy-stations-pin-r { padding-left: 8px; }
 
 .jy-stations-m .m-name { display: flex; align-items: center; min-width: 0; }
-
-.jy-stations-sort {
-  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none;
-  font: inherit; color: inherit; cursor: pointer;
-}
-.jy-stations-sort .jy-icon { width: 14px; height: 14px; }
-.jy-stations-sort:hover { color: var(--jy-ink); }
-.jy-stations-sort:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
 
 .jy-stations-type { width: 200px; }
 .jy-stations-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
@@ -133,6 +127,8 @@ table.jy-data.jy-stations-table td { padding-block: 14px; line-height: 22px; fon
   .jy-stations-toolbar .jy-seg { flex: 1 0 100%; overflow-x: auto; }
   .jy-stations-toolbar .jy-seg button { min-height: 40px; }
   .jy-stations-toolbar .jy-stations-type { flex: 1 1 0; width: auto; min-width: 100px; }
+  .jy-stations-order { flex: 1 0 100%; }
+  .jy-stations-order .ant-select { flex: 1; width: auto; min-width: 0; min-height: 44px; }
   .jy-stations-toolbar .spacer { display: none; }
   .jy-stations-toolbar > .ant-btn { min-height: 44px; }
   .jy-stations-m li { padding: 16px; gap: 10px 8px; }

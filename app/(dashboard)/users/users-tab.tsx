@@ -1,5 +1,5 @@
 "use client";
-// 用户：一个用户表（design 用户运营 v6 §3、v7 §3、v8 §2）。默认只列近 30 天有消费的人，按今日消费从高到低，每页 50 个；
+// 用户：默认列近 30 天有消费的人，按余额从低到高，每页 50 个；
 // 筛选、排序、分页都在服务端（/api/users），这里只管摆：范围 | 只看重点用户 | 状态 | 分组，右边搜索；点一行开抽屉。手机是一人一张卡片。
 import { useEffect, useState } from "react";
 import { Button, Grid, Input, Select, Tooltip } from "antd";
@@ -40,7 +40,7 @@ function RunwayCell({ row, page }: { row: UsersRow; page: UsersPage }) {
   return (
     <span className="jy-cell-runway">
       {has && <RunwayTrack mini days={row.days} level={level} critDays={page.level1Days ?? 0.5} warnDays={0} />}
-      <span className={`v${has ? "" : " jy-muted"}`}>{runwayText(row)}</span>
+      <span className={`v${has || row.runwayState === "empty" ? "" : " jy-muted"}`}>{runwayText(row)}</span>
     </span>
   );
 }
@@ -88,10 +88,11 @@ export function UsersTab({
       foot: searching ? COPY.users.totalMatched(list.total) : COPY.users.total(list.total),
     },
     {
-      key: "balance", label: COPY.users.cols.balanceDays, num: true, sort: noop,
-      render: (r) => (<span className={`jy-cell-two jy-cell-two--r jy-users-balance-summary${r.status === "empty" || r.status === "soon" ? " is-low" : ""}`}><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
+      key: "balance", label: COPY.users.currentBalance, num: true, sort: noop, sortDir: "asc",
+      render: (r) => (<span className={`jy-users-balance-summary${r.status === "empty" || r.status === "soon" ? " is-low" : ""}`}><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span></span>),
       foot: <span className="jy-users-balance">{money(list.totals.balance, rate)}</span>,
     },
+    { key: "days", label: COPY.users.expectedRunway, num: true, sort: noop, sortDir: "asc", render: (r) => <span className={`jy-users-balance-summary${r.status === "empty" || r.status === "soon" ? " is-low" : ""}`}><RunwayCell row={r} page={page} /></span> },
     { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => <span className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate)}</span>, foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
     {
       key: "week", label: COPY.users.cols.week, num: true, sort: noop,
@@ -177,6 +178,11 @@ export function UsersTab({
             </label>
           </>
         )}
+        {phone && <label className="jy-users-sort">
+          <span>{COPY.users.sortLabel}</span>
+          <Select aria-label={COPY.users.sortAria} value={`${query.sort}:${query.dir}`} options={COPY.users.sortOptions}
+            onChange={(value) => { const [sort, dir] = value.split(":"); onQuery({ sort: sort as SortKey, dir: dir as "asc" | "desc" }); }} />
+        </label>}
       </div>
       {phone ? (
         rows.length ? (

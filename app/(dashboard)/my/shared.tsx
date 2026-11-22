@@ -4,7 +4,7 @@ import { Fragment, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { ADMIN_UNMARKED, EMPTY, RANGE_TEXT, TOKEN_NOTE as TOKEN_SCOPE, formatDeltaPct, formatMoney, formatUnitPrice, formatZonedRange } from "../../../lib/format";
 import { rateSnapshotOf } from "../../../lib/profit";
-import { Icon } from "../../components/icons";
+import { SortHeader } from "../../components/sort-header";
 
 export const RANGES = ["today", "7d", "30d"] as const;
 export type OwnRange = (typeof RANGES)[number];
@@ -143,6 +143,7 @@ export type Col<R> = {
   // 数字列右对齐
   num?: boolean;
   sort?: (r: R) => number | string | null | undefined;
+  sortDir?: "asc" | "desc";
   render: (r: R) => ReactNode;
   foot?: ReactNode;
 };
@@ -212,7 +213,7 @@ export function DataTable<R>({
   }, [rows, cols, sort, controlled]);
 
   const nextSort = (s: SortState | null, c: Col<R>): SortState =>
-    (s && s.key === c.key ? { key: c.key, dir: s.dir === "asc" ? "desc" : "asc" } : { key: c.key, dir: c.num ? "desc" : "asc" });
+    (s && s.key === c.key ? { key: c.key, dir: s.dir === "asc" ? "desc" : "asc" } : { key: c.key, dir: c.sortDir ?? (c.num ? "desc" : "asc") });
   const onSort = (c: Col<R>) => (controlled ? onSortChange(nextSort(sort, c)) : setSort((s) => nextSort(s, c)));
   const hasFoot = cols.some((c) => c.foot !== undefined);
 
@@ -233,10 +234,7 @@ export function DataTable<R>({
                   aria-sort={c.sort ? (active ? (sort.dir === "asc" ? "ascending" : "descending") : "none") : undefined}
                 >
                   {c.sort ? (
-                    <button type="button" className={`jy-my-sort${active ? " is-active" : ""}`} onClick={() => onSort(c)}>
-                      {c.label}
-                      {active && <Icon name={sort.dir === "asc" ? "sort" : "sort-down"} />}
-                    </button>
+                    <SortHeader label={c.label} direction={active ? sort.dir : undefined} onClick={() => onSort(c)} />
                   ) : (
                     c.label
                   )}
