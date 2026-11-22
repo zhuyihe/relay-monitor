@@ -2,6 +2,12 @@
 
 /* 切换范围或归档开关时保留上一份数据，变淡表示正在更新 */
 .jy-analytics-switching { opacity: .6; transition: opacity .15s ease; }
+.jy-analytics-charts { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); align-items: start; gap: 20px; }
+.jy-analytics-charts > .jy-panel { min-width: 0; }
+.jy-analytics-mix .jy-panel-head { flex-wrap: wrap; }
+.jy-analytics-mix .jy-panel-head .extra { margin-left: auto; }
+.jy-analytics-mix .jy-hbars li { padding-block: 12px; }
+.jy-analytics-daily .jy-panel-body > .jy-caption { margin: 16px 0 0; }
 
 /* 可用天数面板不带正文内边距（跑道自带左右留白），只补上与标题的间距 */
 .jy-analytics-runway { padding-top: 16px; }
@@ -31,9 +37,19 @@
 }
 
 /* 每天的上游成本：一天一根柱，今天那根虚线 */
-.jy-daily-cost { display: flex; align-items: flex-end; gap: 4px; height: 180px; margin: 0; padding: 0; list-style: none; }
-.jy-daily-cost li { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
-.jy-daily-cost__bar { display: block; width: 100%; background: var(--jy-s2); border-radius: 3px 3px 0 0; }
-.jy-daily-cost li.is-today .jy-daily-cost__bar { background: transparent; border: 1.5px dashed var(--jy-s2); border-bottom: 0; }
-.jy-daily-cost__day { font-size: 11px; color: var(--jy-ink-3); }
-.jy-swatch--dashed { display: inline-block; width: 12px; height: 10px; border: 1.5px dashed var(--jy-s2); vertical-align: middle; }
+.jy-daily-cost-chart { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; margin-top: 8px; }
+.jy-daily-cost-scale { display: flex; flex-direction: column; justify-content: space-between; padding-bottom: 24px; font-size: 11px; line-height: 16px; text-align: right; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-daily-cost { display: flex; align-items: flex-end; gap: 8px; height: 260px; margin: 0; padding: 0; list-style: none; }
+.jy-daily-cost li { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.jy-daily-cost__track { display: flex; align-items: flex-end; justify-content: center; flex: 1; width: 100%; min-height: 0; border-bottom: 1px solid var(--jy-rule); }
+.jy-daily-cost__bar { display: block; width: 100%; max-width: 44px; background: color-mix(in srgb, var(--jy-cobalt) 32%, var(--jy-sheet)); border-radius: 2px 2px 0 0; }
+.jy-daily-cost li.is-today .jy-daily-cost__bar { background: transparent; border: 1.5px dashed var(--jy-cobalt); border-bottom: 0; }
+.jy-daily-cost__day { font-size: 11px; line-height: 16px; white-space: nowrap; color: var(--jy-ink-3); }
+.jy-swatch--dashed { display: inline-block; width: 12px; height: 10px; border: 1.5px dashed var(--jy-cobalt); vertical-align: middle; }
+@media (max-width: 1199px) {
+  .jy-analytics-charts { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 767px) {
+  .jy-analytics-charts { gap: 16px; }
+  .jy-daily-cost { height: 220px; gap: 4px; }
+}

@@ -704,7 +704,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const cost = result.rates?.costBasis === "fixed" ? 0 : Number(Object.hasOwn(upstream, "countedAmountUsd") ? upstream.countedAmountUsd : upstream.knownAmountUsd ?? upstream.amountUsd);
     return { income: Number.isFinite(income) ? income : 0, cost: Number.isFinite(cost) ? cost : 0 };
   };
-  async function dailyProfitResults(input, rules, now, { cacheOnly = false } = {}) {
+  async function dailyProfitResults(input, rules, now, { cacheOnly = false, passive = false } = {}) {
     const archivedRuleIds = rules.filter((rule) => rule.archivedAt).map((rule) => rule.id);
     const per = [];
     for (const rule of rules) {
@@ -789,7 +789,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const answers = new Map(); // key -> response
     const run = async (key, requestInput, only) => {
       const key2 = only ? `${key}|${[...only].sort().join(",")}` : key;
-      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds, cacheOnly }));
+      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds, cacheOnly, passive }));
       return answers.get(key2);
     };
     for (const [key, request] of requests) await run(key, request.input, request.ruleIds);
@@ -4294,7 +4294,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
-    async profitPage(rawInput = {}, { cacheOnly = false } = {}) {
+    async profitPage(rawInput = {}, { cacheOnly = false, passive = false } = {}) {
       const input = await sinceInput(rawInput);
       // 浏览器的钟比服务器快一点（几分钟以内）不能整页报错：自选范围的终点当成「到现在」；快得多才是真的选了以后的时间
       if (input.preset === "custom" && Number.isFinite(Number(input.endMs)) && Number(input.endMs) > Date.now() && Number(input.endMs) - Date.now() <= CLOCK_SKEW_MS) input.endMs = Date.now();
@@ -4308,15 +4308,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) >= dayKeyInTz(w.startMs, rule.timezone) && (reconciliationAccountingStart(rule) ?? 0) < w.endMs;
       });
       const archivedRuleIds = archivedInRange.map((rule) => rule.id);
-      const daily = await dailyProfitResults(input, [...allRules.filter((rule) => !rule.archivedAt && rule.enabled), ...archivedInRange], nowMs, { cacheOnly });
+      const daily = await dailyProfitResults(input, [...allRules.filter((rule) => !rule.archivedAt && rule.enabled), ...archivedInRange], nowMs, { cacheOnly, passive });
       // 「没算进利润的上游成本」只在单天范围显示：多天范围只读得到现读那几天，和页面别处对不上
-      const response = daily ? daily.response : await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds, cacheOnly });
+      const response = daily ? daily.response : await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds, cacheOnly, passive });
       const now = Date.parse(response.generatedAt), tz = response.tz;
       const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
       const labels = dayLabelsOf(window, tz, now);
       const results = daily ? daily.results : response.results;
       // 有没读到的行：让后台轮询早点轮到它们（轮询没在跑、离上一轮开始满 30 秒才踢；读取本身还是只在后台轮询那一路）
-      if (cacheOnly && results.some((row) => row.todayReading)) rt._reconciliationPollKick?.();
+      if (cacheOnly && !passive && results.some((row) => row.todayReading)) rt._reconciliationPollKick?.();
       // 多天范围里没算进来的天（没固定、今天现读失败、半天）：页面写一句，不悄悄算少
       const notCountedDays = { count: daily ? new Set(daily.notCounted.map((item) => item.day)).size : 0 };
       const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
@@ -4376,11 +4376,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const todayRequired = page.rows.some((row) => row.daily.some((day) => day.day === todayLabel && !["notStarted", "future"].includes(day.state)));
       const timing = { incomeThroughMs, costThroughMs, provisional: todayRequired };
       // 所选期间实际计入的渠道包括已解绑的历史渠道；当前绑定状态不代表历史金额范围。
-      const included = new Set(results.filter((result) => page.rows.some((row) => row.counted && row.ruleIds.includes(result.rule.id)))
-        .flatMap((result) => result.rule.channels.map((channel) => `${result.rule.ownStationId}|${channel.channelId}`)));
-      const channels = response.coverage.channels.map((channel) => included.has(`${channel.ownStationId}|${channel.channelId}`)
-        ? { ...channel, status: "accounted", issues: [], actions: [] }
-        : channel.status === "accounted" ? { ...channel, status: "billing_missing" } : channel);
+      const includedResults = results.filter((result) => page.rows.some((row) => row.counted && row.ruleIds.includes(result.rule.id)));
+      const channels = response.coverage.channels.map((channel) => {
+        const matching = includedResults.filter((result) => result.rule.ownStationId === channel.ownStationId && result.rule.channels.some((item) => item.channelId === channel.channelId));
+        if (!matching.length) return channel.status === "accounted" ? { ...channel, status: "billing_missing" } : channel;
+        // 金额进度必须证明起止相同；跨时区、换绑定的多种时间不能当成同一整天。
+        const first = matching[0].window;
+        const window = matching.every((result) => result.window.startMs === first.startMs && result.window.endMs === first.endMs) ? first : null;
+        return { ...channel, status: "accounted", issues: [], actions: [], window };
+      });
       const accountedChannelCount = channels.filter((channel) => channel.status === "accounted").length;
       const coverage = { ...response.coverage, channels, accountedChannelCount,
         state: response.coverage.catalogueState !== "verified" ? "unknown" : accountedChannelCount === channels.length ? "complete_known" : "partial" };
@@ -4486,7 +4490,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const input = await sinceInput(rawInput);
       // 减压 PR：页面来读实时窗口（今天/近 7 天/本月），就是「有人在看」的信号——不额外发请求，借用页面本来就有的轮询；
       // 空闲后第一次又来，at 刷成现在，下一轮轮询就不再当没人看，所有渠道都现问
-      if (options.origin === "page" && isLiveReconciliationPreset(input.preset)) {
+      if (!options.passive && options.origin === "page" && isLiveReconciliationPreset(input.preset)) {
         const now = Date.now();
         lastTodayViewAt.at = now;
       }
@@ -4536,7 +4540,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             // 只含今天的范围（今天、每月 1 号的本月、绑定都是今天才绑的开始算以来、只选今天的自选）都按今天处理；别的没有可取的缓存
             const todayWindow = resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, Math.max(now, Date.now()));
             if (window.startMs !== todayWindow.startMs || window.endMs < Date.now() - LIVE_END_SLACK_MS) return Promise.resolve(pendingResult(rule, window, issueText("PENDING")));
-            markPageViewing();
+            if (!options.passive) markPageViewing();
             return Promise.resolve(todayFromPoll(rule, todayWindow) || readingResult(rule, window));
           }
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
@@ -4643,6 +4647,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 应付成本 V1-a：整站日志读取和上游价目表，给 V1-b 的结账和只读试算用
     ingestOwnLog: (own) => ownLog.ingestOnce(own),
     backfillExpectedCost,
+    // 首页只读已经核验的同站额度单位，不因打开首页重新查询主站。
+    cachedOwnStatus(stationId) {
+      const own = upstreamStation(stationId);
+      return own ? ownStatusCache.get(`${own.id}:${credentialFingerprint(own)}`)?.value || null : null;
+    },
     ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
     // 错误日志的小时计数（模型供需用，server/own-error-supply.js 在它上面汇总）
     ownErrorBuckets: (stationId, fromSlotMs, toSlotMs, options) => (ownErrorStore || rt._ownErrorStore).listBuckets(stationId, fromSlotMs, toSlotMs, options),

@@ -117,6 +117,7 @@ function KeySelect({ aria, placeholder, value, keys, failed, disabled, onChange 
   const M = CHANNEL_BINDING.bindModal;
   return <Select
     showSearch virtual={false} className="jy-bind-select" aria-label={aria} placeholder={placeholder} value={value ?? undefined} options={keys?.options ?? []} loading={keys == null && !failed} disabled={disabled}
+    getPopupContainer={(triggerNode) => triggerNode.parentElement!}
     filterOption={(input, option) => `${option?.label ?? ""} ${(option as KeyOption | undefined)?.reason ?? ""}`.toLowerCase().includes(input.trim().toLowerCase())}
     optionRender={(option) => { const item = option.data as KeyOption; return item.disabled ? <span className="jy-key-off"><span>{item.label}</span><small>{item.reason}</small></span> : item.label; }}
     popupRender={(menu) => <>{keys && keys.usable === 0 && keys.options.length ? <div className="jy-key-none">{CHANNEL_BINDING.keyReason.none}</div> : null}{menu}</>}

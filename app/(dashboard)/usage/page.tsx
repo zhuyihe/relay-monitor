@@ -369,7 +369,7 @@ export default function UsagePage() {
   // 首次加载 / 整页失败：保留筛选栏，只替换内容区
   if (!agg) {
     return (
-      <div className="jy-page">
+      <div className="jy-page jy-usage">
         {filterBar}
         {loadError ? (
           <Panel label={COPY.dataLabel}>
@@ -507,7 +507,7 @@ export default function UsagePage() {
     );
 
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-usage">
       {filterBar}
 
       {/* 已有数据时后台刷新失败：保留上次结果，提示原因 */}

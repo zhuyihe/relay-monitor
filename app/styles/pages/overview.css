@@ -1,55 +1,112 @@
-/* 运营总览：只放本页独有的细节，布局和组件样式都在 jy.css */
-
-/* 上游余量里的站点名：点击打开余额趋势，外观保持为普通名称 */
-.jy-ov-name {
-  display: block;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-  border-radius: var(--jy-r1);
+/* 真实运营首页。外壳、面板和按钮沿用全站样式，首页只组合经营、对账、客户和上游。 */
+.jy-ov { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.jy-ov.is-switching > :not(.jy-ov-intro) { opacity: .55; }
+.jy-ov-intro { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--jy-ink-3); font-size: 12px; }
+.jy-ov-intro p { margin: 0; }
+.jy-ov-intro .ant-btn { display: inline-flex; align-items: center; gap: 6px; }
+.jy-ov-metrics { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1.15fr; padding: 10px 0 24px; border-bottom: 1px solid var(--jy-rule-soft); }
+.jy-ov-metric { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; padding: 0 24px; border: 0; border-left: 1px solid var(--jy-rule-soft); color: var(--jy-ink); background: none; text-align: left; font: inherit; }
+.jy-ov-metric:first-child { border-left: 0; padding-left: 0; }
+button.jy-ov-metric { cursor: pointer; border-radius: var(--jy-r1); }
+button.jy-ov-metric:hover .jy-ov-label { color: var(--jy-cobalt); }
+.jy-ov-label { display: inline-flex; align-items: center; gap: 6px; color: var(--jy-ink-3); font-size: 12px; }
+.jy-ov-label small { background: var(--jy-sunken); border-radius: 3px; padding: 1px 5px; font-size: 12px; }
+.jy-ov-label .jy-icon { width: 13px; height: 13px; }
+.jy-ov-value { font-size: 28px; line-height: 36px; font-weight: 600; letter-spacing: -.5px; white-space: nowrap; }
+.jy-ov-metric.is-lead .jy-ov-value { font-size: 36px; line-height: 40px; }
+.jy-ov-value small { font-size: 12px; font-weight: 400; color: var(--jy-ink-3); margin-left: 5px; letter-spacing: 0; }
+.jy-ov-danger { color: var(--jy-crit-ink); }
+.jy-ov-warning { color: var(--jy-warn-ink); }
+.jy-ov-notice { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: var(--jy-r1); background: var(--jy-warn-tint); color: var(--jy-warn-ink); font-size: 12px; }
+.jy-ov-notice > span { flex: 1; }
+.jy-ov-notice a { color: inherit; white-space: nowrap; }
+.jy-ov-dashboard { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr); gap: 20px; align-items: stretch; }
+.jy-ov .jy-panel { min-width: 0; box-shadow: none; }
+.jy-ov .jy-panel-head { padding: 20px 20px 0; align-items: center; gap: 8px; }
+.jy-ov .jy-panel-sub { margin: 6px 0 0; padding: 0 20px; font-size: 12px; }
+.jy-ov .jy-panel-body { padding: 16px 20px 20px; }
+.jy-ov .jy-panel-body--flush { padding: 16px 0 0; }
+.jy-ov .jy-panel-foot { padding: 12px 20px; }
+.jy-ov .jy-panel-head .extra { gap: 6px; }
+.jy-ov .jy-panel-head .jy-seg { background: transparent; padding: 0; }
+.jy-ov .jy-panel-head .jy-seg button { background: none; box-shadow: none; border-radius: 0; padding-inline: 7px; }
+.jy-ov .jy-panel-head .jy-seg button[aria-pressed="true"] { border-bottom: 2px solid var(--jy-ink); }
+.jy-ov-chart-summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 8px; }
+.jy-ov-chart-summary strong { font-size: 24px; line-height: 32px; font-weight: 500; }
+.jy-ov-chart { min-width: 0; }
+.jy-ov-chart svg { display: block; overflow: visible; }
+.jy-ov-chart-grid { stroke: var(--jy-rule-soft); stroke-width: 1; }
+.jy-ov-chart-axis { fill: var(--jy-ink-3); font-family: var(--jy-font); font-size: 12px; }
+.jy-ov-chart-bar { fill: var(--jy-cobalt); opacity: .7; }
+.jy-ov-chart-bar.is-today { opacity: 1; }
+.jy-ov-chart g[role="button"] { cursor: pointer; }
+.jy-ov-chart g[role="button"]:hover .jy-ov-chart-bar, .jy-ov-chart g[role="button"]:focus .jy-ov-chart-bar { fill: var(--jy-cobalt); opacity: 1; }
+.jy-ov-chart-readout { min-height: 18px; margin: 8px 0 0; }
+.jy-ov-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.jy-ov-foot .ant-btn { padding: 0; font-size: 12px; height: auto; }
+.jy-ov-foot a { color: var(--jy-cobalt); text-decoration: none; white-space: nowrap; }
+.jy-ov-coverage-value { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.jy-ov-coverage-value strong { font-size: 28px; line-height: 40px; font-weight: 600; }
+.jy-ov-coverage-track { margin: 12px 0 16px; height: 6px; border-radius: 4px; background: var(--jy-warn-tint); overflow: hidden; }
+.jy-ov-coverage-track span { display: block; height: 100%; background: var(--jy-cobalt); border-radius: inherit; }
+.jy-ov-amounts { margin: 12px 0; }
+.jy-ov-amounts > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 10px 0; }
+.jy-ov-amounts dt { color: var(--jy-ink-3); font-size: 12px; }
+.jy-ov-amounts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.jy-ov-callout { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 12px; padding: 12px; margin: 18px 0 0; border: 0; border-radius: var(--jy-r1); background: var(--jy-sunken); color: var(--jy-ink); text-align: left; font: inherit; cursor: pointer; }
+.jy-ov-callout > span:first-child { min-width: 0; }
+.jy-ov-callout strong { display: block; font-weight: 500; font-size: 12px; }
+.jy-ov-callout small { display: block; color: var(--jy-ink-3); font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-ov-coverage-note { margin-top: 16px; margin-bottom: 0; }
+.jy-ov-customer-wrap { min-width: 0; }
+.jy-ov-customers, .jy-ov-suppliers { display: flex; flex-direction: column; height: 100%; }
+.jy-ov-customers .jy-panel-body, .jy-ov-suppliers .jy-panel-body { flex: 1; }
+.jy-ov-customer-table th:first-child, .jy-ov-customer-table td:first-child { padding-left: 20px; }
+.jy-ov-customer-table th { font-size: 12px; }
+.jy-ov-customer-table td { font-size: 14px; }
+.jy-ov-customer-table th:last-child, .jy-ov-customer-table td:last-child { padding-right: 20px; }
+.jy-ov-customer-table td { height: 72px; }
+.jy-ov-customer-name { display: flex; gap: 10px; align-items: center; color: var(--jy-ink); text-decoration: none; }
+.jy-ov-customer-name > span:last-child { min-width: 0; }
+.jy-ov-customer-name strong { display: block; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.jy-ov-customer-name small { display: block; color: var(--jy-ink-3); font-size: 12px; }
+.jy-ov-customer-name:hover strong { color: var(--jy-cobalt); }
+.jy-ov-mobile-spend { display: none !important; }
+.jy-ov-avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none; font-size: 12px; background: var(--jy-sunken); color: var(--jy-ink-2); }
+.jy-ov-help { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.jy-ov-help .jy-icon { width: 12px; height: 12px; }
+.jy-ov-supplier-list { list-style: none; padding: 0; margin: 0; }
+.jy-ov-supplier-list li + li { border-top: 1px solid var(--jy-rule-soft); }
+.jy-ov-supplier-list button { width: 100%; display: block; padding: 18px 20px; border: 0; background: none; color: var(--jy-ink); text-align: left; font: inherit; cursor: pointer; }
+.jy-ov-supplier-list button:hover { background: var(--jy-sunken); }
+.jy-ov-supplier-top, .jy-ov-supplier-bottom { display: flex; justify-content: space-between; gap: 12px; }
+.jy-ov-supplier-top strong { max-width: 65%; font-size: 14px; line-height: 20px; font-weight: 500; overflow-wrap: anywhere; }
+.jy-ov-supplier-top > span { flex: none; white-space: nowrap; font-size: 12px; }
+.jy-ov-supplier-bottom { margin-top: 8px; color: var(--jy-ink-3); font-size: 12px; }
+.jy-ov-data-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; color: var(--jy-ink-3); font-size: 12px; }
+.jy-ov-data-footer span:last-child { margin-left: auto; }
+.jy-ov-dialog p { font-size: 14px; line-height: 24px; }
+.jy-ov-dialog .jy-data { margin: 20px 0; }
+@media (max-width: 1199px) { .jy-ov-metric { padding-inline: 16px; } .jy-ov-metric.is-lead .jy-ov-value { font-size: 32px; } .jy-ov-dashboard { grid-template-columns: minmax(0, 1fr) minmax(290px, .75fr); } .jy-ov-metric .jy-caption { max-width: 100%; } }
+@media (max-width: 1000px) { .jy-ov-dashboard { grid-template-columns: minmax(0, 1fr); } .jy-ov-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 0; } .jy-ov-metric:nth-child(3) { border-left: 0; padding-left: 0; } .jy-ov-coverage { order: 4; } .jy-ov-trend { order: 3; } .jy-ov-customer-wrap { order: 1; } .jy-ov-suppliers { order: 2; } }
+@media (max-width: 600px) {
+  .jy-ov { gap: 16px; }
+  .jy-ov-intro { align-items: flex-start; }
+  .jy-ov-metric { padding-inline: 12px; }
+  .jy-ov-metric .jy-caption { font-size: 12px; }
+  .jy-ov-value { font-size: 24px; line-height: 32px; }
+  .jy-ov-metric.is-lead .jy-ov-value { font-size: 30px; line-height: 36px; }
+  .jy-ov .jy-panel-head { align-items: flex-start; flex-wrap: wrap; }
+  .jy-ov .jy-panel-head .extra { margin-left: auto; }
+  .jy-ov .jy-panel-head .spacer { display: none; }
+  .jy-ov-customer-table th, .jy-ov-customer-table td { padding-inline: 8px; font-size: 12px; }
+  .jy-ov-customer-table th:first-child, .jy-ov-customer-table td:first-child { padding-left: 12px; }
+  .jy-ov-customer-table th:last-child, .jy-ov-customer-table td:last-child { padding-right: 12px; }
+  .jy-ov-customer-table th:nth-child(2), .jy-ov-customer-table td:nth-child(2) { display: none; }
+  .jy-ov-mobile-spend { display: block !important; }
+  .jy-ov-avatar { display: none; }
+  .jy-ov-customer-table tbody tr:nth-child(n+4) { display: none; }
+  .jy-ov-supplier-list li:nth-child(n+3) { display: none; }
+  .jy-ov-data-footer { gap: 6px 14px; }
+  .jy-ov-data-footer span:last-child { margin-left: 0; }
 }
-.jy-ov-name:hover { color: var(--jy-cobalt); text-decoration: underline; text-underline-offset: 3px; }
-
-/* 需要处理：账号或账单事项读取失败时的提示，放在列表上方 */
-.jy-ov-banner { align-items: center; margin: 12px 24px 0; }
-.jy-ov-banner .jy-sym { margin-top: 0; }
-.jy-ov-banner-text { flex: 1; min-width: 0; font-size: 13px; line-height: 20px; }
-@media (max-width: 767px) {
-  .jy-ov-banner { margin: 12px 16px 0; flex-wrap: wrap; }
-}
-
-/* 收入和上游成本一块（ui-design-spec §5.1）：上下两小段「收入 · 按用户」「上游成本 · 按上游」，合计只在利润等式里 */
-.jy-ov-money { display: flex; flex-direction: column; gap: 20px; }
-.jy-ov-money > section + section { padding-top: 20px; border-top: 1px solid var(--jy-rule-soft); }
-.jy-ov-money-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin: 0 0 8px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--jy-ink-2); }
-/* 手机上只露没设置、读不到、没有收入这类一句话的小段，条形在「按用户、按上游看」里 */
-.jy-ov-money.is-compact { gap: 12px; }
-.jy-ov-money.is-compact > section + section { padding-top: 0; border-top: 0; }
-.jy-ov-money.is-compact .jy-more__body { margin-top: 12px; }
-/* 只在 8 + 4 并排时（1200 以上）：1200 以下叠成一列满宽，照通用的排法 */
-@media (min-width: 1200px) {
-  /* 4 列里名字那一栏给宽一点（条短一点），上游名少被截 */
-  .jy-ov .jy-ov-money .jy-hbars li { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
-  /* 需处理放在 4 列里：按钮挪到文字下面，文字占满一行，不被挤成四五行（和手机上同一个排法） */
-  .jy-ov .jy-grid-8-4 .jy-attention li { grid-template-columns: 16px minmax(0, 1fr); }
-  .jy-ov .jy-grid-8-4 .jy-attention .actions { grid-column: 2; margin-left: -8px; }
-  /* 点开「还有 N 件」以后需处理变长：这一行不再拉成一样高，等式那块照自己的高度，下面不空一大片 */
-  .jy-ov .jy-grid-8-4:has(.jy-attention-rest .jy-more__body) { align-items: start; }
-  .jy-ov .jy-grid-8-4:has(.jy-attention-rest .jy-more__body) > .jy-panel { height: auto; }
-}
-/* 没设置、读不到、算不出时小段里那一句（原因在上面的利润等式里） */
-.jy-ov-money-note { margin: 0; font-size: 13px; line-height: 20px; }
-
-/* 今天赚了多少不跟着右边的需处理拉高，顶部对齐 */
-.jy-ov-top { align-items: start; }
-/* 快用完的上游：一个上游一行，不带圆点 */
-.jy-ov-low { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.jy-ov-low li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }

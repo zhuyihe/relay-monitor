@@ -62,9 +62,8 @@ export default function LoginPage() {
   return (
     <main className="jy-login">
       <section className="jy-login-brand" aria-label={BRAND.productName}>
-        <BrandMark inverse showWordmark size={40} label={BRAND.name} subtitle={BRAND.productDescriptor} />
+        <BrandMark showWordmark size={40} label={BRAND.name} subtitle={BRAND.productDescriptor} />
         <div className="jy-login-brand-body">
-          <p className="jy-login-eyebrow">{BRAND.positioning}</p>
           <p className="jy-login-tagline">{BRAND.loginTagline}</p>
           <p className="jy-login-lead">{COPY.lead}</p>
           <ul className="jy-login-caps" aria-label={COPY.capsLabel}>

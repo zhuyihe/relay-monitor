@@ -23,10 +23,12 @@
 
 
 /* 日志精算的四项汇总 */
-.jy-my-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
-.jy-my-stats > div { padding: 12px 16px; border-radius: var(--jy-r2); background: var(--jy-sunken); min-width: 0; }
+.jy-my-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin: 0 0 20px; padding-bottom: 20px; border-bottom: 1px solid var(--jy-rule); }
+.jy-my-stats > div { padding: 0 20px; min-width: 0; }
+.jy-my-stats > div:first-child { padding-left: 0; }
+.jy-my-stats > div + div { border-left: 1px solid var(--jy-rule); }
 .jy-my-stats dt { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
-.jy-my-stats dd { margin: 4px 0 0; font-size: 20px; line-height: 28px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
+.jy-my-stats dd { margin: 6px 0 0; font-size: 24px; line-height: 32px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
 .jy-my-stats dd small { display: block; font-size: 12px; line-height: 18px; font-weight: 400; color: var(--jy-ink-3); }
 .jy-my-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 
@@ -38,8 +40,24 @@
 .jy-my-add { display: flex; gap: 8px; max-width: 360px; margin-top: 8px; }
 .jy-my-mgr-foot { display: flex; gap: 8px; margin-top: 16px; }
 
+/* 趋势与排行两行沿用业务页的 2:1 布局，桌面上下边缘一致。 */
+.jy-my-analysis-row { align-items: stretch; gap: 20px; }
+.jy-my-analysis-row > .jy-panel { height: 100%; }
+.jy-my-metrics .jy-panel-body { padding-block: 20px; }
+.jy-my .jy-hbars li { padding-block: 11px; }
+.jy-my .jy-hbars .name { font-size: 13px; }
+.jy-my-facts { font-size: 12px; line-height: 20px; color: var(--jy-ink-3); }
+.jy-my-linkbtn:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 4px; border-radius: 2px; }
+
 @media (max-width: 767px) {
-  .jy-my-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-my-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 20px; }
+  .jy-my-stats > div { padding-inline: 16px; }
+  .jy-my-stats > div:nth-child(odd) { border-left: 0; padding-left: 0; }
+  .jy-my-stats dd { font-size: 22px; line-height: 30px; }
+  .jy-my-analysis-row { gap: 16px; }
+  .jy-my-analysis-row > .jy-panel { height: auto; }
+  .jy-my-mgr { padding: 14px; }
+  .jy-my-mgr-foot { flex-wrap: wrap; }
 }
 
 /* 概览的「消费最多的模型」只在桌面放（ui-design-spec §5.3）：手机上模型在「模型与渠道」标签页里看 */

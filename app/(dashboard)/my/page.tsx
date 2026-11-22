@@ -155,7 +155,7 @@ export default function MyStationPage() {
 
   if (unconfigured) {
     return (
-      <div className="jy-page">
+      <div className="jy-page jy-my">
         <Onboarding
           title={OWN_STATION_UNSET_TITLE}
           desc={COPY.setupDesc}
@@ -177,7 +177,7 @@ export default function MyStationPage() {
   if (!view || (currentErr && data.range !== range)) {
     if (currentErr) {
       return (
-        <div className="jy-page">
+        <div className="jy-page jy-my">
           <Panel label={NAV_LABELS.my}>
             <ErrorState center what={COPY.unreadable} error={currentErr.error} onRetry={() => load(true)} />
           </Panel>
@@ -186,7 +186,7 @@ export default function MyStationPage() {
     }
     const blank = { value: null };
     return (
-      <div className="jy-page" aria-busy="true">
+      <div className="jy-page jy-my" aria-busy="true">
         {/* 和概览同一个版式（指标行、等式、两行 8 + 4），数据回来时不跳 */}
         <PanelSkeleton title={OVERVIEW_TITLES.metrics} lines={1} />
         <ProfitEquation title={EQ_TEXT.business(RANGE_TEXT[range])} revenue={blank} upstream={blank} fixed={blank} loading />
@@ -218,7 +218,7 @@ export default function MyStationPage() {
   };
 
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-my">
       {currentErr && (
         // 自动刷新失败不清空页面，保留上次的数据
         <RefreshFailedBanner asOf={asOf} tz={data.tz} error={currentErr.error} onRetry={() => load(true)} />

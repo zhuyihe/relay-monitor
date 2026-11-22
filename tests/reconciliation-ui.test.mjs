@@ -305,14 +305,14 @@ test("表下面一行：还没算利润的渠道、没设置汇率、收费记�
   const fresh = await openDailyPage(t, { ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 60000, behindMs: 60000 } }); await rowOf(fresh.page, "Rule A").waitFor(); assert.equal(await fresh.page.locator(".jy-profit-notes").count(), 0);
 });
 
-test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片（右上毛利、右下收入和毛利率）；看一天时点整张卡片打开计算明细（整屏）；不横向滚动", async (t) => {
+test("手机 375：四个数两个一排；柱状图；一个渠道一张卡片（收入、上游成本、毛利、毛利率）；看一天时点整张卡片打开计算明细（整屏）；不横向滚动", async (t) => {
   const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 })];
   const { page, detailReads } = await openDailyPage(t, { rows, viewport: { width: 375, height: 812 }, pageOf: (body) => profitPage(rows, { preset: body.preset === "yesterday" ? "yesterday" : "7d", customPreset: body.preset }) });
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
   await page.locator(".jy-profit-chart").waitFor(); assert.equal(await page.locator(".jy-profit-table").count(), 0);
   const metrics = await page.locator(".jy-profit-metric").evaluateAll((nodes) => nodes.map((node) => { const r = node.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; }));
   assert.equal(metrics[0][1], metrics[1][1], "第一排两个"); assert.equal(metrics[2][1], metrics[3][1], "第二排两个"); assert.ok(metrics[2][1] > metrics[0][1]);
-  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText(PROFIT_COPY.table.mobileLine("$5.00", "80.0%"), { exact: true }).waitFor(); await cardB.getByText("Fixture upstream · Rule B ×1.0", { exact: true }).waitFor();
+  const cardB = cardOf(page, "Rule B"); await cardB.getByText("$4.00", { exact: true }).waitFor(); await cardB.getByText("$5.00", { exact: true }).waitFor(); await cardB.getByText("$1.00", { exact: true }).waitFor(); await cardB.getByText("80.0%", { exact: true }).waitFor(); await cardB.getByText("Fixture upstream · Rule B ×1.0", { exact: true }).waitFor();
   assert.deepEqual(await page.locator(".jy-profit-card__head strong").allInnerTexts(), ["Rule B", "Rule A"], "按毛利从高到低");
     assert.equal(await page.getByRole("button", { name: new RegExp(PROFIT_COPY.table.day.detail) }).count(), 0, "多天：卡片上没有「计算明细」"); assert.equal(await page.locator(".jy-profit-card__chev").count(), 0, "多天：没有「›」、卡片点不开");
   await pickPreset(page, PROFIT_COPY.presets.yesterday);
@@ -2138,7 +2138,11 @@ test("余额趋势「每天花了多少」：余额小标题和查看范围在�
   await modal.getByRole("heading", { name: "每天花了多少", exact: true }).waitFor();
   await modal.locator(".jy-trend-sub .jy-caption", { hasText: "近 30 天" }).waitFor();
   // 「查看范围」在「余额」小标题右边（同一行）
-  const head = await modal.getByRole("heading", { name: "余额", exact: true }).boundingBox(), seg = await modal.getByRole("group", { name: "查看范围" }).boundingBox();
+  // 在同一帧读取两个位置，避免弹窗进场动画期间两次跨帧测量产生假错位。
+  const { head, seg } = await modal.locator(".jy-trend-sub").first().evaluate((node) => {
+    const rect = (el) => { const box = el.getBoundingClientRect(); return { x: box.x, y: box.y, height: box.height }; };
+    return { head: rect(node.querySelector("h3")), seg: rect(node.querySelector(".jy-seg")) };
+  });
   assert.ok(Math.abs((head.y + head.height / 2) - (seg.y + seg.height / 2)) < 12 && seg.x > head.x, "查看范围在余额小标题的右边");
   assert.equal(await modal.locator("hr.jy-trend-rule").count(), 1, "一条细线");
   const bars = modal.locator(".jy-trend-daily path.jy-chart-bar");
@@ -3425,7 +3429,7 @@ test("用户运营·用户页签：默认近 30 天有消费、每页 50 个；�
   const { page, requests } = await openUsersPage(t, { search: "tab=users" });
   const rows = () => page.locator("table.jy-data tbody tr");
   await rows().first().waitFor();
-  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "近 14 天", "近 7 天消费", "今天", "余额和可用时间", "最近使用"], "六列");
+  assert.deepEqual((await page.locator("table.jy-data thead th").allInnerTexts()).map((text) => text.trim()), ["用户", "近 14 天", "近 7 天消费", "今日消费", "余额和可用时间", "最近使用"], "六列");
   assert.equal(await rows().count(), 50);
   await page.getByText("共 65 个，每页 50 个", { exact: true }).waitFor();
   assert.match(await usersGroup(page, USERS_COPY.users.scopeLabel).innerText(), /近 30 天有消费\s*65[\s\S]*全部\s*120/);

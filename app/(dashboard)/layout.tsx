@@ -1,5 +1,5 @@
 "use client";
-// 炬元控制台外壳：深色侧栏（分组导航 + 待处理计数）+ 56px 顶栏（标题、时间范围、数据截至、刷新、主题、账户）。
+// 统一导航与工作区；页面注册自己的数据时间、刷新动作和时间范围。
 // 页面通过 useShellPage 注册刷新动作、数据时间和时间范围控件，外壳只负责摆放。
 import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -185,7 +185,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div className={`jy-shell${collapsed ? " is-collapsed" : ""}${navOpen ? " is-nav-open" : ""}`}>
         <aside className="jy-sider" id="jy-sider" ref={siderRef} aria-label="主导航">
           <Link href="/" className="jy-brand" aria-label={`${BRAND.productName}，回到${NAV_LABELS.home}`}>
-            <BrandMark size={28} inverse />
+            <BrandMark size={28} />
             <div>
               <strong>{BRAND.name}</strong>
               <small>控制台</small>
@@ -203,6 +203,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       key={it.key}
                       href={it.path}
                       aria-current={active ? "page" : undefined}
+                      aria-label={count > 0 ? `${it.label}，需处理 ${count} 项` : it.label}
                       title={collapsed ? it.label : undefined}
                     >
                       <Icon name={it.icon as IconName} />
@@ -256,8 +257,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             >
               <Icon name="menu" />
             </button>
-            <h1>{title}</h1>
-            {range ? <div className="jy-topbar-range">{range}</div> : null}
+            <div className="jy-breadcrumb"><span>{BRAND.name}</span><span aria-hidden="true">/</span><span>{title}</span></div>
             <div className="jy-topbar-spacer" />
             {asOf != null && (
               <span
@@ -315,7 +315,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </header>
 
           <main className={`jy-content${refreshing ? " is-refreshing" : ""}`} aria-busy={refreshing || undefined}>
-            {range ? <div className="jy-mobile-range">{range}</div> : null}
+            <div className="jy-page-head"><h1>{title}</h1>{range ? <div className="jy-page-range">{range}</div> : null}</div>
             {/* 页面用 useSearchParams 保存筛选状态，需要 Suspense 边界 */}
             <Suspense fallback={null}>{children}</Suspense>
           </main>

@@ -755,7 +755,7 @@ export default function StationsPage() {
       <>
         <span className="jy-stations-money">
           <span className="jy-stations-spark">{sparkButton(v)}</span>
-          {m.text}
+          <strong className="jy-stations-balance">{m.text}</strong>
         </span>
         <span className="jy-sub-money" title={m.note}>{m.cny || RATE_UNSET}</span>
       </>
@@ -981,14 +981,15 @@ export default function StationsPage() {
         <div className="jy-table-wrap has-mobile">
           <table className="jy-data jy-stations-table">
             <caption className="sr-only">{STATION_TABS.list}</caption>
+            <colgroup><col className="jy-stations-col-name" /><col className="jy-stations-col-status" /><col className="jy-stations-col-ch" /><col className="jy-stations-col-balance" /><col className="jy-stations-col-burn" /><col className="jy-stations-col-days" /><col className="jy-stations-col-actions" /></colgroup>
             <thead>
               <tr>
                 <th scope="col" className="jy-stations-pin-l">{COPY.col.name}</th>
                 <th scope="col">{COPY.col.status}</th>
-                <th scope="col" className="jy-stations-ch">{CHANNEL_BINDING.column}</th>
+                <th scope="col" className="r jy-stations-ch">{CHANNEL_BINDING.column}</th>
                 <th scope="col" className="r">{COPY.col.balance}</th>
                 <th scope="col" className="r">{COPY.col.burn}</th>
-                <th scope="col" aria-sort={ariaSort}>
+                <th scope="col" className="r" aria-sort={ariaSort}>
                   <button type="button" className="jy-stations-sort" onClick={() => setSort(nextSort[sort])}>
                     {COPY.col.days}
                     {sort ? <Icon name={sort === "days" ? "sort" : "sort-down"} /> : null}
@@ -1004,10 +1005,10 @@ export default function StationsPage() {
                     <tr>
                       <td className="jy-stations-pin-l">{resourceCell(v)}</td>
                       <td>{statusCell(v)}</td>
-                      <td className="jy-stations-ch">{channelCell(v)}</td>
+                      <td className="r jy-stations-ch">{channelCell(v)}</td>
                       <td className="r">{balanceCell(v)}</td>
                       <td className="r">{burnCell(v)}</td>
-                      <td>{runwayCell(v)}</td>
+                      <td className="r">{runwayCell(v)}</td>
                       <td className="r jy-stations-pin-r">
                         <div className="jy-row-actions">
                           {primaryAction(v)}
@@ -1052,11 +1053,14 @@ export default function StationsPage() {
                 </span>
                 <div className="m-sub">
                   {v.fixed ? (
-                    <span>{COPY.col.burn} <b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
+                    <span className="m-metric"><small>{COPY.col.burn}</small><b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
                   ) : (
-                    <span title={money?.cny ? `${money.full}，${money.note}` : money?.note}>{COPY.col.balance} <b>{money ? (money.cny ? money.text : money.full) : EMPTY}</b></span>
+                    <span className="m-metric" title={money?.cny ? `${money.full}，${money.note}` : money?.note}><small>{COPY.col.balance}</small><b>{money ? (money.cny ? money.text : money.full) : EMPTY}</b></span>
                   )}
-                  {v.runway ? <span>{COPY.col.days} <b>{v.runway.text}</b></span> : null}
+                  <span className="m-metric"><small>{COPY.col.days}</small><b>{v.runway?.text || EMPTY}</b></span>
+                  {!v.fixed && !v.archived ? <span className="m-metric m-metric--wide"><small>{COPY.col.burn}</small><span className="m-value">{burnCell(v)}</span></span> : null}
+                </div>
+                <div className="m-links">
                   {!v.archived && !v.s.isOwn && BINDABLE_UPSTREAM_TYPES.includes(v.s.type) && channelOptions.options?.ok ? <span>{CHANNEL_BINDING.column} {channelCell(v)}</span> : null}
                   {refreshing || stale ? subLine(note!, stale) : null}
                 </div>
@@ -1108,7 +1112,8 @@ export default function StationsPage() {
       <div>
         <div>
           <MergeNotice counts={mergeCounts} onOpen={merge.open} />
-          <div className="jy-toolbar">
+          <Panel body={false} title={STATION_TABS.list} label={STATION_TABS.list} className="jy-stations-panel">
+          <div className="jy-toolbar jy-stations-toolbar">
             <Input
               prefix={<Icon name="search" />}
               allowClear
@@ -1142,7 +1147,8 @@ export default function StationsPage() {
             {addButton}
           </div>
 
-          <Panel body={false} label={STATION_TABS.list}>{body}</Panel>
+          {body}
+          </Panel>
           {/* 「另有 N 件」放在列表下面，当小字，不挤在列表上面 */}
           {filter === "attention" && unowned > 0 ? (
             <p className="jy-caption jy-stations-unowned">

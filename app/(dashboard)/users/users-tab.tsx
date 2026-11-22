@@ -95,8 +95,8 @@ export function UsersTab({
     },
     { key: "today", label: COPY.users.cols.today, num: true, sort: noop, render: (r) => <span className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(r.today, rate)}</span>, foot: page.basicOnly && !page.todaySyncedMs ? EMPTY : money(list.totals.today, rate) },
     {
-      key: "balance", label: COPY.users.cols.balanceDays, sort: noop,
-      render: (r) => (<span className="jy-cell-two"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
+      key: "balance", label: COPY.users.cols.balanceDays, num: true, sort: noop,
+      render: (r) => (<span className="jy-cell-two jy-cell-two--r"><span className="jy-users-balance">{money(r.balanceUsd, rate)}</span><RunwayCell row={r} page={page} /></span>),
       foot: <span className="jy-users-balance">{money(list.totals.balance, rate)}</span>,
     },
     { key: "last", label: COPY.users.cols.lastUsed, num: true, sort: noop, render: (r) => lastUsedText(r, page) },
@@ -119,6 +119,7 @@ export function UsersTab({
     <>
     <Panel
       title={COPY.users.tableTitle}
+      className="jy-users-list-panel"
       body="flush"
       extra={
         <Input allowClear prefix={<Icon name="search" />} placeholder={COPY.users.search} aria-label={COPY.users.search} value={text} onChange={(event) => setText(event.target.value)} className="jy-users-search" />
@@ -186,15 +187,16 @@ export function UsersTab({
                 <button type="button" className="jy-users-card" aria-label={COPY.users.rowOpen(row.username)} onClick={() => onOpenUser(row.id)}>
                   <span className="r1">
                     <span className="jy-users-name"><b>{row.username}</b>{row.big && <BigTag plain tip={bigTipText(row, page)} />}<StatusTag status={row.status} /></span>
-                    <b className="jy-users-week">{query.sort === "today" ? <>{COPY.users.cols.today} {page.basicOnly && !page.todaySyncedMs ? EMPTY : money(row.today, rate)}</> : weekOk ? money(row.week, rate) : EMPTY}</b>
+                  </span>
+                  <span className="jy-users-card-metrics">
+                    <span><span className="jy-caption">{COPY.users.cols.today}</span><b className="jy-users-today">{page.basicOnly && !page.todaySyncedMs ? EMPTY : money(row.today, rate)}</b></span>
+                    <span><span className="jy-caption">{COPY.users.cols.week}</span><b className="jy-users-week">{weekOk ? money(row.week, rate) : EMPTY}</b></span>
+                    <span><span className="jy-caption">{COPY.users.currentBalance}</span><b className="jy-users-balance">{money(row.balanceUsd, rate)}</b></span>
+                    <span><span className="jy-caption">{COPY.users.expectedRunway}</span><RunwayCell row={row} page={page} /></span>
                   </span>
                   <span className="r2">
                     <SparkLine values={sparkValues(row, page.availableDays)} gray={row.status === "down" || row.status === "churned"} label={COPY.users.sparkLabel(row.username)} />
-                    <span className="jy-caption">{compare ? COPY.users.cardVs(deltaText(row.closedWeek, row.prevWeek), money(row.balanceUsd, rate)) : `${COPY.users.balanceWord} ${money(row.balanceUsd, rate)}`}</span>
-                  </span>
-                  <span className="r3">
                     <span className="jy-caption">{COPY.users.cardLast(lastUsedText(row, page), row.group)}</span>
-                    {page.ready.balance ? <RunwayCell row={row} page={page} /> : <span className="jy-caption">{COPY.users.cardDays(EMPTY)}</span>}
                   </span>
                 </button>
               </li>

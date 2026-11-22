@@ -10276,3 +10276,17 @@ test("自营业务与日报读取每日系数：含已解绑规则，新配置�
   assert.ok(facts.every((fact) => fact.costRate === 0.5 && fact.revenueRate === 1 && fact.upstreamStationId === up.id));
   assert.deepEqual(f.state.ledger, before);
 });
+
+
+test("首页被动读取缓存不唤醒采集、不延长看页活动，每日利润原有刷新照常", async (t) => {
+  const f = await completedDayFixture(t);
+  let kicks = 0;
+  f.rt._reconciliationPollKick = () => { kicks += 1; };
+  f.rt._reconciliationLastTodayViewAt.at = 0;
+  await f.module.profitPage({ preset: "today" }, { cacheOnly: true, passive: true });
+  assert.equal(kicks, 0);
+  assert.equal(f.rt._reconciliationLastTodayViewAt.at, 0);
+  await f.module.profitPage({ preset: "today" }, { cacheOnly: true });
+  assert.equal(kicks, 1);
+  assert.ok(f.rt._reconciliationLastTodayViewAt.at > 0);
+});

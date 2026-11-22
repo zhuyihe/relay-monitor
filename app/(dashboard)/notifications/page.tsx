@@ -760,7 +760,7 @@ export default function NotificationsPage() {
   // 首次加载：与真实布局同形的骨架（桌面 8 + 4，手机通知方式在前），数据回来时不跳
   if (!notifLoaded && !notifErr && notifLoading) {
     return (
-      <div className="jy-page">
+      <div className="jy-page jy-notifications">
         {compact ? (
           <>
             <PanelSkeleton title={COPY.channels} lines={3} />
@@ -1138,7 +1138,7 @@ export default function NotificationsPage() {
   );
 
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-notifications">
       {noDelivery ? (
         <div className="jy-banner jy-banner--crit" role="alert">
           <Sym kind="crit" />

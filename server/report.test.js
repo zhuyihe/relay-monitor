@@ -671,8 +671,8 @@ test("日报的邮件版和文字版同样的字：四个格子、近 14 天消�
   assert.match(html, />用量：请求数 3\.5 万 · Token（不含缓存）1,000 万 · 活跃用户 3 个</);
   assert.match(html, />用得最多的模型</);
   // 管理员用次要颜色，不标红；「利润怎么算」用墨色
-  assert.match(html, /root <span style="color:#667085;font-size:10px">管理员<\/span>/);
-  assert.match(html, />利润怎么算<[\s\S]*?color:#152033[^>]*>快用完上游 不算进利润。</);
+  assert.match(html, /root <span style="color:#626E7F;font-size:10px">管理员<\/span>/);
+  assert.match(html, />利润怎么算<[\s\S]*?color:#192332[^>]*>快用完上游 不算进利润。</);
   // 上游余额：档位名的颜色和上游列表一样（提醒天数以内红、7 天以内黄），右边写余额、下面写人民币或「没设置汇率」
   assert.match(html, /备用上游 <span style="color:#B42F2F;font-size:11px">余额偏低<\/span>/);
   assert.match(html, /快用完上游 <span style="color:#915500;font-size:11px">快用完<\/span>/);

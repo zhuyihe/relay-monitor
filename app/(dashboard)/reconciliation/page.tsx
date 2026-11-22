@@ -69,6 +69,7 @@ export default function ReconciliationPage() {
   // 首屏：读链接里要处理的那条（来自提醒或上游账单），按它决定初始日期；没有就是今天
   useEffect(() => {
     const target = readWorkflowDestination(window.location.search, "reconciliation");
+    const initialPreset = new URLSearchParams(window.location.search).get("preset") === "yesterday" ? "yesterday" : "today";
     setDestination(target);
     void state.initialize((current: any): ProfitWindow => {
       const rule = current?.rules?.find((item: any) => item.id === target?.ruleId);
@@ -76,7 +77,7 @@ export default function ReconciliationPage() {
       else if (target && (!rule || !rule.enabled || rule.archivedAt)) setWorkflowError(REMOVED);
       return target?.action === "retry" && target.window && !target.error && rule?.enabled && !rule.archivedAt
         ? { preset: "custom", startMs: target.window.startMs, endMs: target.window.endMs }
-        : { preset: "today" };
+        : { preset: initialPreset };
     });
   // 仅首屏初始化；后续查询由时间范围、刷新和定时器驱动
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -147,6 +148,8 @@ export default function ReconciliationPage() {
   /> : null;
 
   const notes = footerNotes(page, ctx, { upstreams: UPSTREAMS_HREF, settings: SETTINGS_HREF }, ownLog);
+  const scopeNote = notes.find((note) => note.key === "coverage");
+  const otherNotes = notes.filter((note) => note.key !== "coverage");
   const emptyAction = config?.ownStation ? { href: UPSTREAMS_HREF, label: COPY.table.goUpstreams } : { href: SETUP_HREF, label: COPY.table.setupOwnStation };
 
   return <div className="jy-page jy-profit-page">
@@ -169,8 +172,11 @@ export default function ReconciliationPage() {
     </div> : null}
     {!config?.ownStation && page.rows.length ? <Alert type="warning" showIcon title={OWN_STATION_UNSET} action={<Button size="small" href={SETUP_HREF}>{RECON_BUTTONS.setup}</Button>} /> : null}
 
-    {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitSummary page={page} ctx={ctx} /></div> : null}
-    {page.rows.length ? <div className={switching ? "jy-profit-switching" : undefined}><ProfitChart page={page} ctx={ctx} compact={compact} /></div> : null}
+    {page.rows.length ? <section className={`jy-profit-summary-block${switching ? " jy-profit-switching" : ""}`} aria-label="渠道利润汇总">
+      <ProfitSummary page={page} ctx={ctx} />
+      {scopeNote ? <p className="jy-profit-scope"><span>计入渠道</span>{scopeNote.text}</p> : null}
+    </section> : null}
+    {page.rows.length ? <div className={`jy-profit-chart-wrap${switching ? " jy-profit-switching" : ""}`}><ProfitChart page={page} ctx={ctx} compact={compact} /></div> : null}
 
     <ProfitTable
       page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} detailDay={isSingleDay(page) ? rangeDays(page).first : null} hold={!!detail}
@@ -178,8 +184,8 @@ export default function ReconciliationPage() {
       retryingKeys={retryingKeys} retryErrors={retryErrors} empty={emptyAction}
     />
 
-    {notes.length && page.rows.length ? <p className="jy-caption jy-profit-notes">
-      {notes.map((note) => <span key={note.key}>{note.text}{note.link ? <> <a className="jy-link" href={note.link.href}>{note.link.text}</a></> : null}</span>)}
+    {otherNotes.length && page.rows.length ? <p className="jy-caption jy-profit-notes">
+      {otherNotes.map((note) => <span key={note.key}>{note.text}{note.link ? <> <a className="jy-link" href={note.link.href}>{note.link.text}</a></> : null}</span>)}
     </p> : null}
 
     {drawer}

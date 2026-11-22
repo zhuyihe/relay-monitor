@@ -44,10 +44,10 @@ body {
   background: var(--jy-sider);
   border-right: 1px solid var(--jy-sider-edge);
   color: var(--jy-sider-ink);
-  padding: 16px 12px;
+  padding: 20px 12px;
   overflow-y: auto;
 }
-.jy-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px; color: #FFFFFF; text-decoration: none; }
+.jy-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 24px; color: var(--jy-ink); text-decoration: none; }
 .jy-brand:hover { text-decoration: none; }
 .jy-brand strong { display: block; font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: .02em; }
 .jy-brand small { display: block; font-size: 12px; line-height: 16px; color: var(--jy-sider-ink-3); }
@@ -63,37 +63,33 @@ body {
   color: var(--jy-sider-ink);
   text-decoration: none;
 }
-.jy-nav a:hover { background: rgba(255, 255, 255, .05); color: #FFFFFF; }
-.jy-nav a[aria-current="page"] { background: var(--jy-sider-active); color: #FFFFFF; font-weight: 500; }
-.jy-nav a[aria-current="page"]::before {
-  content: ""; position: absolute; left: -12px; top: 10px; bottom: 10px; width: 3px;
-  border-radius: 0 3px 3px 0; background: #7F9CFF;
-}
-.jy-nav a:focus-visible { box-shadow: 0 0 0 2px #7F9CFF; }
+.jy-nav a:hover { background: var(--jy-sunken); color: var(--jy-ink); }
+.jy-nav a[aria-current="page"] { background: var(--jy-sider-active); color: var(--jy-cobalt); font-weight: 600; }
+.jy-nav a:focus-visible { box-shadow: var(--jy-focus-ring); }
 .jy-nav .jy-icon { opacity: .9; }
 .jy-nav .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-nav-count {
   margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px;
-  border-radius: 10px; background: #C83C3C; color: #FFFFFF;
+  border-radius: 10px; background: var(--jy-crit); color: #FFFFFF;
   font-size: 12px; line-height: 20px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .jy-sider-foot { margin-top: auto; padding: 12px; display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--jy-sider-ink-3); }
 .jy-sider-foot .grow { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 导航抽屉里的账户行：只在窄屏出现（顶栏放不下账户菜单时） */
-.jy-sider-account { display: none; align-items: center; gap: 10px; margin: auto 12px 0; padding: 12px 0; border-top: 1px solid rgba(255, 255, 255, .08); font-size: 13px; line-height: 20px; color: var(--jy-sider-ink); }
+.jy-sider-account { display: none; align-items: center; gap: 10px; margin: auto 12px 0; padding: 12px 0; border-top: 1px solid var(--jy-rule); font-size: 13px; line-height: 20px; color: var(--jy-sider-ink); }
 .jy-sider-account .jy-avatar { cursor: default; flex: none; }
 .jy-sider-account .grow { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-sider-logout {
   display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: var(--jy-r1);
-  border: 1px solid rgba(255, 255, 255, .14); background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--jy-rule); background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: nowrap;
 }
-.jy-sider-logout:hover { background: rgba(255, 255, 255, .06); color: #FFFFFF; }
-.jy-sider-logout:focus-visible { outline: none; box-shadow: 0 0 0 2px #7F9CFF; }
+.jy-sider-logout:hover { background: var(--jy-sunken); color: var(--jy-ink); }
+.jy-sider-logout:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
 .jy-collapse-btn {
   display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: var(--jy-r1);
   border: 0; background: transparent; color: var(--jy-sider-ink-3); cursor: pointer;
 }
-.jy-collapse-btn:hover { background: rgba(255, 255, 255, .06); color: #FFFFFF; }
+.jy-collapse-btn:hover { background: var(--jy-sunken); color: var(--jy-ink); }
 
 .jy-shell.is-collapsed .jy-brand > div,
 .jy-shell.is-collapsed .jy-nav-group,
@@ -110,10 +106,15 @@ body {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 16px;
   height: var(--jy-topbar-h); padding: 0 24px;
-  background: var(--jy-sheet);
-  border-bottom: 1px solid var(--jy-rule);
+  background: var(--jy-plane);
 }
-.jy-topbar h1 { margin: 0; font-size: 20px; line-height: 28px; font-weight: 600; white-space: nowrap; color: var(--jy-ink); }
+.jy-breadcrumb { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; color: var(--jy-ink-3); }
+.jy-breadcrumb > span:last-child { color: var(--jy-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; min-width: 0; }
+.jy-page-head h1 { margin: 0; color: var(--jy-ink); font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.02em; }
+.jy-page-range { min-width: 0; max-width: 100%; }
+.jy-page-range .jy-range { flex-wrap: wrap; justify-content: flex-end; }
+.jy-page-range .jy-seg { overflow-x: auto; }
 .jy-topbar-spacer { flex: 1; }
 .jy-topbar .jy-menu-btn { display: none; }
 .jy-freshness { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
@@ -135,11 +136,10 @@ body {
 .jy-spinning .jy-icon { animation: jy-spin .7s linear infinite; }
 @keyframes jy-spin { to { transform: rotate(360deg); } }
 
-.jy-content { width: 100%; max-width: var(--jy-content-max); padding: 24px; display: flex; flex-direction: column; gap: 24px; }
+.jy-content { flex: 1; min-width: 0; margin: 0 8px 8px 0; padding: 24px; display: flex; flex-direction: column; gap: 24px; background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: 14px; }
 .jy-content > * { transition: opacity .15s; }
 .jy-content.is-refreshing > * { opacity: .6; }
-.jy-mobile-range { display: none; }
-.jy-page { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.jy-page { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 
 .jy-scrim { position: fixed; inset: 0; z-index: 45; background: var(--jy-scrim); opacity: 0; pointer-events: none; transition: opacity .2s; }
 
@@ -147,13 +147,13 @@ body {
 .jy-seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--jy-sunken); border-radius: var(--jy-r2); max-width: 100%; }
 .jy-seg button {
   display: inline-flex; align-items: center; gap: 6px;
-  height: 30px; padding: 0 12px; border: 0; border-radius: 6px;
+  height: 30px; padding: 0 12px; border: 1px solid transparent; border-radius: 6px;
   background: transparent; color: var(--jy-ink-2); cursor: pointer; white-space: nowrap; font: inherit;
 }
 .jy-seg button:hover { color: var(--jy-ink); }
 .jy-seg button[aria-pressed="true"] {
   background: var(--jy-sheet); color: var(--jy-ink); font-weight: 500;
-  box-shadow: 0 1px 2px rgba(21, 32, 51, .08), 0 0 0 1px var(--jy-rule);
+  border-color: var(--jy-rule);
 }
 .jy-seg button:disabled { opacity: .45; cursor: not-allowed; }
 .jy-seg .count { color: var(--jy-ink-3); font-weight: 400; font-variant-numeric: tabular-nums; }
@@ -172,21 +172,19 @@ body {
 
 /* ─── 面板 ────────────────────────────────────────────── */
 .jy-panel { background: var(--jy-sheet); border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); min-width: 0; display: flex; flex-direction: column; }
-.jy-panel-head { display: flex; align-items: baseline; gap: 12px; padding: 20px 24px 0; flex-wrap: wrap; }
+.jy-panel-head { display: flex; align-items: baseline; gap: 12px; padding: 20px 20px 0; flex-wrap: wrap; }
 .jy-panel-head h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--jy-ink); }
 .jy-panel-head .spacer { flex: 1; }
 .jy-panel-head .extra { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.jy-panel-sub { padding: 4px 24px 8px; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); margin: 0; }
+.jy-panel-sub { padding: 4px 20px 8px; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); margin: 0; }
 .jy-panel-sub b { color: var(--jy-ink); font-weight: 600; }
-.jy-panel-body { padding: 16px 24px 24px; min-width: 0; }
+.jy-panel-body { padding: 16px 20px 20px; min-width: 0; }
 .jy-panel-body--flush { padding: 16px 0 0; }
-.jy-panel-foot { margin-top: auto; padding: 0 24px 20px; }
-.jy-grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
-.jy-grid-2 > .jy-panel { height: 100%; }
-.jy-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.jy-panel-foot { margin-top: auto; padding: 0 20px 20px; }
+.jy-grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.jy-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
 /* 12 列栅格里主角 8 列、旁边 4 列（ui-design-spec §1.4 第 3 条）；同一行的两块拉成一样高，1200 以下叠成一列 */
-.jy-grid-8-4 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 24px; align-items: stretch; }
-.jy-grid-8-4 > .jy-panel { height: 100%; }
+.jy-grid-8-4 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; align-items: start; }
 /* 指标格子：一行几个数（标签、数、下面一行说明），格子之间一道竖线；用量分析的合计、自营业务的指标行共用。手机上两列 */
 .jy-kpis { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 16px 24px; margin: 0; }
 .jy-kpis > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -195,7 +193,7 @@ body {
 .jy-kpis dd { margin: 0; }
 .jy-kpi-figure { font-size: 24px; line-height: 32px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
 .jy-kpi-unit { font-size: 14px; font-weight: 400; color: var(--jy-ink-3); }
-.jy-stack { display: flex; flex-direction: column; gap: 24px; }
+.jy-stack { display: flex; flex-direction: column; gap: 20px; }
 
 /* ─── 利润等式条（招牌） ──────────────────────────────── */
 .jy-equation { padding: 20px 24px 24px; container: jy-eq / inline-size; }
@@ -256,7 +254,7 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-eq-inline-btn { margin-left: 8px; vertical-align: baseline; }
 .jy-partial-note ul { margin: 0; padding-left: 18px; }
 .jy-partial-note a { white-space: nowrap; margin-left: 4px; }
-.jy-hatch { background-image: repeating-linear-gradient(135deg, var(--jy-rule) 0 2px, transparent 2px 6px); }
+.jy-hatch { background-image: repeating-linear-gradient(135deg, var(--jy-rule) 0 2px, transparent 2px 6px); } /* taste-skill-ignore: 斜纹表示缺失数据 */
 
 /* ─── 状态标记 ────────────────────────────────────────── */
 .jy-status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-weight: 500; }
@@ -370,8 +368,8 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); margin-bottom: 12px; }
 .jy-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .jy-legend .line-key { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
-.jy-legend .line-key--dash { background: repeating-linear-gradient(90deg, var(--jy-ink-3) 0 3px, transparent 3px 6px); }
-.jy-legend .hatch-swatch { border: 1px solid var(--jy-rule); background-image: repeating-linear-gradient(135deg, var(--jy-ink-dis) 0 1.5px, transparent 1.5px 4px); }
+.jy-legend .line-key--dash { height: 0; border-top: 2px dashed var(--jy-ink-3); }
+.jy-legend .hatch-swatch { border: 1px solid var(--jy-rule); background-image: repeating-linear-gradient(135deg, var(--jy-ink-dis) 0 1.5px, transparent 1.5px 4px); } /* taste-skill-ignore: 缺失数据图例 */
 .jy-tip {
   position: absolute; z-index: 5; pointer-events: none;
   min-width: 148px; padding: 8px 10px; border-radius: var(--jy-r2);
@@ -415,7 +413,7 @@ table.jy-data { width: 100%; border-collapse: separate; border-spacing: 0; }
 table.jy-data th {
   position: sticky; top: 0;
   text-align: left; font-weight: 500; font-size: 12px; line-height: 18px; color: var(--jy-ink-2);
-  padding: 10px 16px; background: var(--jy-sunken); border-bottom: 1px solid var(--jy-rule); white-space: nowrap;
+  padding: 10px 16px; background: var(--jy-sheet); border-bottom: 1px solid var(--jy-rule); white-space: nowrap;
 }
 table.jy-data td { padding: 12px 16px; border-bottom: 1px solid var(--jy-rule-soft); vertical-align: middle; background: var(--jy-sheet); }
 table.jy-data tr:last-child td { border-bottom: 0; }
@@ -556,8 +554,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-error-detail__body { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 6px; }
 .jy-error-detail__body strong { font-weight: 500; color: var(--jy-ink-2); }
 .jy-error-detail__body pre { margin: 0; max-width: 100%; white-space: pre-wrap; word-break: break-all; font: inherit; color: var(--jy-ink-2); background: var(--jy-sunken); border-radius: var(--jy-r1); padding: 6px 8px; }
-.jy-skeleton { border-radius: var(--jy-r1); background: linear-gradient(90deg, var(--jy-sunken) 0%, var(--jy-rule-soft) 50%, var(--jy-sunken) 100%); background-size: 200% 100%; animation: jy-shimmer 1.2s ease-in-out infinite; }
-@keyframes jy-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.jy-skeleton { border-radius: var(--jy-r1); background: var(--jy-sunken); }
 
 /* ─── 设置分组 ───────────────────────────────────────── */
 .jy-section-head { display: flex; align-items: center; gap: 12px; }
@@ -642,16 +639,12 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-eq-term { margin: 0; }
   .jy-eq-result { margin-left: 0; }
   .jy-onboard { grid-template-columns: 1fr; }
-  .jy-topbar .jy-range .jy-caption { display: none; }
-  /* 每日利润有六个范围，顶栏放不下时只让范围条横滑，不撑出页面 */
-  .jy-topbar-range { min-width: 0; flex: 0 1 auto; }
-  .jy-topbar-range .jy-range { min-width: 0; }
-  .jy-topbar-range .jy-seg { overflow-x: auto; }
+
 }
 @media (max-width: 767px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
   .jy-sider {
-    position: fixed; z-index: 50; left: 0; top: 0; width: 264px; transform: translateX(-100%); transition: transform .2s;
+    position: fixed; z-index: 50; left: 0; top: 0; width: 264px; visibility: hidden; transform: translateX(-100%); transition: transform .2s;
   }
   .jy-shell .jy-sider .jy-brand > div, .jy-shell .jy-sider .jy-nav-group, .jy-shell .jy-sider .jy-nav .label { display: revert; }
   .jy-shell .jy-sider .jy-sider-foot { display: flex; margin-top: 0; padding-top: 4px; }
@@ -660,20 +653,22 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-shell .jy-sider .jy-nav a { justify-content: flex-start; padding: 0 12px; }
   .jy-shell .jy-sider .jy-nav-count { position: static; min-width: 20px; height: 20px; font-size: 12px; line-height: 20px; padding: 0 6px; }
   .jy-shell .jy-collapse-btn { display: none; }
-  .jy-shell.is-nav-open .jy-sider { transform: none; }
+  .jy-shell.is-nav-open .jy-sider { visibility: visible; transform: none; }
   .jy-shell.is-nav-open .jy-scrim { opacity: 1; pointer-events: auto; }
   .jy-topbar .jy-menu-btn { display: inline-grid; margin-left: -8px; }
+  .jy-topbar .jy-icon-btn { width: 40px; height: 44px; }
   .jy-topbar { padding: 0 16px; gap: 8px; }
-  .jy-topbar h1 { font-size: 18px; line-height: 26px; overflow: hidden; text-overflow: ellipsis; }
-  .jy-topbar .jy-avatar, .jy-topbar-range { display: none; }
-  /* 手机上也要知道数据是几点的：只留状态点和时间 */
+  .jy-breadcrumb > span:first-child, .jy-breadcrumb > span:nth-child(2) { display: none; }
+  .jy-topbar .jy-avatar { display: none; }
   .jy-topbar .jy-freshness { flex: none; }
-  .jy-mobile-range:not(:empty) { display: flex; flex-direction: column; gap: 6px; }
-  .jy-mobile-range .jy-range { flex-direction: column; align-items: stretch; gap: 6px; }
-  .jy-mobile-range .jy-seg { width: 100%; overflow-x: auto; } /* 每日利润有六个范围，320 宽放不下时横滑 */
-  .jy-mobile-range .jy-seg button { flex: 1 0 auto; padding: 0 6px; justify-content: center; white-space: nowrap; }
-  .jy-mobile-range .jy-range-wrap { width: 100%; }
-  .jy-content { padding: 16px; gap: 16px; }
+  .jy-page-head { gap: 12px; }
+  .jy-page-head h1 { font-size: 22px; line-height: 30px; }
+  .jy-page-range { width: 100%; }
+  .jy-page-range .jy-range { flex-direction: column; align-items: stretch; gap: 6px; }
+  .jy-page-range .jy-seg { width: 100%; overflow-x: auto; }
+  .jy-page-range .jy-seg button { flex: 1 0 auto; padding: 0 8px; justify-content: center; }
+  .jy-page-range .jy-range-wrap { width: 100%; }
+  .jy-content { margin: 0 8px 8px; padding: 20px 16px; gap: 20px; border-radius: 12px; }
   .jy-page, .jy-tabpanel, .jy-stack { gap: 16px; }
   .jy-grid-2, .jy-grid-3, .jy-grid-8-4 { gap: 16px; }
   .jy-kpis { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }

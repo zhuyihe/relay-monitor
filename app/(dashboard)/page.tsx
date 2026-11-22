@@ -1,639 +1,119 @@
 "use client";
-// 运营总览只留三样：今天赚了多少、需处理、快用完的前 3 个上游。
-// 赚了多少只取「每日利润」那一个数（/api/reconciliation/profit 的今天），不在这里另算；
-// 需处理、快用完来自 /api/stations：需处理和侧栏的计数共用 buildOverviewActions，快用完的档位和上游列表共用 balanceViewOf。
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { App, Button, Grid } from "antd";
+import { App, Button, Modal } from "antd";
 import { api } from "../../lib/client";
-import { STATION_TABS } from "../../lib/brand";
-import type { ProfitPageResponse, WorkflowAction } from "../../lib/client";
-import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, burnCellText, burnText, etaWindowDays, isSpending, lowLineOf, stationDisplayName } from "../../lib/overview-actions";
+import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
 import { balanceMoneyOf } from "../../lib/profit";
-import { workflowActionMeta } from "../../lib/workflow-actions";
-import { asSentence, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, basisText, EMPTY, formatAsOf, formatDays, formatZonedDate, refreshFailedText, soonText } from "../../lib/format";
-import { DEFAULT_BUSINESS_TIME_ZONE } from "../../lib/business-time";
-import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
-import { AttentionList } from "../components/attention-list";
-import { Sym } from "../components/icons";
-import { RecheckConsumeLogButton } from "../components/recheck-consume-log";
-import { More } from "../components/more";
-import type { AttentionItem } from "../components/attention-list";
+import { EMPTY, formatDays, formatDayKey, formatPct, formatUsd, formatZonedTime } from "../../lib/format";
+import { visibleInterval } from "../../lib/visible-interval";
+import { Icon } from "../components/icons";
+import { Panel } from "../components/panel";
 import { EmptyState, ErrorState, PanelSkeleton } from "../components/data-state";
-import type { TipRow } from "../components/float-tip";
-import { CountBadge, Panel } from "../components/panel";
-import { compareRunwayItems, RUNWAY_TEXT } from "../components/runway";
-import type { RunwayItem } from "../components/runway";
-import { StatusText } from "../components/status";
+import { Seg } from "../components/seg";
 import { useShellPage } from "../components/shell-context";
-import { useWorkflowActions } from "../components/use-workflow-actions";
-import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
-import { fmtMoney, grossMetric, pageMoney } from "./reconciliation/profit-format";
-import type { Ctx } from "./reconciliation/profit-format";
-import TrendModal, { TREND_TEXT } from "./trend-modal";
+import { OverviewChart } from "./overview-chart";
+import type { OverviewPageData, OverviewPeriod } from "./overview-types";
+import TrendModal from "./trend-modal";
 import "../styles/pages/overview.css";
 
-const RUNWAY_LIMIT = 3;
-// 需处理露几条：其余收进「还有 N 件」
-const ATTENTION_SHOWN = 3;
-const REFRESH = workflowActionMeta("refresh")!.label;
-
-// 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
-const COPY = Object.freeze({
-  profitTitle: "今天赚了多少",
-  profitUnread: "读不到每日利润，这里先不显示。",
-  profitNoChannels: "还没有在算利润的渠道",
-  startCounting: "开始算利润",
-  profitAttention: (n: number) => `今天还算不出：${n} 个渠道需处理`,
-  profitUnavailable: "今天还算不出",
-  noSpend: "近期没有花费",
-  equation: (income: string, cost: string) => `收入 ${income} − 上游成本 ${cost}`,
-  profitLink: "每日利润",
-  readFailed: (what: string) => `读不到${what}`,
-  workflowUnreadable: "读不到上游账单和每日利润里需处理的事。",
-  attention: "需处理",
-  attentionOrder: "最要紧的在前",
-  refreshAttention: `${REFRESH}需处理的事`,
-  refreshOne: (name: string) => `${REFRESH} ${name}`,
-  refreshFailed: `${REFRESH}失败`,
-  edit: "编辑",
-  editOne: (name: string) => `编辑 ${name}`,
-  trend: TREND_TEXT.title,
-  trendOf: TREND_TEXT.of,
-  others: (n: number) => `另有 ${n} 项：`,
-  moreItems: (n: number) => `还有 ${n} 件`,
-  healthy: (n: number) => `其余 ${n} 个上游没有要处理的事`,
-  balance: (text: string) => `余额 ${text}`,
-  lowLine: (text: string) => `余额提醒线 ${text}`,
-  available: (days: string) => `可用${days}`,
-  burnSentence: (balance: string, burn: string, basis: string) => `余额 ${balance}，日均花费 ${burn}${basis ? `，${basis}` : ""}。`,
-  expiresIn: (n: number) => `${n} 天后到期`,
-  fixedSentence: (date: string) => `最近一笔 ${date}到期。要续上，再记一笔固定成本；不再续费可以在编辑里标记。`,
-  runway: "快用完的上游",
-  runwayAllGood: "上游余额都够用",
-  runwayEmptyTitle: "还没有按余额计费的上游",
-  runwayEmptyDesc: "加上上游后，这里显示最快用完的几个。",
-  noRenewal: "不再续费",
-  tip: Object.freeze({ ...RUNWAY_TEXT.tip, requests: "请求数", how: "怎么算的", note: "说明" }),
-});
-
-// 余额的写法和上游列表同一处（balanceMoneyOf）：设了汇率写「$12.30（约 ¥88.56）」，没设按 1:1 写「¥12.30（没设置汇率）」
-const balanceText = (s: any, v: number) => balanceMoneyOf(s, v).text;
-const balanceWithCny = (s: any, v: number) => balanceMoneyOf(s, v).full;
-
 export default function OverviewPage() {
-  // 手机上需处理放在最前：按 DOM 先后排，读屏和键盘也先到需处理
-  const compact = Grid.useBreakpoint().md === false;
   const { message } = App.useApp();
-  const router = useRouter();
-
-  const [rules, setRules] = useState<any>({});
-  const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
-  const [stations, setStations] = useState<any[] | null>(null);
-  const [stationsErr, setStationsErr] = useState<Error | null>(null);
-  const [stationsAt, setStationsAt] = useState<number | null>(null);
-  const [stationsTz, setStationsTz] = useState<string | null>(null);
-  const [profit, setProfit] = useState<ProfitPageResponse | null>(null);
-  const [profitErr, setProfitErr] = useState<Error | null>(null);
-  const [profitAt, setProfitAt] = useState<number | null>(null);
-  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [period, setPeriod] = useState<OverviewPeriod>("today");
+  const [data, setData] = useState<OverviewPageData | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [customerMode, setCustomerMode] = useState<"reminders" | "ranking">("reminders");
+  const [metric, setMetric] = useState<"cost" | "users">("cost");
+  const [dialog, setDialog] = useState<"coverage" | "profit" | "basis" | "activity" | "days" | null>(null);
   const [trendStation, setTrendStation] = useState<any>(null);
-  // 上游账单与每日利润产生的需处理事项：与侧栏计数、上游资源页共用一份
-  const { actions: workflowActions, failed: workflowFailed, staleAsOf: workflowAsOf, loading: workflowLoading, reload: reloadWorkflowActions } = useWorkflowActions();
-
-  // 两个加载函数都返回报错（成功返回 null），顶栏刷新据此提示
-  const loadStations = useCallback(async (): Promise<Error | null> => {
+  const requestId = useRef(0);
+  const customersRef = useRef<HTMLDivElement>(null);
+  const load = useCallback(async () => {
+    const id = ++requestId.current;
     try {
-      const r = await api("/api/stations");
-      setStations(Array.isArray(r?.stations) ? r.stations : []);
-      if (r?.settings) setSettings(r.settings);
-      if (r?.tz) setStationsTz(r.tz);
-      setStationsErr(null);
-      setStationsAt(r.asOf ?? null);
-      return null;
-    } catch (e: any) {
-      setStationsErr(e);
-      return e;
-    }
-  }, []);
-
-  // 今天赚了多少：每日利润页同一个接口、同一个数
-  const loadProfit = useCallback(async (): Promise<Error | null> => {
-    try {
-      const r = (await api("/api/reconciliation/profit", { method: "POST", body: { preset: "today" } })) as ProfitPageResponse;
-      setProfit(r);
-      setProfitErr(null);
-      setProfitAt(Date.parse(r.asOf) || null);
-      return null;
-    } catch (e: any) {
-      setProfitErr(e);
-      return e;
-    }
-  }, []);
-
+      const next = await api(`/api/overview?preset=${period}`);
+      if (id === requestId.current) { setData(next); setError(null); }
+      return next;
+    } catch (failure) { if (id === requestId.current) setError(failure); throw failure; }
+  }, [period]);
+  const intervalMs = data?.intervalMs || 60000;
   useEffect(() => {
-    api("/api/meta")
-      .then((m) => {
-        setRules(m?.rules || {});
-        if (m?.settings) setSettings(m.settings);
-      })
-      .catch(() => {});
-  }, []);
-
-  // 按系统设置的刷新间隔轮询（最短 30 秒）；标签页在后台时不拉，切回来立即拉一次
-  const intervalSec = Math.max(30, Number(settings?.refreshIntervalSec) || 60);
-  useEffect(() => {
-    const tick = () => {
-      if (document.hidden) return;
-      loadStations();
-      loadProfit();
-    };
-    loadStations();
-    loadProfit();
-    const timer = setInterval(tick, intervalSec * 1000);
-    document.addEventListener("visibilitychange", tick);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
-    };
-  }, [intervalSec, loadStations, loadProfit]);
-
-  // 刷新全部上游后重新加载本页；重新加载失败时抛错由顶栏提示，有上游读不到余额时如实说明
-  const onRefresh = async () => {
-    const updates = await Promise.allSettled([
+    void load().catch(() => {});
+    return visibleInterval(() => void load().catch(() => {}), intervalMs);
+  }, [load, intervalMs]);
+  const refresh = async () => {
+    // 始终只刷新今天和当前余额；所看的昨日账本不重算、不登记历史回补。
+    const results = await Promise.allSettled([
+      api("/api/users", { method: "POST", body: {} }),
       api("/api/refresh", { method: "POST", body: { scope: "upstreams" } }),
       api("/api/reconciliation/query", { method: "POST", body: { preset: "today", observe: true } }),
     ]);
-    const [stationsLoadErr, profitLoadErr] = await Promise.all([loadStations(), loadProfit(), reloadWorkflowActions()]);
-    const err = stationsLoadErr || profitLoadErr;
-    if (err) throw err;
-    for (const result of updates) if (result.status === "rejected") throw result.reason;
-    const done = refreshAllText(updates[0].status === "fulfilled" ? updates[0].value?.stations : []);
-    if (done.failed) message.warning(done.text);
-    else message.success(done.text);
+    await load();
+    if (results.some((result) => result.status === "rejected")) message.warning("部分数据刷新未完成，请查看各区块的读取时间。 ");
   };
-
-  const refreshOne = async (s: any) => {
-    setSyncingId(s.id);
-    try {
-      const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
-      await loadStations();
-      const done = refreshOneText(stationDisplayName(s), r?.balance);
-      if (done.ok) message.success(done.text);
-      else message.warning(done.text);
-    } catch (e: any) {
-      message.error(failureText(COPY.refreshFailed, e));
-    } finally {
-      setSyncingId(null);
-    }
-  };
-
-  const asOfs = [stationsAt, profitAt].filter((t): t is number => t != null);
-  useShellPage({
-    onRefresh,
-    autoRefreshMs: intervalSec * 1000,
-    asOf: asOfs.length ? Math.min(...asOfs) : null,
-    tz: profit?.tz || stationsTz || undefined,
-  });
-
-  const businessTz = profit?.tz || stationsTz || DEFAULT_BUSINESS_TIME_ZONE;
-  const workflowError = !workflowFailed
-    ? ""
-    : workflowAsOf
-      ? refreshFailedText(workflowAsOf, businessTz)
-      : COPY.workflowUnreadable;
-
-  const attention = (
-    <AttentionPanel
-      stations={stations}
-      error={stationsErr}
-      rules={rules}
-      settings={settings}
-      workflowActions={workflowActions}
-      workflowError={workflowError}
-      workflowLoading={workflowLoading}
-      onReloadWorkflow={() => void reloadWorkflowActions()}
-      tz={businessTz}
-      asOf={stationsAt}
-      syncingId={syncingId}
-      onRetry={loadStations}
-      onSync={refreshOne}
-      onEdit={(s) => router.push(`/stations?edit=${encodeURIComponent(s.id)}`)}
-      onTrend={setTrendStation}
-    />
-  );
-
-  return (
-    <div className="jy-page jy-ov">
-      {/* 手机上需处理在最前 */}
-      {compact ? attention : null}
-      <div className="jy-grid-8-4 jy-ov-top">
-        <ProfitToday profit={profit} error={profitErr} onRetry={() => void loadProfit()} />
-        {compact ? null : attention}
-      </div>
-      <RunwayPanel
-        stations={stations}
-        error={stationsErr}
-        settings={settings}
-        rules={rules}
-        onRetry={loadStations}
-        onTrend={setTrendStation}
-      />
-      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={businessTz} />
+  const range = useMemo(() => <Seg<OverviewPeriod> label="经营时间范围" value={period} onChange={setPeriod} options={[{ value: "today", label: "今天" }, { value: "yesterday", label: "昨天" }]} />, [period]);
+  const asOfs = (period === "yesterday" ? [data?.users?.balanceAt, data?.users?.usageAt] : [data?.financial?.asOf, data?.users?.balanceAt, data?.profit?.asOf ? Date.parse(data.profit.asOf) : null]).filter((value): value is number => value != null && Number.isFinite(value));
+  useShellPage({ onRefresh: refresh, range, asOf: asOfs.length ? Math.min(...asOfs) : null, autoRefreshMs: intervalMs, tz: data?.tz });
+  if (!data) return error ? <ErrorState what="读不到运营总览" error={error} onRetry={() => void load().catch(() => {})} /> : <div className="jy-ov"><PanelSkeleton title="主站经营摘要" lines={3} /><PanelSkeleton title="客户关注" lines={4} /></div>;
+  if (data.unset) return <EmptyState title="还没有设置主站" desc="设置主站后，这里显示客户消费、余额提醒和对账进度。" action={<Button href="/my">设置主站</Button>} />;
+  const switching = data.preset !== period;
+  const time = (value: number | string | null | undefined) => value == null ? "未同步" : formatZonedTime(value, data.tz);
+  const current = data.users.customers;
+  const reminders = current.filter((user) => user.runwayState === "soon" || user.runwayState === "empty").sort((a, b) => Number(b.runwayState === "empty") - Number(a.runwayState === "empty") || (a.days ?? Infinity) - (b.days ?? Infinity) || (b.today ?? 0) - (a.today ?? 0));
+  const ranked = [...current].filter((user) => (user.today ?? 0) > 0).sort((a, b) => (b.today ?? 0) - (a.today ?? 0));
+  const shownCustomers = (customerMode === "reminders" ? reminders : ranked).slice(0, 5);
+  const days = data.users.trend.filter((day) => day.day <= data.day).slice(-7);
+  const hasTrend = days.some((day) => day.available);
+  const trendTotal = days.length && days.every((day) => day.available) ? days.reduce((total, day) => total + day.cost, 0) : null;
+  const coverage = data.coverage;
+  const coverageNote = coverage.total == null ? "昨日完整消费账单尚未同步" : coverage.covered == null
+    ? coverage.timeWindowState === "different" ? "账单时间范围与主站昨日不一致，暂不比较金额" : coverage.timeWindowState === "unknown" ? "账单时间范围尚未确认，暂不比较金额" : "昨日对账进度尚未读全"
+    : coverage.total === 0 ? "昨日没有客户消费" : "已同步的客户消费均已进入对账";
+  const profit = data.profit?.accountingTotals;
+  const supplierViews = data.upstreams.filter((station) => station.type !== "fixed").map((station) => ({ station, view: balanceViewOf(station, { settings: data.settings, rules: data.rules }) }))
+    .sort((a, b) => Number(b.view.state === "unreadable") - Number(a.view.state === "unreadable") || (a.view.days ?? Infinity) - (b.view.days ?? Infinity));
+  const showCustomers = (mode: "reminders" | "ranking") => { setCustomerMode(mode); customersRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); };
+  const dayLabel = formatDayKey(data.day, data.tz, data.now);
+  const userHref = (user: { id: number }) => `/users?tab=users&user=${user.id}`;
+  return <div className={`jy-ov${switching ? " is-switching" : ""}`} aria-busy={switching}>
+    <div className="jy-ov-intro"><p>{dayLabel} · {period === "today" ? `主站消费账单截至 ${time(data.financial.asOf)}` : "已结束账期；余额与提醒仍为当前状态"}</p><Button type="text" size="small" onClick={() => setDialog("basis")}>数据说明 <Icon name="info" /></Button></div>
+    {error && <p className="jy-ov-notice" role="alert">刷新未完成，保留上一次数据。<Button type="link" onClick={() => void load().catch(() => {})}>重新读取</Button></p>}
+    <section className="jy-ov-metrics" aria-label="主站经营摘要">
+      <div className="jy-ov-metric is-lead"><span className="jy-ov-label">客户消费 <small>{period === "today" ? "今天" : "昨天"}</small></span><strong className="jy-ov-value jy-num">{formatUsd(data.financial.amount)}</strong><span className="jy-caption">{data.financial.amount == null ? data.financial.reason : `主站消费账单 · ${time(data.financial.asOf)}`}</span></div>
+      <button className="jy-ov-metric" onClick={() => period === "today" ? showCustomers("ranking") : setDialog("activity")}><span className="jy-ov-label">消费客户</span><strong className="jy-ov-value jy-num">{data.users.activity?.count ?? EMPTY}<small>位</small></strong><span className="jy-caption">普通客户 · {dayLabel}有消费 →</span></button>
+      <button className="jy-ov-metric" onClick={() => showCustomers("reminders")}><span className="jy-ov-label">当前需提醒客户</span><strong className={`jy-ov-value jy-num${data.users.reminderCount ? " jy-ov-danger" : ""}`}>{data.users.reminderCount ?? EMPTY}<small>位</small></strong><span className="jy-caption">{data.users.balanceReady ? "按当前余额与近期消费速度 →" : "余额预测数据尚未齐全"}</span></button>
+      <button className="jy-ov-metric" onClick={() => setDialog("profit")}><span className="jy-ov-label">已对账毛利 <Icon name="info" /></span><strong className="jy-ov-value jy-num">{formatUsd(profit?.gross)}</strong><span className="jy-caption">仅已计入渠道 · {time(data.profit?.asOf)}</span></button>
+    </section>
+    {(data.financial.amount == null || Object.keys(data.errors).length > 0 || data.users.paused || data.users.syncErrors.length > 0) && <div className="jy-ov-notice"><Icon name="info" /><span>{data.users.paused ? "客户数据同步已暂停。" : data.users.syncErrors.length > 0 ? "客户余额或消费更新未完成，请查看各区块的读取时间。" : data.financial.amount == null ? "全站消费账单尚未完整同步，普通客户用量仍可独立查看。" : "部分区块暂时读不到，请查看读取时间。"}</span><Link href="/settings">查看同步设置 →</Link></div>}
+    <div className="jy-ov-dashboard">
+      <Panel title="客户用量趋势" sub="普通客户 · 最近7天" className="jy-ov-trend" extra={<Seg<"cost" | "users"> label="趋势指标" value={metric} onChange={setMetric} size="sm" options={[{ value: "cost", label: "消费" }, { value: "users", label: "客户数" }]} />} foot={<div className="jy-ov-foot"><span>{days.some((day) => day.day === data.today) ? "今天进行中，尚非全天" : "所选日期及之前的完整日"}</span><Button type="link" size="small" onClick={() => setDialog("days")}>每日数据 →</Button></div>}>
+        {hasTrend ? <><div className="jy-ov-chart-summary"><strong className="jy-num">{metric === "cost" ? formatUsd(trendTotal) : data.users.activity?.count ?? EMPTY}</strong><span className="jy-caption">{metric === "cost" ? "近7天普通客户消费" : `${dayLabel}消费客户`} · 用量截至 {time(data.users.usageAt)}</span></div><OverviewChart key={`${period}-${metric}`} days={days} metric={metric} today={data.today} /></> : <EmptyState title="客户用量还未同步" desc="先显示已同步的余额，消费趋势由后台更新。" />}
+      </Panel>
+      <Panel title="昨日对账进度" sub={`${formatDayKey(coverage.day, data.tz, data.now)} · 已结束账期`} className="jy-ov-coverage" extra={<Button type="text" size="small" aria-label="查看昨日对账进度说明" onClick={() => setDialog("coverage")}>→</Button>}>
+        <div className="jy-ov-coverage-value"><strong className="jy-num">{formatPct(coverage.ratio)}</strong><span className="jy-caption">客户消费已纳入对账</span></div>
+        {coverage.ratio != null && <div className="jy-ov-coverage-track" role="img" aria-label={`昨日${formatPct(coverage.ratio)}客户消费已纳入对账`}><span style={{ width: `${Math.max(0, Math.min(100, coverage.ratio * 100))}%` }} /></div>}
+        <dl className="jy-ov-amounts"><div><dt>已纳入对账</dt><dd>{formatUsd(coverage.covered)}</dd></div><div><dt>尚未计入</dt><dd className={coverage.missing ? "jy-ov-warning" : ""}>{formatUsd(coverage.missing)}</dd></div></dl>
+        {coverage.missingChannels.length > 0 ? <button className="jy-ov-callout" onClick={() => setDialog("coverage")}><span><strong>{coverage.missingChannels.length} 个有消费渠道未计入对账</strong><small>{coverage.missingChannels.slice(0, 2).map((channel) => channel.name).join("、")}</small></span><span>→</span></button> : <p className="jy-caption">{coverageNote}</p>}
+        <p className="jy-caption jy-ov-coverage-note">已计入 {coverage.counted ?? EMPTY} / {coverage.known ?? EMPTY} 个渠道；毛利不代表全站利润。</p>
+      </Panel>
+      <div ref={customersRef} className="jy-ov-customer-wrap"><Panel title="客户关注" sub={`当前余额 · ${time(data.users.balanceAt)} 更新`} body="flush" className="jy-ov-customers" extra={<Seg<"reminders" | "ranking"> label="客户列表" value={customerMode} onChange={setCustomerMode} size="sm" options={[{ value: "reminders", label: `需提醒 ${data.users.reminderCount ?? EMPTY}` }, { value: "ranking", label: "今日消费榜" }]} />} foot={<div className="jy-ov-foot"><span>{customerMode === "reminders" ? "先显示快用完的，再按今天消费排序" : "按今天消费从高到低"}</span><Link href={`/users?tab=users&scope=all${customerMode === "reminders" ? "&only=soon" : ""}`}>查看客户 →</Link></div>}>
+        {shownCustomers.length > 0 ? <table className="jy-data jy-ov-customer-table"><thead><tr><th>客户</th><th className="r">今天消费</th><th className="r">当前余额</th><th className="r"><button className="jy-ov-help" onClick={() => setDialog("basis")} aria-label="预计可用时间怎么算">预计可用 <Icon name="info" /></button></th></tr></thead><tbody>{shownCustomers.map((user) => <tr key={user.id}><td><Link className="jy-ov-customer-name" href={userHref(user)}><span className="jy-ov-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span><span><strong>{user.username}</strong><small>{user.big ? "重点客户" : user.runwayState === "empty" ? "余额已用完" : "查看客户详情"}</small><small className="jy-ov-mobile-spend">今天 {formatUsd(user.today)}</small></span></Link></td><td className="r jy-num">{formatUsd(user.today)}</td><td className="r jy-num">{formatUsd(user.balanceUsd)}</td><td className={`r${user.runwayState === "soon" || user.runwayState === "empty" ? " jy-ov-danger" : ""}`}>{user.runwayState === "empty" ? "余额已用完" : formatDays(user.days)}</td></tr>)}</tbody></table> : <EmptyState title={!data.users.balanceReady && customerMode === "reminders" ? "余额预测数据尚未齐全" : !data.users.ready ? "客户消费尚未同步" : customerMode === "reminders" ? "暂时没有需要提醒的客户" : "今天还没有客户消费"} />}
+      </Panel></div>
+      <Panel title="上游余量" sub="当前余额 · 预计最先用完的上游" body="flush" className="jy-ov-suppliers" extra={<Link className="jy-caption-link" href="/stations">全部 {data.upstreams.length} 个 →</Link>} foot={<div className="jy-ov-foot"><span>按现有花费速度估算</span><span>当前余额</span></div>}>
+        {supplierViews.length ? <ul className="jy-ov-supplier-list">{supplierViews.slice(0, 3).map(({ station, view }) => <li key={station.id}><button onClick={() => setTrendStation(station)}><span className="jy-ov-supplier-top"><strong>{stationDisplayName(station)}</strong><span className={view.level === "crit" ? "jy-ov-danger" : view.level === "warn" ? "jy-ov-warning" : ""}>{view.state === "unreadable" ? "余额读不到" : view.state === "pending" ? "未同步" : view.state === "empty" ? "余额已用完" : balanceDaysText(view)}</span></span><span className="jy-ov-supplier-bottom"><span>余额 {station.balance?.ok ? balanceMoneyOf(station, station.balance.remaining).text : EMPTY}</span><span>{time(station.balance?.checkedAt)}</span></span></button></li>)}</ul> : <EmptyState title="还没有在监测的余额上游" action={<Button href="/stations">添加上游</Button>} />}
+      </Panel>
     </div>
-  );
-}
-
-// ---- 今天赚了多少（取每日利润的数）---------------------------------------------
-
-function ProfitToday({ profit, error, onRetry }: { profit: ProfitPageResponse | null; error: Error | null; onRetry: () => void }) {
-  const link = (
-    <Link className="jy-caption-link" href="/reconciliation">
-      {COPY.profitLink}
-    </Link>
-  );
-  if (!profit) {
-    if (error) {
-      return (
-        <Panel title={COPY.profitTitle} extra={link}>
-          <ErrorState what={COPY.profitUnread} error={error} onRetry={onRetry} />
-        </Panel>
-      );
-    }
-    return <PanelSkeleton title={COPY.profitTitle} lines={3} />;
-  }
-  // 和每日利润「今天」视图第一格同一份数、同一个函数（metrics）；总览上的字叫「上游成本」，不叫「实付成本」
-  const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
-  const ctx = { currency, tz: profit.tz, zoneOf: () => profit.tz } as Ctx;
-  const money = pageMoney(profit, currency);
-  if (money.gross == null) {
-    const attentionN = profit.counts?.attentionChannels ?? 0;
-    return (
-      <Panel title={COPY.profitTitle} extra={link}>
-        {profit.rows.length === 0 ? (
-          <>
-            <p>{COPY.profitNoChannels}</p>
-            <Button size="small" href="/stations">{COPY.startCounting}</Button>
-          </>
-        ) : (
-          <p>{attentionN > 0 ? COPY.profitAttention(attentionN) : COPY.profitUnavailable}</p>
-        )}
-      </Panel>
-    );
-  }
-  const gross = grossMetric(profit, ctx);
-  const lines = [...gross.lines];
-  lines[0] = COPY.equation(fmtMoney(money.income, currency), fmtMoney(money.actual, currency));
-  return (
-    <Panel title={COPY.profitTitle} extra={link}>
-      <p className="jy-ov-hero jy-num" aria-live="polite">{gross.value}</p>
-      {lines.map((line, index) => <p key={index} className="jy-caption">{line}</p>)}
-    </Panel>
-  );
-}
-
-// ---- 需处理 -----------------------------------------------------------------
-
-function AttentionPanel({
-  stations,
-  error,
-  rules,
-  settings,
-  workflowActions,
-  workflowError,
-  workflowLoading,
-  onReloadWorkflow,
-  tz,
-  asOf,
-  syncingId,
-  onRetry,
-  onSync,
-  onEdit,
-  onTrend,
-}: {
-  stations: any[] | null;
-  error: Error | null;
-  rules: any;
-  settings: any;
-  workflowActions: WorkflowAction[];
-  workflowError: string;
-  workflowLoading: boolean;
-  onReloadWorkflow: () => void;
-  tz: string;
-  asOf: number | null;
-  syncingId: string | null;
-  onRetry: () => void;
-  onSync: (s: any) => void;
-  onEdit: (s: any) => void;
-  onTrend: (s: any) => void;
-}) {
-  const actions = useMemo(
-    () =>
-      buildOverviewActions(stations || [], {
-        tz,
-        rules,
-        settings,
-        workflowActions,
-        limit: ATTENTION_SHOWN,
-      }),
-    [stations, tz, rules, settings, workflowActions],
-  );
-  const router = useRouter();
-  const extra = (
-    <>
-      <span className="jy-caption">{COPY.attentionOrder}</span>
-      <Button size="small" loading={workflowLoading} onClick={onReloadWorkflow} aria-label={COPY.refreshAttention}>
-        {REFRESH}
-      </Button>
-    </>
-  );
-  if (!stations) {
-    if (error) {
-      return (
-        <Panel title={COPY.attention}>
-          <ErrorState what={COPY.readFailed(STATION_TABS.list)} error={error} onRetry={onRetry} />
-        </Panel>
-      );
-    }
-    return <PanelSkeleton title={COPY.attention} lines={4} />;
-  }
-
-  // 每条的第一个操作是带边框的按钮，其余是链接样式（与设计稿一致）
-  const btn = (label: string, onClick: () => void, extra: { loading?: boolean; primary?: boolean; aria: string }) => (
-    <Button size="small" type={extra.primary ? "default" : "link"} loading={extra.loading} onClick={onClick} aria-label={extra.aria}>
-      {label}
-    </Button>
-  );
-  const names = new Map(stations.filter(Boolean).map((s) => [String(s.id), stationDisplayName(s)]));
-  const nameOf = (id: string) => names.get(id);
-  // 账号与账单待办是真实链接（可复制、可在新标签打开），普通点击在本站内跳转（不整页刷新），按钮名就是要做的动作
-  const open = (a: any, primary = true) => a.kind === "recheck_consume_log" ? (
-    // 自营站点不记收费记录：点了才马上再读一次站点的设置（转圈、就地提示），不是跳转
-    <RecheckConsumeLogButton type={primary ? "default" : "link"} aria-label={`${a.label}（${workflowOwner(a, nameOf)}）`} />
-  ) : (
-    <Button
-      size="small"
-      type={primary ? "default" : "link"}
-      href={a.href}
-      aria-label={`${a.label}（${workflowOwner(a, nameOf)}）`}
-      onClick={(event) => {
-        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-        event.preventDefault();
-        router.push(a.href);
-      }}
-    >
-      {a.label}
-    </Button>
-  );
-  // 合并进同一行的其余事项：账号待办可以直接点开
-  const noteOf = (a: any): ReactNode => {
-    if (!a.others?.length) return undefined;
-    return (
-      <>
-        {COPY.others(a.others.length)}
-        {a.others.map((o: any, i: number) => (
-          <Fragment key={o.id}>
-            {i > 0 ? "、" : ""}
-            {o.workflow ? (
-              <Link href={o.href} className="jy-caption-link">
-                {actionPhrase(o)}
-              </Link>
-            ) : (
-              actionPhrase(o)
-            )}
-          </Fragment>
-        ))}
-      </>
-    );
-  };
-
-  // 一条事项变成列表里的一行；收进「还有 N 件」的那些只在点开时才拼（RestAttention），需处理上百条时不白做
-  const toItem = (a: any): AttentionItem => {
-    if (a.workflow) {
-      return {
-        key: a.id,
-        level: a.level,
-        who: workflowOwner(a, nameOf),
-        what: workflowProblem(a),
-        desc: workflowDetail(a),
-        note: noteOf(a),
-        actions: open(a),
-      };
-    }
-    const s = a.station;
-    const name = a.stationName;
-    const bal = Number(s.balance?.remaining) || 0;
-    const eta = s.prediction?.etaDays;
-    const sync = btn(REFRESH, () => onSync(s), { loading: syncingId === s.id, primary: true, aria: COPY.refreshOne(name) });
-    const edit = (primary = false) => btn(COPY.edit, () => onEdit(s), { primary, aria: COPY.editOne(name) });
-    const trend = btn(COPY.trend, () => onTrend(s), { primary: true, aria: COPY.trendOf(name) });
-    let what: ReactNode;
-    let desc: ReactNode;
-    let buttons: ReactNode;
-    switch (a.kind) {
-      case "query-failed": {
-        what = BALANCE_STATE_TEXT.unreadable;
-        desc = asSentence(errorText(s.balance));
-        buttons = (
-          <>
-            {sync}
-            {edit()}
-          </>
-        );
-        break;
-      }
-      case "balance-danger":
-      case "balance-low": {
-        const low = a.kind === "balance-low";
-        what = low ? BALANCE_STATE_TEXT.low : BALANCE_STATE_TEXT.empty;
-        const parts = [COPY.balance(balanceWithCny(s, bal))];
-        if (low) parts.push(COPY.lowLine(balanceText(s, lowLineOf(s, settings))));
-        if (low && eta != null && isSpending(s.prediction)) parts.push(COPY.available(formatDays(eta)));
-        desc = `${parts.join("，")}。`;
-        buttons = (
-          <>
-            {trend}
-            {edit()}
-          </>
-        );
-        break;
-      }
-      case "eta-soon": {
-        what = soonText(a.etaDays);
-        desc = COPY.burnSentence(balanceWithCny(s, bal), burnText(s, s.prediction) ?? EMPTY, basisText(s.prediction?.basis));
-        buttons = (
-          <>
-            {trend}
-            {edit()}
-          </>
-        );
-        break;
-      }
-      default: {
-        what = COPY.expiresIn(a.daysRemaining);
-        desc = COPY.fixedSentence(formatZonedDate(a.endAt, tz));
-        buttons = edit(true);
-      }
-    }
-    return { key: a.id, level: a.level, who: name, what, desc, note: noteOf(a), actions: buttons };
-  };
-
-  const hidden = actions.all.length - actions.visible.length;
-  // 每个资源最多一行待处理，剩下的就是状态正常的，用一句话交代其余资源
-  const busy = attentionStationIds(actions.all);
-  const healthy = stations.filter((s) => s && !s.isOwn && !busy.has(String(s.id || stationDisplayName(s)))).length;
-  const healthyNote = healthy > 0 ? <span className="jy-caption">{COPY.healthy(healthy)}</span> : null;
-  return (
-    <Panel title={COPY.attention} badge={<CountBadge count={actions.all.length} />} extra={extra} body={false}>
-      {workflowError ? (
-        <div className="jy-banner jy-ov-banner" role="status">
-          <Sym kind="warn" />
-          <span className="jy-ov-banner-text">{workflowError}</span>
-          <Button size="small" onClick={onReloadWorkflow}>
-            {REFRESH}
-          </Button>
-        </div>
-      ) : null}
-      {/* 露最要紧的几条（按等式那块的高度定，现在 2 条），其余收进「还有 N 件」（收起区 More，ui-design-spec §4.11、§5.1），点开在原地接着列 */}
-      <AttentionList
-        items={actions.visible.map(toItem)}
-        emptyDesc={asOf ? `${formatAsOf(asOf, tz)}。` : undefined}
-        more={
-          hidden > 0 ? (
-            <More label={COPY.moreItems(hidden)} className="jy-attention-rest">
-              <RestAttention actions={actions.all.slice(actions.visible.length)} toItem={toItem} more={healthyNote ?? undefined} />
-            </More>
-          ) : (
-            healthyNote ?? undefined
-          )
-        }
-      />
-    </Panel>
-  );
-}
-
-// 「还有 N 件」点开以后的那几条：收起区只在点开时渲染它，拼列表项的活也到这时才做
-function RestAttention({ actions, toItem, more }: { actions: any[]; toItem: (a: any) => AttentionItem; more?: ReactNode }) {
-  return <AttentionList items={actions.map(toItem)} more={more} />;
-}
-
-// ---- 上游余量 ---------------------------------------------------------------
-
-function RunwayPanel({
-  stations,
-  error,
-  settings,
-  rules,
-  onRetry,
-  onTrend,
-}: {
-  stations: any[] | null;
-  error: Error | null;
-  settings: any;
-  rules: any;
-  onRetry: () => void;
-  onTrend: (s: any) => void;
-}) {
-  const router = useRouter();
-  const allLink = (
-    <Link className="jy-caption-link" href="/stations">
-      {STATION_TABS.list}
-    </Link>
-  );
-  const rows = useMemo(() => {
-    const list = (stations || []).filter((s) => !s.isOwn && s.type !== "fixed" && !s.archivedAt);
-    return list.map((s) => {
-      // 档位、颜色、可用天数和上游列表同一个判断（balanceViewOf）
-      const view = balanceViewOf(s, { settings, rules });
-      const failed = view.state === "unreadable";
-          const p = s.prediction;
-      const bal = s.balance?.ok ? Number(s.balance.remaining) : null;
-      const name = stationDisplayName(s);
-      const state = view.state ? BALANCE_STATE_TEXT[view.state] : undefined;
-
-      let tip: TipRow[];
-      if (failed) {
-        tip = [[COPY.tip.reason, errorText(s.balance)]];
-      } else {
-        tip = [
-          [COPY.tip.balance, bal == null ? BALANCE_STATE_TEXT.pending : balanceWithCny(s, bal)],
-          [COPY.tip.burn, burnCellText(s, p)],
-          [COPY.tip.days, balanceDaysText(view)],
-        ];
-        if (view.days != null && view.days !== Infinity && view.days > 0 && basisText(p?.basis)) tip.push([COPY.tip.basis, basisText(p?.basis)]);
-      }
-      if (s.noRenewal) tip.push([COPY.tip.renewal, COPY.noRenewal]);
-
-      const item: RunwayItem = {
-        key: String(s.id),
-        name: (
-          <button type="button" className="jy-ov-name" onClick={() => onTrend(s)} aria-label={COPY.trendOf(name)}>
-            {name}
-          </button>
-        ),
-        tipTitle: name,
-        sub: bal == null ? undefined : `${balanceText(s, bal)}${s.noRenewal ? `，${COPY.noRenewal}` : ""}`,
-        days: view.days,
-        failed,
-        level: view.level,
-        state,
-        // 余额用完时天数写「—」，只看档位名（和上游列表、余额趋势同一个写法）
-        daysLabel: view.days === Infinity ? COPY.noSpend : balanceDaysText(view),
-        tip,
-      };
-      return { item };
-    });
-  }, [stations, settings, rules, onTrend]);
-
-  if (!stations) {
-    if (error) {
-      return (
-        <Panel title={COPY.runway} extra={allLink}>
-          <ErrorState what={COPY.readFailed(STATION_TABS.list)} error={error} onRetry={onRetry} />
-        </Panel>
-      );
-    }
-    return <PanelSkeleton title={COPY.runway} lines={5} />;
-  }
-  if (!rows.length) {
-    return (
-      <Panel title={COPY.runway} extra={allLink}>
-        <EmptyState
-          title={COPY.runwayEmptyTitle}
-          desc={COPY.runwayEmptyDesc}
-          action={
-            <Button size="small" onClick={() => router.push("/stations?edit=new")}>
-              {UPSTREAM_FORM_TEXT.create}
-            </Button>
-          }
-        />
-      </Panel>
-    );
-  }
-
-  const sorted = [...rows].sort((a, b) => compareRunwayItems(a.item, b.item));
-  // 只列快用完的（红、黄两档）里可用天数最少的 3 个；都够用就写一行
-  const shown = sorted.filter((r) => r.item.level === "crit" || r.item.level === "warn").slice(0, RUNWAY_LIMIT);
-  if (!shown.length) {
-    return (
-      <Panel title={COPY.runway} extra={allLink}>
-        <p className="jy-caption">{COPY.runwayAllGood}</p>
-      </Panel>
-    );
-  }
-  return (
-    <Panel title={COPY.runway} extra={allLink}>
-      <ul className="jy-ov-low">
-        {shown.map((r) => (
-          <li key={r.item.key}>
-            {r.item.name} {r.item.state ? <StatusText level={r.item.level}>{r.item.state}</StatusText> : null}
-            {[r.item.sub, r.item.daysLabel].filter(Boolean).map((part, i) => <span key={i}> · {part}</span>)}
-          </li>
-        ))}
-      </ul>
-    </Panel>
-  );
+    <footer className="jy-ov-data-footer"><span>消费账单 {time(data.financial.asOf)}</span><span>客户余额 {time(data.users.balanceAt)}</span><span>{data.users.paused ? "客户同步已暂停" : data.users.fresh && !data.users.syncErrors.length ? "客户数据已同步" : "客户数据等待更新"}</span><span>服务质量监测未启用</span></footer>
+    <Modal open={dialog != null} onCancel={() => setDialog(null)} footer={null} title={dialog === "coverage" ? "昨日对账进度" : dialog === "profit" ? "已对账毛利" : dialog === "activity" ? `${dayLabel}消费客户` : dialog === "days" ? "最近7天客户用量" : "数据说明与预测说明"}>
+      {dialog === "basis" && <div className="jy-ov-dialog"><p>客户消费取自已记录的主站消费账单，扣除管理员自用和渠道测试，明确标记转售的管理员 Key 消费继续计入。金额单位与主站保持一致，默认 1:1。</p><p>客户用量趋势与消费榜来自普通客户用量汇总，与消费账单分别读取，不代替财务收入。余额始终显示当前状态。</p><p>预计可用时间沿用已有余额预测：比较近24小时与近7天的余额花费速度，采用较快者；充值带来的余额上涨不当成负消费。它不以表格中的今天消费直接相除，也不代表实际用完时间承诺。</p><p>首页只读取已同步结果；历史账单不会因进入首页或切换日期自动补算。</p><Link href="/settings">查看数据同步设置 →</Link></div>}
+      {dialog === "profit" && <div className="jy-ov-dialog"><p>{dayLabel} · 仅计算已接入渠道 · 读取于 {time(data.profit?.asOf)}</p><dl className="jy-ov-amounts"><div><dt>已对账收入</dt><dd>{formatUsd(profit?.income)}</dd></div><div><dt>对应上游成本</dt><dd>{formatUsd(profit?.actual)}</dd></div><div><dt>已对账毛利</dt><dd>{formatUsd(profit?.gross)}</dd></div></dl><p>全站客户消费与部分渠道毛利分别展示，未计入渠道的成本尚未计算，不能据此代表全站利润。</p><Link href={`/reconciliation?preset=${period}`}>查看每日利润 →</Link></div>}
+      {dialog === "coverage" && <div className="jy-ov-dialog"><p>{formatDayKey(coverage.day, data.tz, data.now)} · 完整消费账单截至 {time(coverage.asOf)}</p><dl className="jy-ov-amounts"><div><dt>客户消费</dt><dd>{formatUsd(coverage.total)}</dd></div><div><dt>尚未计入对账</dt><dd>{formatUsd(coverage.missing)}</dd></div></dl>{coverage.missingChannels.length ? <table className="jy-data"><thead><tr><th>渠道</th><th className="r">客户消费</th><th>处理</th></tr></thead><tbody>{coverage.missingChannels.map((channel) => <tr key={channel.channelId}><td>{channel.name}</td><td className="r">{formatUsd(channel.amount, { dp: channel.amount > 0 && channel.amount < .01 ? 6 : 2 })}</td><td><Link href={channel.status === "unlinked" ? `/stations?action=connect&ownStationId=${data.own.id}&channelIds=${channel.channelId}` : "/reconciliation?preset=yesterday"}>{channel.status === "unlinked" ? "接入渠道 →" : "查看账单 →"}</Link></td></tr>)}</tbody></table> : <p>{coverageNote}</p>}<Link href="/reconciliation?preset=yesterday">查看昨日账单 →</Link></div>}
+      {dialog === "activity" && <div className="jy-ov-dialog"><p>{dayLabel} · 普通客户用量统计。以下为消费最多的客户。</p>{data.users.activity?.top.map((user) => {
+        const customer = current.find((item) => item.username === user.username);
+        return <p key={user.username}><Link href={customer ? userHref(customer) : "/users?tab=users"}>{user.username}{!customer && "（客户列表）"}</Link><strong className="jy-num">　{formatUsd(user.cost)}</strong></p>;
+      })}<Link href="/users?tab=users">查看客户页面 →</Link></div>}
+      {dialog === "days" && <div className="jy-ov-dialog"><p>普通客户用量统计，与主站消费账单分别读取。</p><table className="jy-data"><thead><tr><th>日期</th><th className="r">消费</th><th className="r">消费客户</th></tr></thead><tbody>{days.map((day) => <tr key={day.day}><td>{day.day}{day.day === data.today ? " · 进行中" : ""}</td><td className="r">{day.available ? formatUsd(day.cost) : EMPTY}</td><td className="r">{day.available ? day.users : EMPTY}</td></tr>)}</tbody></table></div>}
+    </Modal>
+    <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={data.settings} rules={data.rules} tz={data.tz} />
+  </div>;
 }

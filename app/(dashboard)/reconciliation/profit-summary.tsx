@@ -7,7 +7,7 @@ import type { Ctx } from "./profit-format";
 
 export function ProfitSummary({ page, ctx }: { page: ProfitPageResponse; ctx: Ctx }) {
   return <dl className="jy-profit-summary" aria-label={COPY.table.title}>
-    {metrics(page, ctx).map((metric) => <div key={metric.key} className="jy-profit-metric">
+    {metrics(page, ctx).map((metric) => <div key={metric.key} className={`jy-profit-metric jy-profit-metric--${metric.key}`}>
       <dt className="jy-profit-metric__title">{metric.title}</dt>
       <dd><strong className="jy-profit-metric__value">{metric.value}</strong></dd>
     </div>)}

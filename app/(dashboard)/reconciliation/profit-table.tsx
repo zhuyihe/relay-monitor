@@ -104,6 +104,7 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
   const totals = totalsRow(page, ctx), columns = COLUMNS.length + (detailDay ? 1 : 0);
   return <div className="jy-table-wrap">
     <table className="jy-profit-table">
+      <colgroup><col className="jy-profit-col-name" /><col /><col /><col /><col />{detailDay ? <col className="jy-profit-col-detail" /> : null}</colgroup>
       <thead><tr>
         {COLUMNS.map((column) => <th key={column.key} className={column.key === "name" ? undefined : "jy-profit-num"} aria-sort={sort?.key === column.key ? (sort.dir === "desc" ? "descending" : "ascending") : undefined}>
           <button type="button" className="jy-profit-sort" onClick={() => onSort(column.key)}>{column.label}{sort?.key === column.key ? <span aria-hidden="true">{sort.dir === "desc" ? " ▼" : " ▲"}</span> : null}</button>
@@ -118,7 +119,7 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
           return <Fragment key={row.rowKey}><tr className={`jy-profit-row${openable ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={openable ? () => onOpenDetail(row, detailDay) : undefined}>
             <td className="jy-profit-row__name">
               <span className="jy-profit-row__line">
-                <strong>{name}</strong>
+                <strong title={name}>{name}</strong>
                 {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
                 <RowBang row={row} popKey={row.rowKey} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
               </span>
@@ -145,15 +146,21 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
       <ul className="jy-profit-cards">
         {group.rows.map((row) => {
           const name = rowName(row), money = rowMoney(row, ctx.currency), cells = rowCells(row, ctx);
-          const loss = cells.gross != null && cells.gross < 0, openable = detailDay != null && !row.reading; // 还在读取：点不开、不带箭头
+          const loss = cells.gross != null && cells.gross < 0, openable = detailDay != null && !row.reading, reading = readingText(row); // 还在读取：点不开、不带箭头
           return <li key={row.rowKey} className={`jy-profit-card${openable ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={openable ? () => onOpenDetail(row, detailDay) : undefined}>
             <div className="jy-profit-card__head">
-              <strong>{name}</strong>
+              <strong title={name}>{name}</strong>
               {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
               <RowBang row={row} popKey={`m:${row.rowKey}`} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
-              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : readingText(row) ?? EMPTY}</b>{openable ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
+              {openable ? <button type="button" className="jy-profit-card__detail" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}<span className="jy-profit-card__chev" aria-hidden="true">›</span></button> : null}
             </div>
-            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{readingText(row) ? null : COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
+            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span></div>
+            {reading ? <p className="jy-profit-card__reading">{reading}</p> : <dl className="jy-profit-card__metrics">
+              <div><dt>{COPY.table.col.income}</dt><dd>{fmtMoney(cells.income, ctx.currency)}</dd></div>
+              <div><dt>{COPY.table.col.actual}</dt><dd>{row.counted ? fmtMoney(money.actual, ctx.currency) : EMPTY}</dd></div>
+              <div><dt>{COPY.table.col.gross}</dt><dd className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</dd></div>
+              <div><dt>{COPY.table.col.margin}</dt><dd>{row.counted ? neg(loss, marginText(money.gross, money.income)) : EMPTY}</dd></div>
+            </dl>}
             {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
               const cells = keyCells(key, row, ctx);
               return <li key={String(key.tokenId)} className="jy-profit-key">

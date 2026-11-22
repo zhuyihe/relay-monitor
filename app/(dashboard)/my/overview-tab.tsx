@@ -123,7 +123,7 @@ export function OverviewTab({
       <Metrics v={v} />
       <Equation v={v} range={range} asOf={asOf} onBasis={openBasis} reload={reload} />
       {/* 两行 8 + 4（ui-design-spec §5.3）：每日收入 + 消费最多的用户；预计花费 + 消费最多的模型 */}
-      <div className="jy-grid-8-4">
+      <div className="jy-grid-8-4 jy-my-analysis-row">
         {range === "today" ? (
           <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay}>
             <EmptyState
@@ -137,7 +137,7 @@ export function OverviewTab({
         )}
         <TopUsers v={v} range={range} />
       </div>
-      <div className="jy-grid-8-4">
+      <div className="jy-grid-8-4 jy-my-analysis-row">
         <ForecastPanel v={v} />
         <TopModels v={v} range={range} onTab={onTab} />
       </div>
@@ -432,7 +432,7 @@ function ForecastPanel({ v }: { v: OwnView }) {
 // G 把 /my 的等式拿掉时再补「收入」和「这段时间毛利 → 每日利润」（ui-design-spec §5.3，分两步做）
 function Metrics({ v }: { v: OwnView }) {
   return (
-    <Panel label={COPY.metrics}>
+    <Panel className="jy-my-metrics" label={COPY.metrics}>
       <dl className="jy-kpis">
         <div>
           <dt>{COPY.payingUsers}</dt>
