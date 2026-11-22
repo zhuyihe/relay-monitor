@@ -53,7 +53,7 @@ import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBill
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, RESETTLE_REASON_SELECTED_HISTORY, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -4054,7 +4054,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       visit(rule, window, null);
     }
     for (const { rule } of plan.yesterday) plan.upstreams.add(rule.upstreamStationId);
-    if (Date.now() < lookbackFrom) plan.older = [];
+    if (Date.now() < lookbackFrom) plan.older = plan.older.filter((item) => item.state?.resettleReason === RESETTLE_REASON_SELECTED_HISTORY);
     // 有重结请求的日子排在更早的日子前面；同样先结离今天近的
     plan.older.sort((a, b) => Number(b.requested) - Number(a.requested) || b.window.startMs - a.window.startMs);
     plan.budget = Math.min(lookbackBudget ?? Math.max(1, Math.ceil(rules.length / 2)), SETTLE_LOOKBACK_MAX_PER_ROUND);
@@ -4148,6 +4148,47 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   const api = {
+    // 日期选择只登记缺失的完整日，取数交给已有后台结账队列；已固定的账不重算。
+    async requestHistory(rawInput = {}) {
+      const input = await sinceInput(rawInput);
+      const now = Date.now();
+      if (input.preset === "custom" && Number(input.endMs) > now && Number(input.endMs) - now <= CLOCK_SKEW_MS) input.endMs = now;
+      const known = await repository.listRules({ includeArchived: true });
+      const rules = known.filter((rule) => rule.enabled && !rule.archivedAt);
+      const wanted = rules.map((rule) => {
+        const channels = new Set(rule.channels.map((channel) => Number(channel.channelId)));
+        // 渠道以前属于别的绑定时，那段历史仍归原绑定；新关联不能追溯抢走已记过的收入。
+        const previous = known.filter((other) => other.id !== rule.id && other.ownStationId === rule.ownStationId
+          && other.archivedAtMs != null && boundAtOf(other) < boundAtOf(rule)
+          && other.channels.some((channel) => channels.has(Number(channel.channelId))));
+        const oldEnd = Math.max(-Infinity, ...previous.map((other) => shiftedDayStartInTz(other.archivedAtMs, 1, rule.timezone)));
+        const floor = Math.min(oldEnd, reconciliationAccountingStart({ ...rule, historyFromMs: undefined }) ?? Infinity);
+        return { rule, days: splitWindowByDays(resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now))
+          .filter((day) => day.startMs >= floor && isSettleableWindow(day, now)) };
+      });
+      const labels = wanted.flatMap(({ days }) => days.map(billDayOf)).sort();
+      if (!labels.length) return { queued: 0, pending: 0 };
+      const ids = rules.map((rule) => rule.id);
+      const [facts, states] = await Promise.all([repository.listLedgerDayFacts(ids, labels[0], labels.at(-1)), repository.listSettlementStates(ids)]);
+      const booked = new Set(facts.map((fact) => `${fact.ruleId}|${fact.billDate}`));
+      const pending = new Set(states.map((state) => `${state.ruleId}|${state.billDate}`));
+      let queued = 0, missing = 0;
+      for (const { rule, days } of wanted) {
+        if (!days.length) continue;
+        const fromMs = days[0].startMs;
+        const start = reconciliationAccountingStart(rule);
+        if (start != null && fromMs < start) {
+          await repository.extendHistory(rule.id, fromMs);
+          clearBillingResults(rule.id);
+        }
+        const absent = days.map(billDayOf).filter((day) => !booked.has(`${rule.id}|${day}`));
+        missing += absent.length;
+        const fresh = absent.filter((day) => !pending.has(`${rule.id}|${day}`));
+        if (fresh.length) queued += await repository.requestResettle(rule.id, fresh, { reason: RESETTLE_REASON_SELECTED_HISTORY, now });
+      }
+      return { queued, pending: missing };
+    },
+
     async getConfiguration({ forceChannels = false, includeArchived = false } = {}) {
       const own = ownStation();
       const rules = await repository.listRules({ includeArchived });

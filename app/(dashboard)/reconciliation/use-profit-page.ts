@@ -1,5 +1,6 @@
 "use client";
-// 每日利润页的读取：整页一次 POST /api/reconciliation/profit（只读，不写库）；「刷新」和需处理那一行的「重新读取」先 POST /query 带 observe
+// 日期选择先登记所选范围的缺账，后台补齐；整页 POST /profit 和定时轮询只读结果。
+// 「刷新」和需处理那一行的「重新读取」先 POST /query 带 observe
 // 让服务端读取并保存，再读一次整页。范围里含今天时轮询（不带 observe）：「今天」和含今天的自定义范围 30 秒一次，「近 7 天」「本月」和旧页面一样 5 分钟一次；看已固定的范围（昨天、不含今天的自定义）
 // 不轮询——那几天的数不会再变，没必要一直读；只有点「刷新」（或需处理行的「重新读取」）才带 observe 强制服务端重读（审核 #128）。
 // 几个请求可能交错返回：requestId 丢弃过期的响应。error 存报错本身（带 code、status），页面按 lib/error-copy.js 归类成一句。
@@ -44,10 +45,11 @@ export function useProfitPage() {
   const readPage = (window: ProfitWindow) => api("/api/reconciliation/profit", { method: "POST", body: { preset: window.preset, startMs: window.startMs, endMs: window.endMs } });
 
   // observe：先让服务端读取并保存（和「刷新」按钮一样的 /query），再读整页
-  const load = async (window: ProfitWindow = activeWindow, { observe = false, ruleIds = null as string[] | null } = {}) => {
+  const load = async (window: ProfitWindow = activeWindow, { observe = false, history = observe, ruleIds = null as string[] | null } = {}) => {
     const token = ++requestId.current;
     setQuerying(true);
     try {
+      if (history && window.preset !== "today") await api("/api/reconciliation/history", { method: "POST", body: { preset: window.preset, startMs: window.startMs, endMs: window.endMs } });
       if (observe) await api("/api/reconciliation/query", { method: "POST", body: { preset: window.preset, startMs: window.startMs, endMs: window.endMs, ...(ruleIds ? { ruleIds } : {}), observe: true } });
       const next: ProfitPageResponse = await readPage(window);
       if (token !== requestId.current) return null;
@@ -68,7 +70,7 @@ export function useProfitPage() {
       setConfig(current);
       const initial = pickWindow(current);
       setActiveWindow(initial); setPreset(initial.preset);
-      await load(initial);
+      await load(initial, { history: true });
     } catch (err) {
       setError(caughtError(err));
       setLoading(false);
@@ -82,18 +84,18 @@ export function useProfitPage() {
     if (next === "custom") return;
     const window = { preset: next };
     setActiveWindow(window);
-    void load(window);
+    void load(window, { history: true });
   };
   const selectDay = (startMs: number, endMs: number) => {
     const window: ProfitWindow = { preset: "custom", startMs, endMs };
     setPreset("custom"); setActiveWindow(window);
-    void load(window);
+    void load(window, { history: true });
   };
   const queryCustom = async () => {
     if (!range?.[0] || !range?.[1]) return false;
     const next: ProfitWindow = { preset: "custom", startMs: range[0].valueOf(), endMs: range[1].valueOf() };
     setActiveWindow(next);
-    await load(next);
+    await load(next, { history: true });
     return true;
   };
   const refresh = async () => {

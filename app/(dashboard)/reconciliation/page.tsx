@@ -1,6 +1,6 @@
 "use client";
 // 每日利润（设计 10-29）：页顶一句 + 四个数 + 每天的毛利小柱状图（选了好几天才有）+ 一张渠道表；点开一个渠道看每天一行，再点「计算明细」。
-// 数据只来自 POST /api/reconciliation/profit 和 GET …/profit/detail（只读）；「刷新」和需处理那一行的「重新读取」才让服务端读取并保存。
+// 日期选项按所选范围登记缺账，后台补算；页面数据来自 /profit 和 /profit/detail（只读）。
 // 默认打开今天，每 30 秒重读一次。这一页只看结果，不改设置。用语按 design/ui-copy-spec.md；报错原文只放进「查看详细原因」（§8.2）。
 import "../../styles/pages/reconciliation.css";
 import { useEffect, useMemo, useRef, useState } from "react";

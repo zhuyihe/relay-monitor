@@ -217,6 +217,8 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "billing_policy", "VARCHAR(32) NOT NULL DEFAULT 'legacy-v3'");
   await addColumnIfMissing(pool, "reconciliation_rules", "scope_version", "BIGINT NOT NULL DEFAULT 1");
   await addColumnIfMissing(pool, "reconciliation_rules", "billing_effective_from_ms", "BIGINT NULL");
+  // 用户在每日利润页选择历史范围后，允许补算到这一天；不改绑定创建/修改时刻。
+  await addColumnIfMissing(pool, "reconciliation_rules", "history_from_ms", "BIGINT NULL");
   // 解除时刻（毫秒，由进程写）。archived_at 是 NOW() 写的 DATETIME，进程和 MySQL 时区不同时会偏（计划 C3 4.2）；旧行按 archived_at 回填一次
   await addColumnIfMissing(pool, "reconciliation_rules", "archived_at_ms", "BIGINT NULL");
   // 核算起点的下限（毫秒）：同一天里更早解除了一条占着同一个渠道（或同一把 Key）的 New API 绑定时，新绑定从那一刻起算，不从 0 点，免得重叠算两遍（C3）

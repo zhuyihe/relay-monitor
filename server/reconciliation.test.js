@@ -4666,6 +4666,59 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
   return { ...f, rows, catalogue, channels };
 }
 
+test("按所选日期补新渠道历史：昨天补三条、固定后不再取数、更早自选日可补且不改创建时间", async (t) => {
+  const f = await completedDayFixture(t, { moduleOptions: { lookbackBudget: 10 } });
+  const created = new Date(Date.now() - 3600000);
+  for (const row of f.rows) { row.created_at = created; row.billing_effective_from_ms = created.getTime(); }
+  const before = await f.module.profitPage({ preset: "yesterday" }, { cacheOnly: true });
+  assert.equal(before.rows.every((row) => row.startedOn === "2026-10-09"), true);
+  const calls = f.state.requests.length;
+  assert.deepEqual(await f.module.requestHistory({ preset: "yesterday" }), { queued: 3, pending: 3 });
+  assert.equal(f.state.requests.length, calls, "登记补算不等上游请求");
+  assert.ok(f.rows.every((row) => row.created_at === created && row.billing_effective_from_ms === created.getTime()));
+  assert.ok(f.rows.every((row) => row.history_from_ms === Date.parse("2026-10-07T16:00:00Z")));
+  assert.deepEqual(await f.module.requestHistory({ preset: "yesterday" }), { queued: 0, pending: 3 }, "同一缺口不重复排队");
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.filter((row) => row.bill_date === "2026-10-08").length, 3);
+  const page = await f.module.profitPage({ preset: "yesterday" }, { cacheOnly: true });
+  assert.ok(page.rows.every((row) => row.reading === false));
+  assert.ok(page.pageTotals.grossProfitUsd > 0);
+  const saved = JSON.stringify(f.state.ledger), readCount = f.state.requests.length;
+  assert.deepEqual(await f.module.requestHistory({ preset: "yesterday" }), { queued: 0, pending: 0 });
+  assert.equal(f.state.requests.length, readCount);
+  assert.equal(JSON.stringify(f.state.ledger), saved, "已固定的账不重算");
+  const custom = { preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") };
+  assert.deepEqual(await f.module.requestHistory(custom), { queued: 3, pending: 3 });
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.filter((row) => row.bill_date === "2026-10-07").length, 3, "明确选择的日期不被创建时间或启动退避挡住");
+  assert.equal(f.state.ledger.length, 6);
+});
+
+test("历史请求按近7天、月和自选完整日登记，不把今天或自选半天写成整天账", async (t) => {
+  const f = await completedDayFixture(t);
+  const created = new Date(Date.now() - 3600000);
+  for (const row of f.rows) { row.created_at = created; row.billing_effective_from_ms = created.getTime(); }
+  assert.deepEqual(await f.module.requestHistory({ preset: "today" }), { queued: 0, pending: 0 });
+  assert.deepEqual(await f.module.requestHistory({ preset: "custom", startMs: Date.parse("2026-10-06T17:00:00Z"), endMs: Date.parse("2026-10-07T15:00:00Z") }), { queued: 0, pending: 0 });
+  assert.deepEqual(await f.module.requestHistory({ preset: "7d" }), { queued: 18, pending: 18 });
+  const days = [...new Set((await f.repository.listSettlementStates(f.rows.map((row) => row.id))).map((row) => row.billDate))].sort();
+  assert.deepEqual(days, ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]);
+  assert.deepEqual(await f.module.requestHistory({ preset: "month" }), { queued: 6, pending: 24 });
+});
+
+test("补新绑定的历史不占用同渠道旧绑定的日期", async (t) => {
+  const f = await completedDayFixture(t);
+  const created = new Date(Date.now() - 3600000);
+  for (const row of f.rows) { row.created_at = created; row.billing_effective_from_ms = created.getTime(); }
+  const archivedAt = Date.parse("2026-10-07T04:00:00Z");
+  f.rows.push({ ...f.rows[0], id: "rr_old", enabled: 0, created_at: new Date("2026-10-01T00:00:00Z"),
+    archived_at: new Date(archivedAt), archived_at_ms: archivedAt });
+  f.repository.tables.channels.push(...f.repository.tables.channels.filter((row) => row.rule_id === "rr_live").map((row) => ({ ...row, rule_id: "rr_old", active_channel_key: null })));
+  assert.deepEqual(await f.module.requestHistory({ preset: "7d" }), { queued: 13, pending: 13 });
+  assert.deepEqual(await requestedDays(f), ["2026-10-08"], "旧绑定解除当日及以前不写进新绑定");
+  assert.equal(f.rows.find((row) => row.id === "rr_live").history_from_ms, Date.parse("2026-10-07T16:00:00Z"));
+});
+
 // 自营站点的管理端日志列表替身（计划 P1a 判断有没有新的消费用），照 New API model/log.go GetAllLogs：
 // 按 start_timestamp 筛，按「时刻倒序、再按编号倒序」排，带 total（起点以后一共几条）；clickhouse 时编号换成显示序号（第一条永远是 1）
 function ownLogList(logs, calls = [], { clickhouse = false, testLogs = [] } = {}) {
