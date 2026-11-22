@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { AntdRegistry } from "@ant-design/nextjs-registry";
 import Providers from "./providers";
 import { BRAND } from "../lib/brand";
-import { themeStyleText } from "../lib/design-tokens";
+import { palette, themeStyleText } from "../lib/design-tokens";
 import { THEME_COOKIE, THEME_SCRIPT } from "../lib/theme";
 import "./globals.css";
 import "./styles/jy.css";
@@ -23,20 +23,17 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#F4F6F9" },
-    { media: "(prefers-color-scheme: dark)", color: "#151617" },
-  ],
+  themeColor: palette.light.plane,
   width: "device-width",
   initialScale: 1,
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  // 显式选择过主题的用户由服务端直接输出 data-theme；没选过的由内联脚本按系统偏好补上
+  // 默认首帧白色，保留已保存的手动选择和旧设置迁移。
   const saved = (await cookies()).get(THEME_COOKIE)?.value;
   const initialTheme = saved === "dark" || saved === "light" ? saved : null;
   return (
-    <html lang="zh-CN" data-theme={initialTheme ?? undefined} suppressHydrationWarning>
+    <html lang="zh-CN" data-theme={initialTheme ?? "light"} suppressHydrationWarning>
       <head>
         <style dangerouslySetInnerHTML={{ __html: themeStyleText() }} />
         {!initialTheme && <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />}
