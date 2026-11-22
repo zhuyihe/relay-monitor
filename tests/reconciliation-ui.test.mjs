@@ -183,7 +183,7 @@ async function openDailyPage(t, options = {}) {
     if (url.pathname === "/api/reconciliation/channels/options") return fulfill(route, options.channelOptions || { ok: false, code: "CHANNEL_CATALOGUE_STALE" });
     if (options.extraAPI) return options.extraAPI(route, url.pathname);
     throw new Error("unexpected daily fixture API: " + url.pathname);
-  }, options.viewport, options.clock, null, options.path);
+  }, options.viewport, options.clock, null, options.path, options.supplierView);
   return { page, profitReads, queries, detailReads, historyRequests };
 }
 // 页面上的字都来自 copy.ts（页面文件不能导出）和共用的常量，这里只填夹具的数
@@ -193,6 +193,46 @@ const cardOf = (page, name) => page.locator(".jy-profit-card").filter({ has: pag
 // 渠道名字后面的感叹号和点开的气泡
 const bangOf = (scope, name) => scope.getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}：`) });
 const presets = (page) => page.getByRole("group", { name: PROFIT_COPY.rangeLabel, exact: true });
+
+for (const viewport of [undefined, { width: 390, height: 844 }]) {
+  test(`供应商合计先显示，展开查看三组 Key；刷新当前范围且保留展开（${viewport ? "手机" : "桌面"}）`, async (t) => {
+    const { page, profitReads, queries } = await openDailyPage(t, { supplierView: true, viewport });
+    const supplier = page.locator('[data-supplier-id="upstream-1"]');
+    await supplier.getByText("$7.50", { exact: true }).waitFor();
+    await supplier.getByText("$3.00", { exact: true }).waitFor();
+    const toggle = supplier.getByRole("button", { name: /Fixture upstream/ });
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    await toggle.click();
+    assert.equal(await page.locator(viewport ? ".jy-profit-supplier-items > li" : ".jy-profit-supplier-item").count(), 3);
+    await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('.jy-refresh.is-loading'));
+    assert.deepEqual(profitReads.at(-1), { preset: "today", refreshToday: true, forceToday: true });
+    assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+    assert.deepEqual(queries, [], "刷新不提交历史重结");
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "页面不横向溢出");
+  });
+}
+
+test("今日现读较慢时先显示缓存，读完替换金额并显示两侧真实截止时间", async (t) => {
+  let release = () => {}, started = () => {};
+  const gate = new Promise((resolve) => { release = resolve; });
+  const reading = new Promise((resolve) => { started = resolve; });
+  const cached = profitPage(todayRows());
+  cached.timing = { provisional: true, incomeThroughMs: Date.parse(PROFIT_AS_OF) - 7 * 60000, costThroughMs: Date.parse(PROFIT_AS_OF) - 2 * 60000 };
+  const { page, profitReads } = await openDailyPage(t, { supplierView: true, profit: async (route, body) => {
+    if (!body.refreshToday) return fulfill(route, cached);
+    started(); await gate;
+    const fresh = profitPage(todayRows().map((row) => ({ ...row, incomeUsd: 10, grossProfitUsd: 9 })));
+    fresh.timing = { provisional: true, incomeThroughMs: Date.parse(PROFIT_AS_OF), costThroughMs: Date.parse(PROFIT_AS_OF) };
+    return fulfill(route, fresh);
+  } });
+  await within(reading, "今日最新汇总开始读取");
+  await metricOf(page, "收入").getByText("$7.50", { exact: true }).waitFor();
+  await page.locator(".jy-profit-timing").getByText(/收入截至/).waitFor();
+  release();
+  await metricOf(page, "收入").getByText("$30.00", { exact: true }).waitFor();
+  assert.deepEqual(profitReads, [{ preset: "today" }, { preset: "today", refreshToday: true }]);
+});
 const pickPreset = (page, label) => presets(page).getByRole("button", { name: label, exact: true }).filter({ visible: true }).click();
 
 test("每日利润默认打开今天：整页一次 POST /profit；页顶一句；四个数；今天不画柱状图；渠道表五列、按毛利从高到低、亏钱标红；合计等于顶上的数；最底下一句没绑定的渠道", async (t) => {
@@ -290,7 +330,8 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
   const failing = await openDailyPage(t, { profit: (route, body) => fail ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture reload failed" }) }) : fulfill(route, profitPage(todayRows())) });
   fail = true; await failing.page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
   await failing.page.locator(".jy-banner").getByText(refreshFailedText(Date.parse(PROFIT_AS_OF), PROFIT_TZ), { exact: true }).waitFor(); await rowOf(failing.page, "Rule A").getByText("$2.50", { exact: true }).waitFor();
-  assert.deepEqual(failing.queries, [{ preset: "today", observe: true }]);
+  assert.deepEqual(failing.queries, []);
+  assert.deepEqual(failing.profitReads.at(-1), { preset: "today", refreshToday: true, forceToday: true });
   // 读不到自营站点的收入：和运营总览同一句，收入、毛利写「—」，上游成本照常
   const rows = todayRows().map((row) => ({ ...row, incomeUsd: null, grossProfitUsd: null }));
   const unread = await openDailyPage(t, { rows, pageOf: () => ({ ...profitPage(rows, { ownIncomeUnavailable: { code: "OWN_INCOME_UNCONFIRMED" } }), pageTotals: { incomeUsd: null, actualCostUsd: 3, grossProfitUsd: null, grossMarginRate: null }, netProfitUsd: null }) });
@@ -802,7 +843,7 @@ test("后台标签页不刷新：页面在后台时定时刷新一个请求都�
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
 const onboardingRequests = new WeakMap();
-async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation") {
+async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation", supplierView = false) {
   const browser = await launchBrowser();
   const context = await browser.newContext({ serviceWorkers: "block", ...(viewport ? { viewport, isMobile: true, hasTouch: true } : {}) });
   t.after(() => context.close());
@@ -832,7 +873,14 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
   });
   await page.goto(`${baseURL}${path}`, { timeout: 30000 });
   // 核算页等第一行出来；其他页面（上游资源）由调用方等自己的就绪标志
-  if (path.startsWith("/reconciliation")) await page.getByText("Rule A").or(page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true })).first().waitFor();
+  if (path.startsWith("/reconciliation")) {
+    const channels = page.getByRole("button", { name: "渠道明细", exact: true });
+    await channels.or(page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true })).first().waitFor();
+    if (!supplierView && await channels.count()) {
+      if (path.includes("ruleId=")) await page.waitForFunction(() => [...document.querySelectorAll('button')].some((button) => button.textContent === "渠道明细" && button.getAttribute("aria-pressed") === "true"));
+      else await channels.click();
+    }
+  }
   return page;
 }
 
@@ -925,20 +973,20 @@ test("每日利润 is read-only: no create or edit entry; the attention row's fi
   const calls = onboardingRequests.get(page); assert.equal(calls.filter((call) => call.pathname === "/api/channel-onboarding").length, 0); assert.deepEqual(calls.filter((call) => call.method !== "GET"), []);
 });
 
-test("日期选择登记所选历史，定时重读只读结果：今天30秒、本月5分钟、固定的昨天不轮询", async (t) => {
+test("日期选择登记所选历史，今天和本月每分钟更新今日汇总，固定的昨天不轮询", async (t) => {
   // 浏览器时钟被快进后，响应的取数时刻跟着走，免得「数据截至」被判成过期而换掉提示文案
   let skewMs = 0;
   const { page, profitReads, queries, historyRequests } = await openDailyPage(t, { clock: true, pageOf: (body) => ({ ...(body.preset === "yesterday" ? profitPage(yesterdayRows(), { preset: "yesterday" }) : profitPage(todayRows(), { preset: body.preset === "month" ? "7d" : "today", customPreset: body.preset })), asOf: new Date(Date.now() + skewMs).toISOString() }) });
   const advance = async (ms) => { skewMs += ms; await page.clock.fastForward(ms); };
   const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
   const freshness = (title) => page.locator(`.jy-freshness[title="${title}"]`).waitFor();
-  await freshness("数据每 30 秒自动刷新"); assert.deepEqual(profitReads, [{ preset: "today" }]);
-  await advance(31000); await settle(); assert.deepEqual(profitReads.slice(1), [{ preset: "today" }]); assert.equal(queries.length, 0);
+  await freshness("数据每 1 分钟自动刷新"); assert.deepEqual(profitReads, [{ preset: "today" }]);
+  await advance(61000); await settle(); assert.deepEqual(profitReads.slice(1), [{ preset: "today", refreshToday: true }]); assert.equal(queries.length, 0);
   await Promise.all([page.waitForResponse((response) => new URL(response.url()).pathname === "/api/reconciliation/profit" && response.request().postDataJSON()?.preset === "yesterday"), pickPreset(page, PROFIT_COPY.presets.yesterday)]); await freshness("当前时间范围不自动刷新，可点右侧刷新"); assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
   await advance(310000); await settle(); assert.equal(profitReads.length, 3);
   assert.deepEqual(historyRequests, [{ preset: "yesterday" }]);
-  await Promise.all([page.waitForResponse((response) => new URL(response.url()).pathname === "/api/reconciliation/profit" && response.request().postDataJSON()?.preset === "month"), pickPreset(page, PROFIT_COPY.presets.month)]); await freshness("数据每 5 分钟自动刷新"); assert.deepEqual(profitReads.at(-1), { preset: "month" });
-  await advance(290000); await settle(); assert.equal(profitReads.length, 4); await advance(20000); await settle(); assert.deepEqual(profitReads.at(-1), { preset: "month" }); assert.equal(profitReads.length, 5);
+  await Promise.all([page.waitForResponse((response) => new URL(response.url()).pathname === "/api/reconciliation/profit" && response.request().postDataJSON()?.preset === "month"), pickPreset(page, PROFIT_COPY.presets.month)]); await freshness("数据每 1 分钟自动刷新"); assert.deepEqual(profitReads.at(-1), { preset: "month" });
+  await advance(59000); await settle(); assert.equal(profitReads.length, 4); await advance(2000); await settle(); assert.deepEqual(profitReads.at(-1), { preset: "month", refreshToday: true }); assert.equal(profitReads.length, 5);
   await pickPreset(page, PROFIT_COPY.presets.custom); await page.getByRole("button", { name: PROFIT_COPY.query, exact: true }).waitFor(); await freshness("当前时间范围不自动刷新，可点右侧刷新");
   await advance(310000); await settle(); assert.equal(profitReads.length, 5); assert.equal(queries.length, 0);
   assert.deepEqual(historyRequests, [{ preset: "yesterday" }, { preset: "month" }], "轮询和展开自选日期不重复申请历史");

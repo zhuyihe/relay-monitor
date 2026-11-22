@@ -2624,3 +2624,38 @@ test("主站收入读不到：保留成本真实时间，收入及整页截止�
   assert.equal(page.timing.costThroughMs, f.state.now);
   assert.equal(page.asOf, null);
 });
+
+test("对账今日现读绕过落后明细，多个页面一分钟内共用结果，手动刷新立即重读", async (t) => {
+  const { f } = await usageCheckFixture(t);
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  f.rt.reconciliation = createReconciliationModule(f.rt, { repository: f.repository, ownLogStore: f.ownLogStore });
+  await f.at("2026-10-10T12:01:00");
+  let channelReads = 0;
+  const fetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && url.searchParams.has("channel") && !url.searchParams.has("username") && !url.searchParams.has("token_name")) channelReads += 1;
+    return fetch(input, init);
+  });
+  const stats = () => channelReads;
+  const before = stats();
+  const [a, b] = await Promise.all([0, 1].map(() => f.rt.reconciliation.profitPage({ preset: "today" }, { cacheOnly: true, refreshToday: true })));
+  assert.equal(stats() - before, 1, "同时打开两个页面只查询一次渠道汇总");
+  assert.equal(a.rows[0].incomeUsd, 2 * (12 * 3600 + 60), "用最新汇总，不拿十分钟前的桶金额当今天收入");
+  assert.deepEqual(a.accountingTotals, b.accountingTotals);
+  assert.equal(a.timing.incomeThroughMs, f.state.now);
+  const after = stats();
+  f.state.now += 30000;
+  await f.rt.reconciliation.profitPage({ preset: "7d" }, { cacheOnly: true, refreshToday: true });
+  assert.equal(stats(), after, "换时间范围仍共用同一份今天");
+  await f.rt.reconciliation.profitPage({ preset: "month" }, { cacheOnly: true, refreshToday: true, forceToday: true });
+  assert.equal(stats(), after + 1, "手动刷新不等一分钟缓存过期");
+  const ledger = structuredClone(f.repository.tables.ledger);
+  const readAt = stats();
+  await f.rt.reconciliation.profitPage({ preset: "yesterday" }, { cacheOnly: true, refreshToday: true, forceToday: true });
+  assert.equal(stats(), readAt, "看昨天不查询今天，也不重读历史");
+  assert.deepEqual(f.repository.tables.ledger, ledger, "页面刷新不重写历史金额");
+  f.state.now += 61000;
+  await f.rt.reconciliation.profitPage({ preset: "today" }, { cacheOnly: true, refreshToday: true });
+  assert.equal(stats(), readAt + 1, "过一分钟自动取得新数据");
+});

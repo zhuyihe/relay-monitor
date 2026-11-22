@@ -1,7 +1,7 @@
 "use client";
 // 每日利润（设计 10-29）：页顶一句 + 四个数 + 每天的毛利小柱状图（选了好几天才有）+ 一张渠道表；点开一个渠道看每天一行，再点「计算明细」。
 // 日期选项按所选范围登记缺账，后台补算；页面数据来自 /profit 和 /profit/detail（只读）。
-// 默认打开今天，每 30 秒重读一次。这一页只看结果，不改设置。用语按 design/ui-copy-spec.md；报错原文只放进「查看详细原因」（§8.2）。
+// 默认打开今天，每分钟更新今日汇总。这一页只看结果，不改设置。用语按 design/ui-copy-spec.md；报错原文只放进「查看详细原因」（§8.2）。
 import "../../styles/pages/reconciliation.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OWN_CONSUME_LOG_CHECKED } from "../../components/recheck-consume-log";
@@ -10,7 +10,7 @@ import { api, readWorkflowDestination } from "../../../lib/client";
 import type { ProfitPageResponse, ProfitRow, WorkflowDestination } from "../../../lib/client";
 import { DESTINATION_CHANGED, workflowActionMeta } from "../../../lib/workflow-actions";
 import { sameReconciliationWindow } from "../../../lib/reconciliation-contract";
-import { INCOME_UNREAD, OWN_STATION_UNSET, formatZonedWindow } from "../../../lib/format";
+import { INCOME_UNREAD, OWN_STATION_UNSET, formatZonedTime, formatZonedWindow } from "../../../lib/format";
 import { describeError, failureSentence } from "../../../lib/error-copy";
 import { ErrorState, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
 import { Seg } from "../../components/seg";
@@ -149,7 +149,7 @@ export default function ReconciliationPage() {
 
   const notes = footerNotes(page, ctx, { upstreams: UPSTREAMS_HREF, settings: SETTINGS_HREF }, ownLog);
   const scopeNote = notes.find((note) => note.key === "coverage");
-  const otherNotes = notes.filter((note) => note.key !== "coverage");
+  const otherNotes = notes.filter((note) => note.key !== "coverage" && note.key !== "timing");
   const emptyAction = config?.ownStation ? { href: UPSTREAMS_HREF, label: COPY.table.goUpstreams } : { href: SETUP_HREF, label: COPY.table.setupOwnStation };
 
   return <div className="jy-page jy-profit-page">
@@ -161,6 +161,11 @@ export default function ReconciliationPage() {
         </div>
         : null}
       <span className="jy-profit-caption">{switching ? "" : rangeCaption(page, ctx)}</span>
+      {!switching && page.timing?.provisional ? <span className="jy-profit-timing">
+        收入截至 {page.timing.incomeThroughMs == null ? "未确认" : formatZonedTime(page.timing.incomeThroughMs, tz)}
+        <span aria-hidden="true"> · </span>成本截至 {page.timing.costThroughMs == null ? "未确认" : formatZonedTime(page.timing.costThroughMs, tz)}
+        <span>今日利润暂估</span>
+      </span> : null}
     </div>
 
     {destinationAlert}
@@ -182,6 +187,7 @@ export default function ReconciliationPage() {
       page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} detailDay={isSingleDay(page) ? rangeDays(page).first : null} hold={!!detail}
       onOpenDetail={(row, day) => void state.openDetail(row, day)} onRetry={(row) => void retryRow(row)} onRefresh={() => void refresh()}
       retryingKeys={retryingKeys} retryErrors={retryErrors} empty={emptyAction}
+      revealRuleId={destination?.ruleId}
     />
 
     {otherNotes.length && page.rows.length ? <p className="jy-caption jy-profit-notes">

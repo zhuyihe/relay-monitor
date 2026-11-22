@@ -608,6 +608,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   latestToday：每条绑定「今天」最近一次真读到的结果（后台轮询写，页面读）——resultCache 一分钟就清，装不下轮询间隔的结果，所以单独存一份；
   //   metadataFailures：目录 / 身份读失败的上游，轮询按时间退避着重读（失败不进 metadataCache，不退避就每轮都重读一遍）
   const latestToday = (rt._reconciliationLatestToday ||= new Map());
+  const liveProfitView = (rt._reconciliationLiveProfitView ||= { at: null });
   const metadataFailures = (rt._reconciliationMetadataFailures ||= new Map());
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
@@ -979,7 +980,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // observed 标记结果是否来自观测：观测轮询只认观测写下的缓存，只读计算的结果不能让轮询跳过写库。
-  function cacheResult(key, value, sourceCredential, billingCredential, observed = true) {
+  function cacheResult(key, value, sourceCredential, billingCredential, observed = true, liveRevenue = false) {
     const now = Date.now();
     const cached = resultCache.get(key);
     const previous = cached?.sourceCredential === sourceCredential && cached?.billingCredential === billingCredential ? cached.value : null;
@@ -989,7 +990,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 观测结果不让位给截止点更晚的只读结果：否则下一轮轮询找不到观测缓存，会重复取数。
     if (newer && !(observed && !cached.observed)) return;
     for (const [cachedKey, cached] of resultCache) if (cachedKey !== key && now - cached.at >= QUERY_TTL_MS) resultCache.delete(cachedKey);
-    resultCache.set(key, { at: now, value, sourceCredential, billingCredential, observed });
+    resultCache.set(key, { at: now, value, sourceCredential, billingCredential, observed, liveRevenue });
     while (resultCache.size > MAX_RESULT_CACHE_ENTRIES) resultCache.delete(resultCache.keys().next().value);
   }
 
@@ -2733,7 +2734,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
   //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
   // probe（只配 settle）：要人处理的日子到了重判的时刻，只走一遍取数前的判断，不取账单、不写库，返回 { probe: true, blocker }（计划 C2a 2.3）
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, autoConfirm = false, trigger = null, probe = false, priorState = null } = {}) {
+  async function inspectRule(ruleId, window, { force = false, liveRevenue = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, autoConfirm = false, trigger = null, probe = false, priorState = null } = {}) {
     const settle = mode === "settle";
     // 轮询回看带的是状态行里的请求时刻；resettle: true 是调用方（测试、手动）直接要求重结，没有请求时刻可比
     const resettle = resettleOption || resettleRequestedAt != null;
@@ -2751,7 +2752,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const inflightKey = observe ? `${evaluateKey}:${settle ? (probe ? "probe" : "settle") : "observe"}${resettle ? `:resettle${resettleRequestedAt}` : ""}` : evaluateKey;
     const ttl = resultTtl(window);
     const cached = resultCache.get(cacheKey);
-    if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
+    if (!force && (!observe || cached?.observed) && (!liveRevenue || cached?.liveRevenue) && cached?.sourceCredential === requestCredential
       && cached?.billingCredential === requestBilling.ownerVersion && Date.now() - cached.at < ttl
       // 观测写下的分段切换不会清缓存，用分段口径挡住切换前算出的结果。
       && reconciliationScopeFingerprint(firstRule, await repository.listSegments(ruleId)) === reconciliationScopeFingerprint(firstRule, cached.value.transitionSegments || [])) {
@@ -2806,7 +2807,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const [catalogue, results] = await Promise.all([
             ownChannelsFor(own, { force: force && !settle, registry: ownerRegistry }).catch(() => null),
             // 多天的范围也按天拼、带「其中管理员自用」，和别处同一条路（审核 R1 低-3）
-            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own, { cache: !settle }), registry: ownerRegistry, reuse: false, settle, viaBuckets: !force })
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own, { cache: !settle }), registry: ownerRegistry, reuse: false, settle, viaBuckets: !force && !liveRevenue })
               .catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -3122,7 +3123,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       // 本站 /api/status 同一轮各绑定、各分段共用一次（ownStatusFor）；读取失败时每个分段照常按本站账单不可用处理。
       const loadOwnStatus = () => ownStatusFor(ownerRegistry, own, { cache: !settle });
-      const reuseOwnRevenue = observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
+      const reuseOwnRevenue = !liveRevenue && observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
       // 减压 PR：这一轮里哪些分段的渠道收入是沿用的（没人看、放慢）——有一段是，这整条绑定这一轮的结果就不进 resultCache
       // （downstreamResult.staleFromIdleSkip 在 foldSplitSegments/下面的对象展开里会丢，这里单独记一份）
       const staleFromIdleSkip = [];
@@ -3139,7 +3140,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
               : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, statTimeoutMs })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
-            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle, viaBuckets: !force })
+            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle, viaBuckets: !force && !liveRevenue })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
@@ -3417,7 +3418,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 这份结果里有渠道收入是沿用的（没人看、放慢）：不进 resultCache，免得页面来看时（evaluate 模式不管 cached.observed，
           // TTL 内照样信任缓存）拿到沿用的数——留着旧的那份（更早、但是现读的）等它自然过期，或者等下一次现读覆盖（总指挥 10-26 定）
           if (value.health.code !== "PENDING" && !value.staleFromIdleSkip) {
-            cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
+            cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe, liveRevenue || force);
             // 每日利润页只读缓存用：「今天」整天窗口最近一次真读到的结果（读失败也算，页面据此亮「读不到」，不是「还在读取」）
             if (window.preset === "today") {
               const stored = latestToday.get(ruleId);
@@ -4294,7 +4295,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
-    async profitPage(rawInput = {}, { cacheOnly = false, passive = false } = {}) {
+    async profitPage(rawInput = {}, { cacheOnly = false, passive = false, refreshToday = false, forceToday = false } = {}) {
       const input = await sinceInput(rawInput);
       // 浏览器的钟比服务器快一点（几分钟以内）不能整页报错：自选范围的终点当成「到现在」；快得多才是真的选了以后的时间
       if (input.preset === "custom" && Number.isFinite(Number(input.endMs)) && Number(input.endMs) > Date.now() && Number(input.endMs) - Date.now() <= CLOCK_SKEW_MS) input.endMs = Date.now();
@@ -4308,6 +4309,23 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) >= dayKeyInTz(w.startMs, rule.timezone) && (reconciliationAccountingStart(rule) ?? 0) < w.endMs;
       });
       const archivedRuleIds = archivedInRange.map((rule) => rule.id);
+      // 页面现读只更新所选范围里的今天，历史仍取逐日账本。多个页面共用在读任务和一分钟结果，首屏缓存读取不等这里。
+      if (refreshToday && !passive) {
+        const liveRules = [...allRules.filter((rule) => !rule.archivedAt && rule.enabled), ...archivedInRange].filter((rule) => {
+          const w = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, nowMs);
+          const today = dayStartInTz(dayKeyInTz(nowMs, rule.timezone), rule.timezone);
+          return w.startMs <= today && w.endMs >= nowMs - LIVE_END_SLACK_MS
+            && (rule.archivedAtMs == null || dayKeyInTz(Number(rule.archivedAtMs), rule.timezone) === dayKeyInTz(nowMs, rule.timezone));
+        });
+        if (liveRules.length) {
+          markPageViewing();
+          liveProfitView.at = Date.now();
+          const ids = liveRules.map((rule) => rule.id).sort();
+          await runBackground(`profit-live|${ids.join(",")}`, () => api.queryRules({ preset: "today", ruleIds: ids }, {
+            mode: "evaluate", force: forceToday, liveRevenue: true, origin: "page-live", archivedRuleIds,
+          }), { slot: false });
+        }
+      }
       const daily = await dailyProfitResults(input, [...allRules.filter((rule) => !rule.archivedAt && rule.enabled), ...archivedInRange], nowMs, { cacheOnly, passive });
       // 「没算进利润的上游成本」只在单天范围显示：多天范围只读得到现读那几天，和页面别处对不上
       const response = daily ? daily.response : await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", noLivePast: true, archivedRuleIds, cacheOnly, passive });
@@ -4503,7 +4521,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const selected = [...((Array.isArray(ruleIds) && ruleIds.length)
           ? rules.filter((rule) => rule.enabled && ruleIds.includes(rule.id))
           : rules.filter((rule) => rule.enabled)), ...archivedPick];
-        const ownerRegistry = await ownerRegistryFor(rules, selected, { observe: options.mode !== "evaluate", cacheOnly: options.cacheOnly === true });
+        const ownerRegistry = await ownerRegistryFor(rules, selected, { observe: options.mode !== "evaluate", poll: options.origin === "page-live", cacheOnly: options.cacheOnly === true });
         const billingSource = ownerRegistry.billingSource;
         const now = Date.now();
         const respond = async (rows) => {
@@ -4587,11 +4605,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const todayReads = [
         ...rules.map((rule) => runBackground(`today|${rule.id}`, async () => {
           const at = now + Math.max(0, Date.now() - startedAt);
-          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry }).catch(() => null);
+          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry,
+            liveRevenue: liveProfitView.at != null && Date.now() - liveProfitView.at < PAGE_VIEW_HOLD_MS }).catch(() => null);
         })),
         ...archivedToday.map((rule) => runBackground(`today-archived|${rule.id}`, async () => {
           const at = now + Math.max(0, Date.now() - startedAt);
-          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry }).catch(() => null);
+          await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "evaluate", origin: "poll", ownerRegistry,
+            liveRevenue: liveProfitView.at != null && Date.now() - liveProfitView.at < PAGE_VIEW_HOLD_MS }).catch(() => null);
         })),
       ];
       if (!background) await Promise.all(todayReads);

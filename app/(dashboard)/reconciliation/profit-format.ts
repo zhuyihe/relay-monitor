@@ -126,12 +126,10 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
 }
 
 // ---- 轮询 ----
-// 范围里含今天才轮询（不带 observe）：「今天」和终点晚于今天 0 点的自定义范围 30 秒一次；「近 7 天」「本月」也含今天，和旧页面一样 5 分钟一次
-// （不比旧页面多发请求）；昨天、不含今天的自定义范围的日子都已固定，不轮询（审核 #128）。
-// 例外：不管选的哪个范围，当前结果里还有「还在读取」的日子（零点以后正在结账的那几个小时）就 5 分钟重读一次，没有了就停（审核 2 #128）。tz 是接口给的业务时区，没读到页面数据时用默认
-export const LIVE_POLL_MS = 30000;
+// 含今天的范围每分钟更新今天；已固定的历史范围停止，缺账时每五分钟检查补账进度。
+export const LIVE_POLL_MS = 60000;
 export const LIVE_POLL_LONG_MS = 300000;
-// 有渠道今天的数还没读到：10 秒再要一次整页（服务端只读缓存、不发外面的请求，后台轮询读到就补上），都读到了回到上面的节奏
+// 有行还在读取时十秒检查一次；今日现读仍共用一分钟结果，已有在读任务不重复启动。
 export const ROWS_READING_POLL_MS = 10000;
 export function livePollMs(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null, reading = false, rowsReading = false): number | null {
   const base = livePollBase(window, now, tz);
@@ -140,7 +138,7 @@ export function livePollMs(window: { preset: string; startMs?: number; endMs?: n
 }
 function livePollBase(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null): number | null {
   if (window.preset === "today") return LIVE_POLL_MS;
-  if (window.preset === "7d" || window.preset === "month" || window.preset === "since") return LIVE_POLL_LONG_MS;
+  if (window.preset === "7d" || window.preset === "month" || window.preset === "since") return LIVE_POLL_MS;
   if (window.preset === "custom" && Number.isFinite(window.endMs)) return (window.endMs as number) > dayStartInTz(dayKeyInTz(now, tz || undefined), tz || undefined) ? LIVE_POLL_MS : null;
   return null;
 }
@@ -233,6 +231,43 @@ export function sortRows(rows: ProfitRow[], sort: Sort, ctx: Ctx): ProfitRow[] {
     const x = rowCells(a, ctx)[sort.key], y = rowCells(b, ctx)[sort.key];
     if (x == null || y == null) return x == null && y == null ? byName(a, b) : x == null ? 1 : -1;
     return x === y ? byName(a, b) : sign * (x - y);
+  });
+}
+
+export type SupplierItem = { id: string; row: ProfitRow; key: ProfitKeyRow | null; income: number | null; actual: number | null; gross: number | null; margin: number | null };
+export type SupplierGroup = { id: string; name: string; items: SupplierItem[]; channels: number; keys: number; issues: number; income: number | null; actual: number | null; gross: number | null; margin: number | null };
+// 按已经分配好的 Key 金额归供应商，换过供应商的渠道不把整行重复计入两家。未计入的行保留明细，不加进供应商合计。
+export function supplierGroups(rows: ProfitRow[], ctx: Ctx, sort: Sort | null): SupplierGroup[] {
+  const groups = new Map<string, { name: string; items: SupplierItem[]; channels: Set<string>; keys: Set<string>; issues: Set<string> }>();
+  for (const row of rows) {
+    const parts = row.keys?.length ? row.keys : [null];
+    for (const key of parts) {
+      const upstream = key?.upstream ?? row.upstream, id = upstream.stationId;
+      const group = groups.get(id) ?? { name: upstream.name ?? UPSTREAM_GONE, items: [], channels: new Set<string>(), keys: new Set<string>(), issues: new Set<string>() };
+      const money = parts.length > 1 && key ? keyCells(key, row, ctx) : rowCells(row, ctx);
+      const income = row.counted ? money.income : null, actual = row.counted ? money.actual : null;
+      const gross = income != null && actual != null ? income - actual : null;
+      group.items.push({ id: `${row.rowKey}:${key?.tokenId ?? "row"}`, row, key, income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null });
+      for (const channel of row.channels) group.channels.add(`${row.rowKey.split(":")[1]}:${channel.channelId}`);
+      group.keys.add(String(key?.tokenId ?? row.key.name));
+      if (row.reading || row.attention || row.notice || row.excludedDays || !row.counted || (key && key.pendingDays > 0)) group.issues.add(row.rowKey);
+      groups.set(id, group);
+    }
+  }
+  const totals = [...groups].map(([id, group]) => {
+    const counted = group.items.filter((item) => item.row.counted);
+    const income = counted.length && counted.every((item) => item.income != null) ? sum(counted.map((item) => item.income!)) : null;
+    const actual = counted.length && counted.every((item) => item.actual != null) ? sum(counted.map((item) => item.actual!)) : null;
+    const gross = income != null && actual != null ? income - actual : null;
+    return { id, name: group.name, items: group.items, channels: group.channels.size, keys: group.keys.size, issues: group.issues.size,
+      income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null };
+  });
+  const order = sort ?? DEFAULT_SORT, sign = order.dir === "desc" ? -1 : 1;
+  return totals.sort((a, b) => {
+    const byName = a.name.localeCompare(b.name, "zh-CN");
+    if (order.key === "name") return sign * byName;
+    const x = a[order.key], y = b[order.key];
+    return x == null || y == null ? x == null && y == null ? byName : x == null ? 1 : -1 : x === y ? byName : sign * (x - y);
   });
 }
 

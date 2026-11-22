@@ -6,6 +6,8 @@
 /* 页顶一句、自定义日期 */
 .jy-profit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
 .jy-profit-caption { font-size: 12px; line-height: 20px; color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-profit-timing { font-size: 12px; line-height: 20px; color: var(--jy-ink-2); font-variant-numeric: tabular-nums; }
+.jy-profit-timing > span:last-child { margin-left: 12px; color: var(--jy-ink-3); }
 .jy-profit-custom { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; flex-basis: 100%; }
 .jy-profit-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 /* 换了范围、新数据还没回来：旧数字属于别的范围，变淡且不能点 */
@@ -42,6 +44,27 @@
 
 /* 渠道表 */
 .jy-profit-panel .jy-panel-head { flex-wrap: wrap; }
+.jy-profit-table-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.jy-profit-supplier-toggle { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0; border: 0; background: none; color: var(--jy-ink); text-align: left; font: inherit; cursor: pointer; }
+.jy-profit-supplier-toggle:focus-visible, .jy-profit-supplier-issue:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
+.jy-profit-supplier-toggle strong { font-weight: 600; overflow-wrap: anywhere; }
+.jy-profit-supplier-toggle .jy-icon { flex: none; color: var(--jy-ink-3); }
+.jy-profit-supplier-toggle .is-open { transform: rotate(90deg); }
+.jy-profit-supplier-toggle small, .jy-profit-supplier-item small { display: block; margin-top: 3px; color: var(--jy-ink-3); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.jy-profit-supplier-issue { display: inline-flex; min-height: 28px; margin: 2px 0 0 20px; padding: 0; border: 0; background: none; color: var(--jy-warn-ink); font: inherit; font-size: 12px; cursor: pointer; }
+.jy-profit-supplier-table .jy-profit-supplier-row > td { vertical-align: middle; }
+.jy-profit-supplier-row > td:not(:first-child) { font-weight: 600; }
+.jy-profit-supplier-table .jy-profit-supplier-item > td { background: var(--jy-sunken); font-size: 13px; }
+.jy-profit-supplier-table .jy-profit-supplier-item > td:first-child { padding-left: 44px; }
+.jy-profit-supplier-item strong { font-weight: 500; overflow-wrap: anywhere; }
+.jy-profit-supplier-cards, .jy-profit-supplier-items { margin: 0; padding: 0; list-style: none; }
+.jy-profit-supplier-cards > li { padding: 16px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-profit-supplier-cards > li:first-child { border-top: 0; }
+.jy-profit-supplier-cards .jy-profit-supplier-toggle { justify-content: space-between; }
+.jy-profit-supplier-cards .jy-profit-supplier-issue { min-height: 44px; margin: 0; }
+.jy-profit-supplier-items { margin: 16px -16px -16px; background: var(--jy-sunken); }
+.jy-profit-supplier-items > li { padding: 16px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-profit-supplier-items p { margin: 3px 0 0; color: var(--jy-ink-3); font-size: 12px; overflow-wrap: anywhere; }
 .jy-profit-table { width: 100%; min-width: 920px; table-layout: fixed; border-collapse: collapse; font-size: 14px; line-height: 22px; font-variant-numeric: tabular-nums; }
 .jy-profit-col-name { width: 34%; }
 .jy-profit-col-detail { width: 104px; }

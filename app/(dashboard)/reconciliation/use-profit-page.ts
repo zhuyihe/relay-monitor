@@ -1,8 +1,6 @@
 "use client";
-// 日期选择先登记所选范围的缺账，后台补齐；整页 POST /profit 和定时轮询只读结果。
-// 「刷新」和需处理那一行的「重新读取」先 POST /query 带 observe
-// 让服务端读取并保存，再读一次整页。范围里含今天时轮询（不带 observe）：「今天」和含今天的自定义范围 30 秒一次，「近 7 天」「本月」和旧页面一样 5 分钟一次；看已固定的范围（昨天、不含今天的自定义）
-// 不轮询——那几天的数不会再变，没必要一直读；只有点「刷新」（或需处理行的「重新读取」）才带 observe 强制服务端重读（审核 #128）。
+// 日期选择登记所选范围的缺账；首屏先显示缓存，再读取今天的最新汇总。
+// 含今天的范围每分钟更新今天，历史仍取账本；顶部刷新强制更新今天。单行重新读取走 /query，保留历史重算确认。
 // 几个请求可能交错返回：requestId 丢弃过期的响应。error 存报错本身（带 code、status），页面按 lib/error-copy.js 归类成一句。
 // 计算明细（GET /profit/detail）点开一行的一天才读，换了行或日期后上一次的结果不再写回。
 import { App } from "antd";
@@ -42,16 +40,23 @@ export function useProfitPage() {
   const requestId = useRef(0);
   const detailRequestId = useRef(0);
 
-  const readPage = (window: ProfitWindow) => api("/api/reconciliation/profit", { method: "POST", body: { preset: window.preset, startMs: window.startMs, endMs: window.endMs } });
+  const readPage = (window: ProfitWindow, refreshToday = false, forceToday = false) => api("/api/reconciliation/profit", { method: "POST", body: {
+    preset: window.preset, startMs: window.startMs, endMs: window.endMs, ...(refreshToday ? { refreshToday: true, ...(forceToday ? { forceToday: true } : {}) } : {}),
+  } });
 
-  // observe：先让服务端读取并保存（和「刷新」按钮一样的 /query），再读整页
-  const load = async (window: ProfitWindow = activeWindow, { observe = false, history = observe, ruleIds = null as string[] | null } = {}) => {
+  // observe：顶部手动刷新绕过今日缓存；历史只登记缺账，不把整段范围重新计算。
+  const load = async (window: ProfitWindow = activeWindow, { observe = false, history = observe, cachedFirst = false } = {}) => {
     const token = ++requestId.current;
     setQuerying(true);
     try {
       if (history && window.preset !== "today") await api("/api/reconciliation/history", { method: "POST", body: { preset: window.preset, startMs: window.startMs, endMs: window.endMs } });
-      if (observe) await api("/api/reconciliation/query", { method: "POST", body: { preset: window.preset, startMs: window.startMs, endMs: window.endMs, ...(ruleIds ? { ruleIds } : {}), observe: true } });
-      const next: ProfitPageResponse = await readPage(window);
+      if (cachedFirst) {
+        const cached: ProfitPageResponse = await readPage(window);
+        if (token !== requestId.current) return null;
+        setData(cached); setLoadedWindow(window); setError(null); setLoading(false);
+        if (!cached.timing?.provisional && !cached.rows.some((row) => row.reading)) return cached;
+      }
+      const next: ProfitPageResponse = await readPage(window, true, observe);
       if (token !== requestId.current) return null;
       setData(next); setLoadedWindow(window); setError(null);
       return next;
@@ -70,7 +75,7 @@ export function useProfitPage() {
       setConfig(current);
       const initial = pickWindow(current);
       setActiveWindow(initial); setPreset(initial.preset);
-      await load(initial, { history: true });
+      await load(initial, { history: true, cachedFirst: true });
     } catch (err) {
       setError(caughtError(err));
       setLoading(false);
@@ -84,18 +89,18 @@ export function useProfitPage() {
     if (next === "custom") return;
     const window = { preset: next };
     setActiveWindow(window);
-    void load(window, { history: true });
+    void load(window, { history: true, cachedFirst: true });
   };
   const selectDay = (startMs: number, endMs: number) => {
     const window: ProfitWindow = { preset: "custom", startMs, endMs };
     setPreset("custom"); setActiveWindow(window);
-    void load(window, { history: true });
+    void load(window, { history: true, cachedFirst: true });
   };
   const queryCustom = async () => {
     if (!range?.[0] || !range?.[1]) return false;
     const next: ProfitWindow = { preset: "custom", startMs: range[0].valueOf(), endMs: range[1].valueOf() };
     setActiveWindow(next);
-    await load(next, { history: true });
+    await load(next, { history: true, cachedFirst: true });
     return true;
   };
   const refresh = async () => {
@@ -103,6 +108,7 @@ export function useProfitPage() {
     if (!next) { message.error("刷新失败，请查看页面上的错误说明。"); return; }
     const incomplete = next.rows.filter((row) => row.reading || row.attention || row.notice?.code === "UPSTREAM_COST_UNREAD_TODAY");
     if (incomplete.length) message.warning(`已刷新当前对账范围，仍有 ${incomplete.length} 行数据未完整读取，请查看行内原因。`);
+    else message.success("已刷新当前对账范围。");
   };
 
   // 需处理那一行的「重新读取」：只让服务端读这一行的绑定（照旧带 observe），再读整页

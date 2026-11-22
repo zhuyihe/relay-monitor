@@ -2,13 +2,15 @@
 // 每日利润的渠道表（设计 10-29）：桌面一行一个渠道（收入、上游成本、毛利、毛利率），默认按毛利从高到低、点表头换排法、亏钱的标红；
 // 点开一个渠道一天一行，行末「计算明细」打开那天的计算明细；需处理的渠道名字后面一个感叹号，点开写原因加按钮。手机一个渠道一张卡片。
 // 字都从 copy.ts 和 profit-format.ts 来，这里只负责摆。
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Alert, Button } from "antd";
 import { RecheckConsumeLogButton } from "../../components/recheck-consume-log";
 import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { CountBadge, Panel } from "../../components/panel";
 import { EmptyState } from "../../components/data-state";
+import { Seg } from "../../components/seg";
+import { ProfitSuppliers } from "./profit-suppliers";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import type { ProfitKeyRow, ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
 import { EMPTY } from "../../../lib/format";
@@ -25,6 +27,7 @@ type Props = {
   onRetry: (row: ProfitRow) => void; onRefresh: () => void;
   retryingKeys: Set<string>; retryErrors: Record<string, unknown>;
   empty: { href: string; label: string } | null;
+  revealRuleId?: string | null;
 };
 
 const COLUMNS: { key: SortKey; label: string }[] = [
@@ -178,6 +181,8 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
 export function ProfitTable(props: Props) {
   const { page, ctx, compact, switching, empty, sort } = props;
   const [popOpen, setPopOpen] = useState<string | null>(null);
+  const [view, setView] = useState("suppliers");
+  useEffect(() => { if (props.revealRuleId) setView("channels"); }, [props.revealRuleId]);
   const lastLayout = useRef<RowLayout | null>(null);
   if (!page.rows.length) {
     return <Panel title={COPY.table.title} className="jy-profit-panel">
@@ -188,10 +193,14 @@ export function ProfitTable(props: Props) {
   const { groups, layout } = arrangeRows(page.rows, { today: isTodayView(page), sort }, ctx, lastLayout.current, props.hold || popOpen != null);
   lastLayout.current = layout;
   const column = COLUMNS.find((item) => item.key === (sort ?? DEFAULT_SORT).key)!.label;
-  return <Panel title={COPY.table.title} badge={<CountBadge count={page.counts.channels} muted />} extra={compact ? <span className="jy-caption">{COPY.table.mobileSort(column, (sort ?? DEFAULT_SORT).dir === "desc")}</span> : undefined}
+  return <Panel title={view === "suppliers" ? "供应商对账" : COPY.table.title} badge={view === "channels" ? <CountBadge count={page.counts.channels} muted /> : undefined} extra={<div className="jy-profit-table-controls">
+    <Seg label="对账展示方式" options={[{ value: "suppliers", label: "供应商合计" }, { value: "channels", label: "渠道明细" }]} value={view} onChange={setView} />
+    {compact ? <span className="jy-caption">{COPY.table.mobileSort(column, (sort ?? DEFAULT_SORT).dir === "desc")}</span> : null}
+  </div>}
     body={compact ? false : "flush"} className={`jy-profit-panel${switching ? " jy-profit-switching" : ""}`}>
     <div aria-busy={switching || undefined}>
-      {compact ? <MobileCards {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} /> : <DesktopTable {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} />}
+      {view === "suppliers" ? <ProfitSuppliers page={page} ctx={ctx} compact={compact} sort={sort} onSort={props.onSort} detailDay={props.detailDay} revealRuleId={props.revealRuleId} onOpenDetail={props.onOpenDetail} onShowChannels={() => setView("channels")} />
+        : compact ? <MobileCards {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} /> : <DesktopTable {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} />}
     </div>
   </Panel>;
 }

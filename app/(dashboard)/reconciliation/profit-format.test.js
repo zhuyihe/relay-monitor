@@ -18,7 +18,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 const { COPY } = await import("./copy.ts");
 const {
   attentionSuffix, bubbleDiagnostic, arrangeRows, chartDays, keyCells, keyLabel, keyTag, rowUpstream, hasKeyRows, footerNotes, gapReasonText, grossMetric, metrics, nextSort, pageMoney, rangeCaption, rowMoney, sortRows, totalsRow, verifyView,
-  marginText, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, ROWS_READING_POLL_MS, readingText, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
+  marginText, supplierGroups, livePollMs, LIVE_POLL_MS, LIVE_POLL_LONG_MS, ROWS_READING_POLL_MS, readingText, signedMoney, utcOffsetText, unitPriceText, adminUsageText, ratioLine,
 } = await import("./profit-format.ts");
 const { dayKeyInTz, dayStartInTz } = await import("../../../lib/business-time.js");
 const { EMPTY, RATE_UNSET_USD } = await import("../../../lib/format.js");
@@ -102,10 +102,10 @@ test("计算明细里的几句：单价每百万 Token，管理员自用扣没�
   assert.equal(ratioLine(detail([{ startMs: dayStartInTz(D("10-25"), TZ), endMs: 0, ratio: 1 }, { startMs: dayStartInTz(D("10-25"), TZ) + 14.5 * 3600000, endMs: 0, ratio: 1.2 }]), TZ), "倍率在 14:30 从 1.0 变成 1.2，分两段算");
 });
 
-test("轮询判定：范围里含今天才轮询——「今天」、含今天的自定义 30 秒，「近 7 天」「本月」5 分钟；昨天、不含今天的自定义不轮询（审核 #128）", () => {
+test("轮询判定：含今天的范围每分钟更新；已结束且缺账的范围每五分钟检查进度，已固定的范围停止", () => {
   const todayStart = dayStartInTz(D("10-26"), TZ);
   assert.equal(livePollMs({ preset: "today" }, NOW, TZ), LIVE_POLL_MS);
-  assert.equal(LIVE_POLL_MS, 30000);
+  assert.equal(LIVE_POLL_MS, 60000);
   assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: NOW }, NOW, TZ), LIVE_POLL_MS, "自定义到现在：含今天");
   assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart + 86400000 }, NOW, TZ), LIVE_POLL_MS, "自定义到今天结束：含今天");
   assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart }, NOW, TZ), null, "自定义恰好到今天 0 点为止：不含今天");
@@ -115,8 +115,27 @@ test("轮询判定：范围里含今天才轮询——「今天」、含今天�
   assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ, true), LIVE_POLL_LONG_MS, "昨天还有在读取的日子：5 分钟一次");
   assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart }, NOW, TZ, true), LIVE_POLL_LONG_MS, "不含今天的自定义也一样");
   assert.equal(livePollMs({ preset: "today" }, NOW, TZ, true), LIVE_POLL_MS, "含今天的照旧 30 秒");
-  for (const preset of ["7d", "month"]) assert.equal(livePollMs({ preset }, NOW, TZ), LIVE_POLL_LONG_MS, `${preset} 含今天：和旧页面一样 5 分钟一次`);
+  for (const preset of ["7d", "month", "since"]) assert.equal(livePollMs({ preset }, NOW, TZ), LIVE_POLL_MS, `${preset} 含今天：每分钟更新`);
   assert.equal(LIVE_POLL_LONG_MS, 300000);
+});
+
+test("供应商合计：三组 Key 合并，换供应商的渠道按 Key 已分配的金额拆开；缺账不冒充零", () => {
+  const a = row({ rowKey: "ch:own:1", channels: [{ channelId: 1 }], incomeUsd: 100, actualCostMain: 90 });
+  const b = row({ rowKey: "ch:own:2", channels: [{ channelId: 2 }], key: { name: "B" }, incomeUsd: 20, actualCostMain: 18 });
+  const swapped = row({ rowKey: "ch:own:3", channels: [{ channelId: 3 }], incomeUsd: 30, actualCostMain: 27, keys: [
+    { tokenId: 1, name: "old", upstream: { stationId: "up", name: "拼车团队" }, incomeUsd: 10, costUsd: 9, costMain: 9 },
+    { tokenId: 2, name: "new", upstream: { stationId: "other", name: "另一供应商" }, incomeUsd: 20, costUsd: 18, costMain: 18 },
+  ] });
+  const missing = row({ rowKey: "ch:own:4", channels: [{ channelId: 4 }], upstream: { stationId: "missing", name: "待核对" }, counted: false, incomeUsd: null, actualCostUsd: null, attention: { code: "CHANNEL_KEY_NO_USAGE" } });
+  const groups = supplierGroups([a, b, swapped, missing], ctx, { key: "income", dir: "desc" });
+  assert.deepEqual(groups.map((group) => [group.id, group.income, group.actual]), [["up", 130, 117], ["other", 20, 18], ["missing", null, null]]);
+  assert.equal(groups[0].channels, 3);
+  assert.equal(groups[0].keys, 3);
+  assert.equal(groups[2].issues, 1);
+  assert.equal(groups.slice(0, 2).reduce((sum, group) => sum + group.income, 0), 150, "跨供应商的渠道收入没有重复");
+  const unknown = supplierGroups([row({ keys: [{ tokenId: 1, upstream: { stationId: "up", name: "A" }, incomeUsd: null, costUsd: 3, costMain: 3, pendingDays: 1 }, { tokenId: 2, upstream: { stationId: "other", name: "B" }, incomeUsd: 4, costUsd: 2, costMain: 2 }] })], ctx, null);
+  assert.equal(unknown.find((group) => group.id === "up").income, null);
+  assert.equal(unknown.find((group) => group.id === "up").actual, 3);
 });
 
 test("marginText：毛利 ÷ 收入；收入是 0 或毛利算不出写「—」", () => {
@@ -340,7 +359,7 @@ test("还在读取时页面 10 秒再要一次整页（服务端只读缓存）�
   assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ, false, true), ROWS_READING_POLL_MS, "昨天不含今天，也不会有行还在读取；有就按 10 秒");
   assert.equal(livePollMs({ preset: "7d" }, NOW, TZ, false, true), ROWS_READING_POLL_MS, "近 7 天本来 5 分钟，还在读取时 10 秒");
   assert.equal(livePollMs({ preset: "today" }, NOW, TZ, false, false), LIVE_POLL_MS);
-  assert.equal(livePollMs({ preset: "7d" }, NOW, TZ, false, false), LIVE_POLL_LONG_MS);
+  assert.equal(livePollMs({ preset: "7d" }, NOW, TZ, false, false), LIVE_POLL_MS);
 });
 
 test("人民币：接口按天换好的数（incomeCny / actualCostCny）优先，没给的退回按这一行现在的汇率；Key 行、小格同理", () => {
