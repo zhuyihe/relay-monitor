@@ -240,7 +240,70 @@ test("今日现读较慢时先显示缓存，读完替换金额并显示两侧�
   await metricOf(page, "收入").getByText("$30.00", { exact: true }).waitFor();
   assert.deepEqual(profitReads, [{ preset: "today" }, { preset: "today", refreshToday: true }]);
 });
-const pickPreset = (page, label) => presets(page).getByRole("button", { name: label, exact: true }).filter({ visible: true }).click();
+const pickPreset = async (page, label) => {
+  await page.getByRole("button", { name: "选择时间范围", exact: true }).click();
+  await presets(page).getByRole("button", { name: label, exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: PROFIT_COPY.customRangeLabel, exact: true });
+  await dialog.getByRole("button", { name: "确认", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+};
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 800 }]) {
+  test(`日期弹窗：快捷范围和手动时间确认后才查询，取消不改变当前范围（${viewport.width}）`, async (t) => {
+    const { page, profitReads, historyRequests } = await openDailyPage(t, { viewport });
+    const trigger = page.getByRole("button", { name: "选择时间范围", exact: true });
+    await trigger.getByText("2026-10-09", { exact: true }).first().waitFor();
+    const before = profitReads.length;
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: PROFIT_COPY.customRangeLabel, exact: true });
+    await dialog.waitFor();
+    await dialog.getByRole("button", { name: "昨天", exact: true }).click();
+    assert.equal(profitReads.length, before, "快捷选项只改变草稿");
+    assert.deepEqual(historyRequests, []);
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(profitReads.length, before);
+    await trigger.click();
+    assert.equal(await dialog.getByLabel("起始时间", { exact: true }).inputValue(), "2026-10-09T00:00");
+    await dialog.getByLabel("起始时间", { exact: true }).fill("2026-10-07T00:00");
+    await dialog.getByLabel("结束时间", { exact: true }).fill("2026-10-09T00:00");
+    assert.equal(profitReads.length, before);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "打开弹窗不横向溢出");
+    await page.waitForFunction(() => {
+      const root = document.querySelector('.jy-profit-range-popup'), panel = root?.querySelector('[role="dialog"]');
+      return root && getComputedStyle(root).opacity === "1" && panel?.getBoundingClientRect().width > 200;
+    });
+    const box = await dialog.boundingBox();
+    assert.ok(box.width > 200 && box.height > 150 && box.x >= 0 && box.x + box.width <= viewport.width && box.y >= 0 && box.y + box.height <= viewport.height, `弹窗完整留在屏幕内 ${JSON.stringify(box)}`);
+    if (process.env.UI_SHOT_DIR) {
+      await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/profit-date-open-${viewport.width}.png` });
+    }
+    await dialog.getByRole("button", { name: "确认", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    const expected = { preset: "custom", startMs: profitDayStart("2026-10-07"), endMs: profitDayStart(PROFIT_TODAY) };
+    assert.deepEqual(profitReads.at(-1), expected);
+    assert.deepEqual(historyRequests, [expected]);
+  });
+}
+
+test("日期弹窗：错误起止时间就近提示；Esc 关闭并返回范围按钮，原查询继续自动更新", async (t) => {
+  const { page, profitReads } = await openDailyPage(t, { clock: Date.parse(PROFIT_AS_OF) });
+  const trigger = page.getByRole("button", { name: "选择时间范围", exact: true });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: PROFIT_COPY.customRangeLabel, exact: true });
+  await dialog.getByLabel("起始时间", { exact: true }).fill("2026-10-09T10:00");
+  await dialog.getByLabel("结束时间", { exact: true }).fill("2026-10-09T09:00");
+  await dialog.getByRole("button", { name: "确认", exact: true }).click();
+  await dialog.getByRole("alert").getByText("请选择有效的起止时间，结束时间须晚于开始时间。", { exact: true }).waitFor();
+  assert.equal(profitReads.length, 1);
+  const polled = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/profit") && response.request().postDataJSON()?.refreshToday === true);
+  await page.clock.fastForward(61000); await polled;
+  assert.equal(await dialog.getByLabel("起始时间", { exact: true }).inputValue(), "2026-10-09T10:00", "自动刷新不重置正在编辑的草稿");
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await trigger.evaluate((node) => node === document.activeElement), true);
+  await page.locator('.jy-freshness[title="数据每 1 分钟自动刷新"]').waitFor();
+});
 
 test("每日利润默认打开今天：整页一次 POST /profit；页顶一句；四个数；今天不画柱状图；渠道表五列、按毛利从高到低、亏钱标红；合计等于顶上的数；最底下一句没绑定的渠道", async (t) => {
   const rows = [profitRow("rule-1", "Rule A", { income: 2.5, cost: 1 }), profitRow("rule-2", "Rule B", { income: 5, cost: 1 }), profitRow("rule-3", "Rule C", { income: 1, cost: 2 })];
@@ -994,9 +1057,12 @@ test("日期选择登记所选历史，今天和本月每分钟更新今日汇�
   assert.deepEqual(historyRequests, [{ preset: "yesterday" }]);
   await Promise.all([page.waitForResponse((response) => new URL(response.url()).pathname === "/api/reconciliation/profit" && response.request().postDataJSON()?.preset === "month"), pickPreset(page, PROFIT_COPY.presets.month)]); await freshness("数据每 1 分钟自动刷新"); assert.deepEqual(profitReads.at(-1), { preset: "month" });
   await advance(59000); await settle(); assert.equal(profitReads.length, 4); await advance(2000); await settle(); assert.deepEqual(profitReads.at(-1), { preset: "month", refreshToday: true }); assert.equal(profitReads.length, 5);
-  await pickPreset(page, PROFIT_COPY.presets.custom); await page.getByRole("button", { name: PROFIT_COPY.query, exact: true }).waitFor(); await freshness("当前时间范围不自动刷新，可点右侧刷新");
-  await advance(310000); await settle(); assert.equal(profitReads.length, 5); assert.equal(queries.length, 0);
-  assert.deepEqual(historyRequests, [{ preset: "yesterday" }, { preset: "month" }], "轮询和展开自选日期不重复申请历史");
+  await page.getByRole("button", { name: "选择时间范围", exact: true }).click();
+  await presets(page).getByRole("button", { name: PROFIT_COPY.presets.custom, exact: true }).click();
+  await freshness("数据每 1 分钟自动刷新");
+  await advance(20000); await settle(); assert.equal(profitReads.length, 5); assert.equal(queries.length, 0);
+  await page.getByRole("dialog", { name: PROFIT_COPY.customRangeLabel, exact: true }).getByRole("button", { name: "取消", exact: true }).click();
+  assert.deepEqual(historyRequests, [{ preset: "yesterday" }, { preset: "month" }], "编辑草稿和取消不提交历史查询");
 });
 
 test("上游编辑页的 Esc 先收起展开的日期面板，再交给抽屉关闭", async (t) => {

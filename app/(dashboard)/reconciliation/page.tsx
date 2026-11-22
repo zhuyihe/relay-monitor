@@ -5,15 +5,14 @@
 import "../../styles/pages/reconciliation.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { OWN_CONSUME_LOG_CHECKED } from "../../components/recheck-consume-log";
-import { Alert, App, Button, DatePicker, Drawer, Grid } from "antd";
+import { Alert, Button, Drawer, Grid } from "antd";
 import { api, readWorkflowDestination } from "../../../lib/client";
 import type { ProfitPageResponse, ProfitRow, WorkflowDestination } from "../../../lib/client";
 import { DESTINATION_CHANGED, workflowActionMeta } from "../../../lib/workflow-actions";
-import { sameReconciliationWindow } from "../../../lib/reconciliation-contract";
+import { reconciliationAccountingStart, sameReconciliationWindow } from "../../../lib/reconciliation-contract";
 import { INCOME_UNREAD, OWN_STATION_UNSET, formatZonedTime, formatZonedWindow } from "../../../lib/format";
 import { describeError, failureSentence } from "../../../lib/error-copy";
 import { ErrorState, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
-import { Seg } from "../../components/seg";
 import { Sym } from "../../components/icons";
 import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
@@ -21,27 +20,25 @@ import { loadWorkflowActions } from "../../components/use-workflow-actions";
 import { RECON_BUTTONS, SETUP_HREF } from "./recon-format";
 import { COPY } from "./copy";
 import { useProfitPage } from "./use-profit-page";
-import type { ProfitPreset, ProfitWindow } from "./use-profit-page";
+import type { ProfitWindow } from "./use-profit-page";
+import { ProfitRangePicker } from "./profit-range-picker";
 import { ProfitSummary } from "./profit-summary";
 import { ProfitChart } from "./profit-chart";
 import { ProfitTable } from "./profit-table";
 import { ProfitDetail, detailTitle } from "./profit-detail";
 import { footerNotes, isSingleDay, nextSort, rangeCaption, rangeDays, rowName } from "./profit-format";
 import type { Ctx, Sort, SortKey } from "./profit-format";
-import { dayKeyInTz, dayStartInTz, shiftDayLabel, shiftedDayStartInTz } from "../../../lib/business-time";
+import { dayKeyInTz } from "../../../lib/business-time";
 
-const { RangePicker } = DatePicker;
 // 从提醒或上游账单的链接进来时，链接指的那条绑定对不上（§8.1、§8.2）
 const REMOVED = describeError({ code: "RULE_NOT_FOUND" }).text;
-const PRESETS = (["today", "yesterday", "7d", "month", "since", "custom"] as ProfitPreset[]).map((value) => ({ value, label: COPY.presets[value] }));
 const UPSTREAMS_HREF = "/stations";
 const SETTINGS_HREF = "/settings";
 
 export default function ReconciliationPage() {
-  const { message } = App.useApp();
   const compact = !Grid.useBreakpoint().xl;
   const state = useProfitPage();
-  const { config, data, loading, querying, error, preset, activeWindow, switching, retryingKeys, retryErrors, detail } = state;
+  const { config, data, loading, querying, error, activeWindow, switching, retryingKeys, retryErrors, detail } = state;
   // null = 默认排法（看今天分三组，看别的范围按毛利排、已解绑的放最后）；点了表头才是按那一列排
   const [sort, setSort] = useState<Sort | null>(null);
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
@@ -105,11 +102,13 @@ export default function ReconciliationPage() {
   const drawerOpen = !!detail;
   useDrawerEscape(drawerOpen, closeDrawer);
 
+  const starts = rules.map(reconciliationAccountingStart).filter(Number.isFinite);
+  const sinceMs = starts.length ? Math.min(...starts) : undefined;
   const rangeControl = useMemo(
-    () => <div className="jy-range"><Seg label={COPY.rangeLabel} options={PRESETS} value={preset} onChange={state.selectPreset} /></div>,
-    // selectPreset 每次渲染新建，但只依赖 preset
+    () => <ProfitRangePicker value={activeWindow} range={state.loadedWindow === activeWindow ? data?.range : undefined} tz={tz || "Asia/Shanghai"} sinceMs={sinceMs} onApply={state.applyWindow} />,
+    // applyWindow 只接收新的范围；弹窗草稿由控件自己保存，自动刷新不重置正在编辑的日期。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [preset],
+    [activeWindow, state.loadedWindow, data?.range, tz, sinceMs],
   );
   const ready = !loading && !!config;
   useShellPage({ onRefresh: ready ? refresh : undefined, asOf: Number.isFinite(asOf) ? asOf : null, range: ready ? rangeControl : undefined, autoRefreshMs: state.pollMs, tz });
@@ -154,12 +153,6 @@ export default function ReconciliationPage() {
 
   return <div className="jy-page jy-profit-page">
     <div className="jy-profit-head">
-      {preset === "custom"
-        ? <div className="jy-profit-custom">
-          <RangePicker showTime value={state.range} onChange={(value) => state.setRange(value)} aria-label={COPY.customRangeLabel} />
-          <Button type="primary" loading={querying} onClick={() => void state.queryCustom().then((ok) => { if (!ok) message.warning(COPY.pickRange); })}>{COPY.query}</Button>
-        </div>
-        : null}
       <span className="jy-profit-caption">{switching ? "" : rangeCaption(page, ctx)}</span>
       {!switching && page.timing?.provisional ? <span className="jy-profit-timing">
         收入截至 {page.timing.incomeThroughMs == null ? "未确认" : formatZonedTime(page.timing.incomeThroughMs, tz)}
