@@ -45,6 +45,7 @@
 /* 渠道表 */
 .jy-profit-panel .jy-panel-head { flex-wrap: wrap; }
 .jy-profit-table-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.jy-profit-mobile-sort.ant-select { min-width: 110px; min-height: 44px; }
 .jy-profit-supplier-toggle { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0; border: 0; background: none; color: var(--jy-ink); text-align: left; font: inherit; cursor: pointer; }
 .jy-profit-supplier-toggle:focus-visible, .jy-profit-supplier-issue:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
 .jy-profit-supplier-toggle strong { font-weight: 600; overflow-wrap: anywhere; }

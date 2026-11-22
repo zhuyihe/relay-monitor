@@ -39,7 +39,7 @@ const SETTINGS_HREF = "/settings";
 
 export default function ReconciliationPage() {
   const { message } = App.useApp();
-  const compact = !Grid.useBreakpoint().md;
+  const compact = !Grid.useBreakpoint().xl;
   const state = useProfitPage();
   const { config, data, loading, querying, error, preset, activeWindow, switching, retryingKeys, retryErrors, detail } = state;
   // null = 默认排法（看今天分三组，看别的范围按毛利排、已解绑的放最后）；点了表头才是按那一列排
@@ -184,7 +184,7 @@ export default function ReconciliationPage() {
     {page.rows.length ? <div className={`jy-profit-chart-wrap${switching ? " jy-profit-switching" : ""}`}><ProfitChart page={page} ctx={ctx} compact={compact} /></div> : null}
 
     <ProfitTable
-      page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} detailDay={isSingleDay(page) ? rangeDays(page).first : null} hold={!!detail}
+      page={page} ctx={ctx} compact={compact} switching={switching} sort={sort} onSort={(key: SortKey) => setSort((current) => nextSort(current, key))} onSortChange={setSort} detailDay={isSingleDay(page) ? rangeDays(page).first : null} hold={!!detail}
       onOpenDetail={(row, day) => void state.openDetail(row, day)} onRetry={(row) => void retryRow(row)} onRefresh={() => void refresh()}
       retryingKeys={retryingKeys} retryErrors={retryErrors} empty={emptyAction}
       revealRuleId={destination?.ruleId}

@@ -4,7 +4,7 @@
 // 字都从 copy.ts 和 profit-format.ts 来，这里只负责摆。
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Alert, Button } from "antd";
+import { Alert, Button, Select } from "antd";
 import { RecheckConsumeLogButton } from "../../components/recheck-consume-log";
 import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { CountBadge, Panel } from "../../components/panel";
@@ -20,7 +20,7 @@ import type { Ctx, RowGroup, RowLayout, Sort, SortKey } from "./profit-format";
 
 type Props = {
   page: ProfitPageResponse; ctx: Ctx; compact: boolean; switching: boolean;
-  sort: Sort | null; onSort: (key: SortKey) => void;
+  sort: Sort | null; onSort: (key: SortKey) => void; onSortChange: (sort: Sort) => void;
   // 看一天时是这一天（点这一行、「计算明细」打开这天的明细），看多天是 null（行不能点）；hold：开着计算明细时列表先别动
   detailDay: string | null; hold: boolean;
   onOpenDetail: (row: ProfitRow, day: string) => void;
@@ -192,10 +192,12 @@ export function ProfitTable(props: Props) {
   // 开着计算明细或感叹号气泡时先别动，关掉再排（和上游列表同一个 keepOrder）
   const { groups, layout } = arrangeRows(page.rows, { today: isTodayView(page), sort }, ctx, lastLayout.current, props.hold || popOpen != null);
   lastLayout.current = layout;
-  const column = COLUMNS.find((item) => item.key === (sort ?? DEFAULT_SORT).key)!.label;
   return <Panel title={view === "suppliers" ? "供应商对账" : COPY.table.title} badge={view === "channels" ? <CountBadge count={page.counts.channels} muted /> : undefined} extra={<div className="jy-profit-table-controls">
     <Seg label="对账展示方式" options={[{ value: "suppliers", label: "供应商合计" }, { value: "channels", label: "渠道明细" }]} value={view} onChange={setView} />
-    {compact ? <span className="jy-caption">{COPY.table.mobileSort(column, (sort ?? DEFAULT_SORT).dir === "desc")}</span> : null}
+    {compact ? <Select size="small" className="jy-profit-mobile-sort" aria-label="对账排序" value={`${(sort ?? DEFAULT_SORT).key}:${(sort ?? DEFAULT_SORT).dir}`}
+      options={COLUMNS.flatMap((item) => (["desc", "asc"] as const).map((dir) => ({ value: `${item.key}:${dir}`, label: `${item.key === "name" && view === "suppliers" ? "供应商" : item.label} ${dir === "desc" ? "↓" : "↑"}` })))}
+      onChange={(value) => { const [key, dir] = value.split(":") as [SortKey, "asc" | "desc"]; props.onSortChange({ key, dir }); }}
+    /> : null}
   </div>}
     body={compact ? false : "flush"} className={`jy-profit-panel${switching ? " jy-profit-switching" : ""}`}>
     <div aria-busy={switching || undefined}>

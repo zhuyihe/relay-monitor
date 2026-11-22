@@ -194,8 +194,8 @@ const cardOf = (page, name) => page.locator(".jy-profit-card").filter({ has: pag
 const bangOf = (scope, name) => scope.getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}：`) });
 const presets = (page) => page.getByRole("group", { name: PROFIT_COPY.rangeLabel, exact: true });
 
-for (const viewport of [undefined, { width: 390, height: 844 }]) {
-  test(`供应商合计先显示，展开查看三组 Key；刷新当前范围且保留展开（${viewport ? "手机" : "桌面"}）`, async (t) => {
+for (const viewport of [undefined, { width: 768, height: 900 }, { width: 390, height: 844 }]) {
+  test(`供应商合计先显示，展开查看三组 Key；刷新当前范围且保留展开（${viewport ? `屏宽 ${viewport.width}` : "桌面"}）`, async (t) => {
     const { page, profitReads, queries } = await openDailyPage(t, { supplierView: true, viewport });
     const supplier = page.locator('[data-supplier-id="upstream-1"]');
     await supplier.getByText("$7.50", { exact: true }).waitFor();
@@ -209,6 +209,13 @@ for (const viewport of [undefined, { width: 390, height: 844 }]) {
     assert.deepEqual(profitReads.at(-1), { preset: "today", refreshToday: true, forceToday: true });
     assert.equal(await toggle.getAttribute("aria-expanded"), "true");
     assert.deepEqual(queries, [], "刷新不提交历史重结");
+    if (viewport) {
+      await page.getByRole("combobox", { name: "对账排序", exact: true }).click();
+      await page.getByText("收入 ↑", { exact: true }).click();
+      await page.getByRole("combobox", { name: "对账排序", exact: true }).click();
+      await page.getByText("收入 ↓", { exact: true }).click();
+      assert.ok((await page.locator('.jy-profit-mobile-sort').innerText()).includes("收入 ↓"));
+    }
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "页面不横向溢出");
   });
 }
