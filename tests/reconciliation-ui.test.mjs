@@ -83,6 +83,33 @@ function settleButtonLookups(page) {
 }
 const baseURL = process.env.RECONCILIATION_UI_BASE_URL || "http://127.0.0.1:3099";
 
+for (const width of [1440, 390]) test(`上游登录续期提醒：${width}px 显示登录链接，正常和网络故障不误报`, async (t) => {
+  const station = (id, code) => ({ id, name: id, type: 'sub2api-password', baseUrl: 'https://ccrouter.ai/', monitorEnabled: true,
+    balance: code ? { ok: false, code, error: code, checkedAt: new Date().toISOString() } : { ok: true, remaining: 100, checkedAt: new Date().toISOString() } });
+  const stations = [station('CCrouter', 'AUTHENTICATION_FAILED'), station('验证码上游', 'CAPTCHA_REQUIRED'),
+    station('网络故障', 'NETWORK_UNREACHABLE'), station('正常上游')];
+  const page = await openFixturePage(t, async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/auth/me') return fulfill(route, { username: 'fixture' });
+    if (path === '/api/stations') return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === '/api/meta') return fulfill(route, { types: UPSTREAM_TYPES, rules: {} });
+    if (path === '/api/reconciliation') return fulfill(route, { results: [], actions: [] });
+    throw new Error('unexpected renewal fixture API: ' + path);
+  }, { width, height: 900 }, false, route => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [] }), '/stations');
+  const note = page.getByRole('note', { name: 'CCrouter 登录授权提醒', exact: true });
+  await note.waitFor();
+  await note.getByText('请登录上游后更新授权。', { exact: true }).waitFor();
+  const link = note.getByRole('link', { name: '前往上游登录', exact: true });
+  assert.equal(await link.getAttribute('href'), 'https://ccrouter.ai/login');
+  assert.equal(await link.getAttribute('target'), '_blank');
+  assert.match(await link.getAttribute('rel'), /noopener/);
+  await page.getByRole('note', { name: '验证码上游 登录授权提醒', exact: true }).waitFor();
+  assert.equal(await page.getByRole('note', { name: '网络故障 登录授权提醒', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('note', { name: '正常上游 登录授权提醒', exact: true }).count(), 0);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/renewal-${width}.png`, fullPage: true });
+});
+
 const window = { preset: "yesterday", startMs: 1791388800000, endMs: 1791475200000, timezone: "Asia/Shanghai" };
 const billingSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.test", accountId: "1", namespaceKey: "d1a1290bfda92d88694126df4ddb3d0f26a6cca87938341857157cd4cc399d83" };
 const amountBasis = { id: "channel-billing-usd-v3", currency: "USD", billingSource: "channel-log-stat", calculationVersion: 3, conversion: "quota_per_unit" };
@@ -1167,7 +1194,7 @@ async function openIssuePage(t, viewport, { code = "AUTHENTICATION_FAILED" } = {
   return { page, tests };
 }
 
-test("上游列表：读不到余额的问题收进名字后面的感叹号——行高不变、悬停一句、点开气泡（原因、数据截至、详细原因、测试读取、更新登录信息）", async (t) => {
+test("上游列表：读不到余额的问题收进名字后面的感叹号，登录问题补充续期跳转，气泡保留详细原因和更新入口", async (t) => {
   const { page, tests } = await openIssuePage(t, undefined);
   await page.setViewportSize({ width: 1440, height: 900 });
   const table = page.locator(".jy-stations-table");
@@ -1176,7 +1203,8 @@ test("上游列表：读不到余额的问题收进名字后面的感叹号—�
   assert.equal(await table.locator(".jy-stations-issue").count(), 0, "不再另起一行写原因");
   assert.equal(await table.locator("tbody tr").count(), 2, "没有多出来的说明行");
   const bang = row.getByRole("button", { name: /邮箱密码登录：读不到/ });
-  assert.ok(Math.abs((await row.boundingBox()).height - (await other.boundingBox()).height) < 4, "行高不变");
+  assert.equal(await row.getByRole("link", { name: "前往上游登录", exact: true }).isVisible(), true);
+  assert.equal(await other.getByRole("link", { name: "前往上游登录", exact: true }).count(), 0);
   await bang.hover();
   const tip = page.getByRole("tooltip").getByText(/^读不到：登录信息不对或过期了 · 数据截至/); await tip.waitFor();
   if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/issue-hover-1440x900.png` });

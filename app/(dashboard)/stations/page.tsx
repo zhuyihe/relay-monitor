@@ -20,7 +20,7 @@ import { balanceMoneyOf, rateSnapshotOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { failureText, refreshAllText, refreshOneText } from "../../../lib/error-copy";
-import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES } from "../../../lib/channel-onboarding.js";
+import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, onboardingBaseUrl } from "../../../lib/channel-onboarding.js";
 import { EmptyState, ErrorState, RefreshFailedBanner, Skeleton } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
@@ -109,6 +109,8 @@ const COPY = Object.freeze({
   demo: "演示",
   noAddress: `还没填${CREDENTIAL_FIELDS.baseUrl.label}`,
   refreshing: "正在刷新",
+  renewal: "请登录上游后更新授权。",
+  loginUpstream: "前往上游登录",
   // 这个上游的数据比别的上游旧两轮刷新以上时，状态格下一行写「数据截至 14:20」（ui-copy-spec §6）
   staleTip: "后面几次刷新都没读到这个上游的新数据",
   // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 个问题」，「⋯」里「按钮名：标题」
@@ -658,6 +660,15 @@ export default function StationsPage() {
   // 读不到余额的问题收进名字后面的红色感叹号：悬停一句，点开小气泡（第一句是原因或测试读取的结果、数据截至、详细原因、测试读取；
   // 登录信息、权限、人机验证这三类多一个「更新登录信息」，打开编辑抽屉、停在登录那一栏）。行高不变
   const loginFieldOf = (type: string) => (type === "sub2api-password" ? "password" : type === "newapi-key" ? "apiKey" : "accessToken") as "password" | "apiKey" | "accessToken";
+  const renewalNotice = (v: StationView) => {
+    if (v.archived || !v.s.type?.startsWith("sub2api") || !["auth", "captcha"].includes(String(v.issue?.category))) return null;
+    const baseUrl = onboardingBaseUrl(v.s.baseUrl);
+    if (!baseUrl) return null;
+    return <div className="jy-stations-renewal" role="note" aria-label={`${stationDisplayName(v.s)} 登录授权提醒`}>
+      <span>{COPY.renewal}</span>
+      <Button type="link" size="small" href={`${baseUrl}/login`} target="_blank" rel="noopener noreferrer" icon={<Icon name="external" />}>{COPY.loginUpstream}</Button>
+    </div>;
+  };
   const issueBang = (v: StationView, mobile = false) => {
     const popKey = `${mobile ? "m" : "t"}:${v.id}`; // 表格和手机卡片各一个，只开被点的那个
     const issue = v.issue;
@@ -745,7 +756,7 @@ export default function StationsPage() {
     return (
       <>
         {label ? <StatusText level={level}>{label}</StatusText> : null}
-        {note ? subLine(note, stale) : null}
+        {renewalNotice(v) || (note ? subLine(note, stale) : null)}
       </>
     );
   };
@@ -1047,6 +1058,7 @@ export default function StationsPage() {
             const { label, level, note, stale, title } = statusOf(v);
             const todo = todoAction(v, true);
             const refreshing = !!refreshingIds[v.s.id];
+            const renewal = renewalNotice(v);
             // 手机上一张卡片两行（ui-design-spec §4.7、§5.2）：名称、状态、「⋯」；余额 · 可用天数，后面带正在刷新或数据截至。
             // 有要处理的事时多一行标题和按钮。余额只写金额；小图、刷新、编辑、余额趋势都在「⋯」里。
             return (
@@ -1072,6 +1084,7 @@ export default function StationsPage() {
                   {!v.archived && !v.s.isOwn && BINDABLE_UPSTREAM_TYPES.includes(v.s.type) && channelOptions.options?.ok ? <span>{CHANNEL_BINDING.column} {channelCell(v)}</span> : null}
                   {refreshing || stale ? subLine(note!, stale) : null}
                 </div>
+                {renewal ? <div className="m-todo-line">{renewal}</div> : null}
                 {todo ? (
                   <div className="m-todo-line">
                     {title ? <span className="m-title" title={title}>{title}</span> : null}
