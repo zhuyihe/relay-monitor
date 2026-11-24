@@ -4175,12 +4175,12 @@ test("Sub2API 密码/邮箱变更废弃元数据缓存，JWT 自动续期不改�
   stations[0].s2Tokens = { accessToken: "rotated-jwt", expiresAt: Date.now() + 1000000 };
   await module.getUpstreamKeys("upstream");
   assert.equal(requests.filter((request) => request.path === "/api/v1/keys").length, 1);
-  Object.assign(stations[0], { email: "new@example.test", password: "new-password", authVersion: 2 });
+  Object.assign(stations[0], { email: "new@example.test", password: "new-password", authVersion: 2, s2Tokens: null });
   await module.getUpstreamKeys("upstream");
   const keys = requests.filter((request) => request.path === "/api/v1/keys");
   assert.equal(keys.length, 2);
   assert.equal(keys.at(-1).auth, "Bearer new-password");
-  assert.equal(stations[0].s2Tokens.accessToken, "rotated-jwt", "账单查询只使用临时连接");
+  assert.equal(stations[0].s2Tokens.accessToken, "new-password", "改密后重新登录的会话留给后续余额、账单共用");
 });
 
 test("目录在创建取数期间变化时，即使新的待核对状态稳定也不能提交过期确认", async (t) => {
@@ -6219,7 +6219,7 @@ test("U06 actual identity/metadata冲突与每个await业务版本漂移均拒�
   });
 });
 
-test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立核验且共享JWT不写", async (t) => {
+test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立核验且只更新会话缓存", async (t) => {
   t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
   const f = upstreamReadFixture(t, "sub2api-password"), before = structuredClone(f.store.data);
   const first = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
@@ -6236,6 +6236,8 @@ test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone�
   assert.deepEqual([unknown.probe.amountUsd, unknown.probe.knownAmountUsd, unknown.probe.actualCostUsd], [null, null, null]);
   assert.equal(unknown.probe.capability.state, "unsupported");
   assert.doesNotMatch(JSON.stringify([first, zero, otherZone, unknown]), /raw-|saved-password|fresh-auto|stored-auto|accessToken/);
+  assert.equal(f.station.s2Tokens.accessToken, "fresh-auto-jwt");
+  before.stations[0].s2Tokens = f.station.s2Tokens;
   assert.deepEqual(f.store.data, before);
 });
 
@@ -10030,6 +10032,7 @@ function upstreamReadFixture(t, type = "newapi") {
     if (url.pathname === "/api/log/self/stat") return reply(200, { quota: state.quota, accessToken: "raw-secret" });
     if (url.pathname === "/api/v1/settings/public") return reply(200, { turnstile_enabled: false });
     if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
+    if (url.pathname === "/api/v1/auth/refresh") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
     if (url.pathname === "/api/v1/keys") return state.directoryError ? reply(403, null)
       : reply(200, { total: 1, items: [{ id: 9, user_id: state.accountId, name: "actual-key", status: "active", group_id: null, key: "raw-call-secret" }] });
     if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, null);

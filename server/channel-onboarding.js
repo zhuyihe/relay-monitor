@@ -429,7 +429,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         || typeof expected?.accountId !== "string" || !expected.accountId.trim()) {
       throw previewFailure("IDENTITY_UNVERIFIED", "请先测试读取，确认这个上游现在是哪个上游账号");
     }
-    const version = input.resourceVersion, expectedAuthVersion = station.authVersion || 1, connection = structuredClone(station);
+    const version = input.resourceVersion, expectedAuthVersion = station.authVersion || 1, connection = { ...station };
     const assertCurrent = () => {
       if (stationBusinessVersion(rt.store.get(stationId)) !== version) {
         throw previewFailure("RESOURCE_CHANGED", "这个上游在这期间改过，请重新预览");
@@ -536,7 +536,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     for (const id of input.targetStationIds) {
       const station = rt.store.get(id), skipped = authorizationExcluded(station, identity);
       if (skipped) { excluded.push({ stationId: id, ...skipped }); continue; }
-      const version = resourceVersionOf(station), copy = structuredClone(station);
+      const version = resourceVersionOf(station), copy = { ...station };
       try {
         const actual = storedIdentity(station) || await queryIdentity(copy);
         if (!sameIdentity(actual, identity) || station.verifiedIdentity && !sameIdentity(actual, station.verifiedIdentity)) {
@@ -878,7 +878,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (candidate.type === "newapi-key") {
         if (!sameCredentials(candidate, item.connection)) continue;
       } else {
-        try { identity = await queryIdentity(structuredClone(candidate)); } catch { unknown = true; continue; }
+        try { identity = await queryIdentity({ ...candidate }); } catch { unknown = true; continue; }
         if (!item.identity || !sameIdentity(identity, item.identity)) continue;
         if (candidate.verifiedIdentity && !sameIdentity(candidate.verifiedIdentity, identity)) {
           throw Object.assign(new Error("已保存的上游现在读到的是另一个上游账号，请去确认"), { code: "ACCOUNT_IDENTITY_CHANGED" });
@@ -1504,7 +1504,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     } catch { sourceMatches = false; }
     async function verifySaved(station) {
       if (!verified.has(station.id)) verified.set(station.id, (async () => {
-        const version = stationBusinessVersion(station), copy = structuredClone(station);
+        const version = stationBusinessVersion(station), copy = { ...station };
         try {
           const identity = ACCOUNT_TYPES.includes(copy.type) ? await queryIdentity(copy) : null;
           if (station.verifiedIdentity && identity && !sameIdentity(station.verifiedIdentity, identity)) return null;

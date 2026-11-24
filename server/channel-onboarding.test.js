@@ -254,7 +254,9 @@ for (const type of ["newapi", "sub2api", "sub2api-password"]) {
     const f = await legacyIdentityFixture(t, type), original = structuredClone(f.store.get(f.id)), history = structuredClone(f.state.history);
     const before = await f.rt.channelOnboarding.listAccounts(); assert.equal(before.accounts.length, 0); assert.equal(before.unverifiedResources.length, 1);
     const read = await f.rt.reconciliation.getUpstreamKeys(f.id, { force: true });
-    assert.equal(read.identity.accountId, "42"); assert.deepEqual(f.store.get(f.id), original); assert.equal(f.state.commits, 0);
+    assert.equal(read.identity.accountId, "42");
+    original.s2Tokens = f.store.get(f.id).s2Tokens; // 只缓存登录会话，业务配置和身份尚未写入。
+    assert.deepEqual(f.store.get(f.id), original); assert.equal(f.state.commits, 0);
     const response = await f.http({ identity: read.identity, resourceVersion: read.resourceVersion,
       verifiedIdentity: { provider: "newapi", baseUrl: "https://forged.test", accountId: "999" }, monitorEnabled: false, includeInProfit: true });
     const saved = await response.json(); assert.equal(response.status, 200); assert.equal(saved.stationId, f.id);
@@ -269,6 +271,21 @@ for (const type of ["newapi", "sub2api", "sub2api-password"]) {
     assert.equal(f.state.commits, commits, "current repeated confirmation is idempotent");
     await f.restart(); assert.equal((await f.rt.channelOnboarding.listAccounts()).accounts[0].resources[0].id, f.id);
     assert.deepEqual(withoutIdentity(f.store.get(f.id)), withoutIdentity(original)); assert.deepEqual(f.state.history, history);
+  });
+}
+
+for (const type of ["sub2api", "sub2api-password"]) {
+  test(`${type} 确认账号时续期更新原会话并落盘，重启后不使用已作废的旧续期凭证`, async (t) => {
+    const f = await legacyIdentityFixture(t, type), station = f.store.get(f.id);
+    station.s2Tokens = { site: "https://same.test:443", accessToken: "old-access", refreshToken: "old-refresh", expiresAt: 1 };
+    const response = await f.http({ identity: { provider: "sub2api", baseUrl: station.baseUrl, accountId: "42" },
+      resourceVersion: stationBusinessVersion(station) });
+    assert.equal(response.status, 200);
+    assert.notEqual(f.store.get(f.id).s2Tokens.refreshToken, "old-refresh");
+    const refreshed = f.store.get(f.id).s2Tokens.refreshToken;
+    assert.equal(f.state.requests.filter(request => request.path.endsWith('/auth/refresh')).length, 1);
+    await f.restart();
+    assert.equal(f.store.get(f.id).s2Tokens.refreshToken, refreshed);
   });
 }
 

@@ -35,7 +35,7 @@ function clearHiddenCredentials(station) {
 function importedSub2Session(input) {
   if (input.session == null) return null;
   const session = input.session;
-  if (input.type !== "sub2api" || typeof session.accessToken !== "string" || !session.accessToken.trim()
+  if (!["sub2api", "sub2api-password"].includes(input.type) || typeof session.accessToken !== "string" || !session.accessToken.trim()
       || typeof session.refreshToken !== "string" || !session.refreshToken.trim()
       || !Number.isFinite(session.expiresAt) || session.expiresAt <= 0) {
     throw Object.assign(new Error("登录授权不完整，请重新登录后导入授权"), { code: "INVALID_SUB2_SESSION" });

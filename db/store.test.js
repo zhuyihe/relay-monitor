@@ -31,6 +31,19 @@ test("旧站点数据升级时默认保持续费", async () => {
   assert.equal(store.get("old").authVersion, 1);
 });
 
+test("密码模式可导入人工验证后的会话，保留账密供续期失效后重新登录", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "sub2api", baseUrl: "https://session.test", accessToken: "old-jwt" });
+  const session = { accessToken: "authorized-jwt", refreshToken: "authorized-refresh", expiresAt: Date.now() + 3600000 };
+  await store.update(station.id, { type: "sub2api-password", email: "a@example.test", password: "secret", session });
+  assert.equal(station.email, "a@example.test");
+  assert.equal(station.password, "secret");
+  assert.equal(station.s2Tokens.refreshToken, session.refreshToken);
+  assert.equal(station.accessToken, "");
+  await store.update(station.id, { name: "CCrouter" });
+  assert.equal(station.s2Tokens.accessToken, session.accessToken);
+});
+
 test("暂停和恢复保留原成本设置、费率及实际持久化值", async (t) => {
   for (const includeInProfit of [true, false]) await t.test(String(includeInProfit), async (t) => {
     const pool = fakePool(), conn = await pool.getConnection(), store = new Store(pool);
