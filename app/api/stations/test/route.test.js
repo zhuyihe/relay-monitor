@@ -10,7 +10,7 @@ async function route() {
     if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true,
       source: "export const withAuth = (handler) => handler; export const json = (value, status = 200) => Response.json(value, { status });" };
     if (url.endsWith("/lib/providers.js")) return { format: "module", shortCircuit: true, source: [
-      "export const STATION_TYPES = [{ value: \"newapi\" }, { value: \"newapi-key\" }, { value: \"sub2api-password\" }, { value: \"fixed\" }];",
+      "export const STATION_TYPES = [{ value: \"newapi\" }, { value: \"newapi-key\" }, { value: \"fixed\" }];",
       "export async function queryStation(station) { globalThis.__stationTestCalls.push(station); return { result: { ok: true, latencyMs: 1, remaining: 1 } }; }",
     ].join("\n") };
     return nextLoad(url, context);
@@ -21,24 +21,6 @@ async function route() {
 const saved = { id: "s1", type: "newapi", baseUrl: "https://a.example", accessToken: "tok-saved", userId: "7" };
 const rt = { store: { list: () => [saved] } };
 const post = (body) => new Request("https://local.test/api/stations/test", { method: "POST", body: JSON.stringify(body) });
-
-test("余额测试沿用独立 Key；编辑账单密码仍测试登录授权，换站点不会带走旧 Key", async (t) => {
-  t.after(() => { delete globalThis.__stationTestCalls; });
-  const { POST } = await route();
-  const station = { id: 'sub2', type: 'sub2api-password', baseUrl: 'https://a.example', email: 'a@example.test', password: 'saved-password', balanceApiKey: 'balance-secret' };
-  const rt = { store: { list: () => [station] } };
-  const ask = async extra => (await POST(post({ stationId: station.id, type: station.type, ...extra }), rt)).json();
-  assert.equal((await ask({})).ok, true);
-  assert.equal(globalThis.__stationTestCalls.at(-1).balanceApiKey, station.balanceApiKey);
-  assert.equal((await ask({ password: 'changed-password' })).ok, true);
-  assert.equal(globalThis.__stationTestCalls.at(-1).balanceApiKey, '');
-  const count = globalThis.__stationTestCalls.length;
-  assert.equal((await ask({ baseUrl: 'https://other.test' })).code, 'ENDPOINT_CHANGED_SECRET_REQUIRED');
-  assert.equal(globalThis.__stationTestCalls.length, count);
-  assert.equal((await ask({ baseUrl: 'https://other.test', balanceApiKey: 'new-balance-secret' })).ok, true);
-  assert.equal(globalThis.__stationTestCalls.at(-1).password, '');
-  assert.equal(globalThis.__stationTestCalls.at(-1).balanceApiKey, 'new-balance-secret');
-});
 
 test("测试读取：同一站点（含只改路径、没带地址）留空的令牌用已保存的；换了站点就不发出去，带 ENDPOINT_CHANGED_SECRET_REQUIRED", async (t) => {
   t.after(() => { delete globalThis.__stationTestCalls; });

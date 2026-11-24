@@ -18,7 +18,7 @@ export function dailySpendOf(rt, station, today = null) {
 }
 
 export function redact(rt, s) {
-  const { accessToken, apiKey, balanceApiKey, password, s2Tokens, keyAgentSecret, onboardingOrigin, authorizationUpdateRef, alertState, ...rest } = s;
+  const { accessToken, apiKey, password, s2Tokens, keyAgentSecret, onboardingOrigin, authorizationUpdateRef, alertState, ...rest } = s;
   const balance = s.balance && !s.balance.ok
     ? { ...s.balance, error: connectionDiagnostic(s.balance.error, s) }
     : s.balance;
@@ -28,7 +28,6 @@ export function redact(rt, s) {
     balance,
     hasAccessToken: !!accessToken,
     hasApiKey: !!apiKey,
-    hasBalanceApiKey: !!balanceApiKey,
     hasPassword: !!password,
     hasKeyAgentSecret: !!keyAgentSecret,
     tokenInfo: s2Tokens

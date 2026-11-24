@@ -31,29 +31,6 @@ test("旧站点数据升级时默认保持续费", async () => {
   assert.equal(store.get("old").authVersion, 1);
 });
 
-test("余额查询 Key 独立保存，替换或清空不重置登录会话、身份和对账授权版本", async () => {
-  const store = new Store(fakePool());
-  const session = { accessToken: 'account-jwt', refreshToken: 'account-refresh', expiresAt: Date.now() + 3600000 };
-  const identity = { provider: 'sub2api', baseUrl: 'https://balance.test', accountId: '258' };
-  const station = await store.add({ type: 'sub2api-password', baseUrl: identity.baseUrl, email: 'a@example.test', password: 'password', session },
-    { verifiedIdentity: identity });
-  const version = stationBusinessVersion(station), authVersion = station.authVersion, verifiedIdentity = structuredClone(station.verifiedIdentity);
-  for (const balanceApiKey of ['balance-key', 'replacement-key', '']) {
-    await store.update(station.id, { balanceApiKey });
-    assert.equal(station.balanceApiKey, balanceApiKey);
-    assert.equal(station.authVersion, authVersion);
-    assert.equal(stationBusinessVersion(station), version);
-    assert.equal(station.s2Tokens.refreshToken, session.refreshToken);
-    assert.deepEqual(station.verifiedIdentity, verifiedIdentity);
-    assert.equal(station.password, 'password');
-  }
-  await store.update(station.id, { balanceApiKey: 'balance-key' });
-  await assert.rejects(store.update(station.id, { baseUrl: 'https://other.test', email: 'b@example.test', password: 'new-password' }),
-    { code: 'ENDPOINT_CHANGED_SECRET_REQUIRED' });
-  await store.update(station.id, { type: 'newapi', accessToken: 'new-token' });
-  assert.equal(station.balanceApiKey, '');
-});
-
 test("密码模式可导入人工验证后的会话，保留账密供续期失效后重新登录", async () => {
   const store = new Store(fakePool());
   const station = await store.add({ type: "sub2api", baseUrl: "https://session.test", accessToken: "old-jwt" });
