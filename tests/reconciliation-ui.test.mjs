@@ -1084,7 +1084,8 @@ test("日期选择登记所选历史，今天和本月每分钟更新今日汇�
   await advance(310000); await settle(); assert.equal(profitReads.length, 3);
   assert.deepEqual(historyRequests, [{ preset: "yesterday" }]);
   await Promise.all([page.waitForResponse((response) => new URL(response.url()).pathname === "/api/reconciliation/profit" && response.request().postDataJSON()?.preset === "month"), pickPreset(page, PROFIT_COPY.presets.month)]); await freshness("数据每 1 分钟自动刷新"); assert.deepEqual(profitReads.at(-1), { preset: "month" });
-  await advance(59000); await settle(); assert.equal(profitReads.length, 4); await advance(2000); await settle(); assert.deepEqual(profitReads.at(-1), { preset: "month", refreshToday: true }); assert.equal(profitReads.length, 5);
+  // 浏览器的钟仍随真实操作时间走，给日期弹窗和响应留余量，再跨过一分钟检查刷新。
+  await advance(50000); await settle(); assert.equal(profitReads.length, 4); await advance(11000); await settle(); assert.deepEqual(profitReads.at(-1), { preset: "month", refreshToday: true }); assert.equal(profitReads.length, 5);
   await page.getByRole("button", { name: "选择时间范围", exact: true }).click();
   await presets(page).getByRole("button", { name: PROFIT_COPY.presets.custom, exact: true }).click();
   await freshness("数据每 1 分钟自动刷新");
@@ -2456,6 +2457,7 @@ test("余额趋势「每天花了多少」：「加进来」的字在图顶上�
   // 线靠左时字在线的右边
   const left = await openTrendDaily(t, { state: "ok", source: "upstream", since: "2026-10-12", todayEstimate: false, days: keys.map((day) => ({ day, usd: 40 })) });
   const leftLabel = left.modal.locator(".jy-trend-daily .jy-bars-marker"); await leftLabel.waitFor();
+  await left.modal.evaluate((el) => new Promise((resolve) => { let last = ""; let same = 0; const tick = () => { const r = JSON.stringify(el.getBoundingClientRect()); same = r === last ? same + 1 : 0; last = r; same >= 5 ? resolve(null) : requestAnimationFrame(tick); }; tick(); }));
   assert.ok((await leftLabel.boundingBox()).x >= (await left.modal.locator(".jy-trend-daily .day-rule").boundingBox()).x - 1, "线靠左时字在线的右边");
 });
 
@@ -3578,7 +3580,7 @@ test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 PO
   assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
   await advance(290000); await settle(); assert.equal(profitReads.length, before, "5 分钟以前不读");
   await advance(20000); await settle(); assert.equal(profitReads.length, before + 1, "5 分钟到了重读一次");
-  assert.deepEqual(profitReads.at(-1), { preset: "yesterday" }, "不带 force、不带 observe");
+  assert.deepEqual(profitReads.at(-1), { preset: "yesterday", refreshToday: true }, "普通重读不带 force、observe，也不重新登记历史范围");
   await page.locator(`.jy-freshness[title="当前时间范围不自动刷新，可点右侧刷新"]`).waitFor();
   await advance(600000); await settle(); assert.equal(profitReads.length, before + 1, "已固定以后不再读");
 });
@@ -3908,7 +3910,7 @@ test("用户运营·手机：用户表是一人一张卡片，筛选三行、没
   const box = (locator) => locator.evaluate((node) => { const rect = node.getBoundingClientRect(); return { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width) }; });
   const [scope, big, group, status] = [await box(usersGroup(page, USERS_COPY.users.scopeLabel)), await box(page.locator(".jy-users-bigcheck")), await box(page.locator(".jy-users-group")), await box(usersGroup(page, USERS_COPY.users.filterLabel))];
   assert.ok(scope.top < big.top && Math.abs(big.top - group.top) < 24 && big.left < group.left && Math.max(big.top, group.top) < status.top, JSON.stringify({ scope, big, group, status }));
-  assert.deepEqual(await page.getByRole("tab").allInnerTexts().then((list) => list.map((text) => text.replace(/\s+/g, " ").trim())), ["概览", "用户", "流失"], "页签只有三个，都能点");
+  assert.deepEqual(await page.getByRole("tab").allInnerTexts().then((list) => list.map((text) => text.replace(/\s+/g, " ").trim())), ["概览", "用户", "渠道分组消费", "流失"], "四个页签都能点");
   assert.match(await cards.first().innerText(), /u001[\s\S]*vip · 最近使用/);
   const hierarchy = await cards.first().evaluate((card) => {
     const balance = card.querySelector(".jy-users-balance"), today = card.querySelector(".jy-users-today");
@@ -3997,7 +3999,7 @@ test("采购系数不改变主站单位：摘要、行、明细都显示成本 3
   const table = rowOf(page, "Rule A");
   assert.match(await table.innerText(), /\$30\.00/);
   assert.match(await table.innerText(), /\$70\.00/);
-  await page.locator(".jy-profit-notes").getByText("今日利润为暂估", { exact: false }).waitFor();
+  await page.locator(".jy-profit-timing").getByText("今日利润暂估", { exact: false }).waitFor();
   await page.locator(".jy-profit-notes").getByText("历史记录未改写", { exact: false }).waitFor();
   await table.click();
   const drawer = page.locator(".jy-profit-detail");
@@ -4013,7 +4015,7 @@ test("收入读取失败时，页顶和说明不冒充已读到现在，保留�
     timing: { incomeThroughMs: null, costThroughMs: Date.parse(PROFIT_AS_OF), provisional: true } };
   const { page } = await openDailyPage(t, { rows: [row], pageOf: () => result });
   await page.locator(".jy-profit-caption").getByText("数据截止时间未确认", { exact: false }).waitFor();
-  await page.locator(".jy-profit-notes").getByText("收入截至 未确认", { exact: false }).waitFor();
+  await page.locator(".jy-profit-timing").getByText("收入截至 未确认", { exact: false }).waitFor();
   assert.equal(await page.locator(".jy-freshness").count(), 0);
   assert.doesNotMatch(await page.locator(".jy-profit-caption").innerText(), /0:00–11:00/);
 });
@@ -4036,12 +4038,12 @@ test("用户运营·今天开始消费的用户：近7天和今天一致，14天
     assert.equal(await row.locator(".jy-users-week").innerText(), formatted);
     const cells = await row.locator("td").allInnerTexts();
     assert.ok(cells.includes(formatted), "今天列显示同一金额");
-    const amountTops = await row.evaluate((element) => [".jy-users-week", ".jy-users-today", ".jy-users-balance"].map((selector) => {
+    const amountBottoms = await row.evaluate((element) => [".jy-users-week", ".jy-users-today", ".jy-users-balance"].map((selector) => {
       const range = document.createRange();
       range.selectNodeContents(element.querySelector(selector));
-      return range.getBoundingClientRect().top;
+      return range.getBoundingClientRect().bottom;
     }));
-    assert.ok(Math.max(...amountTops) - Math.min(...amountTops) <= 1, `同一行的三个金额应对齐：${amountTops.join(", ")}`);
+    assert.ok(Math.max(...amountBottoms) - Math.min(...amountBottoms) <= 1, `同一行金额文字底部应对齐，余额保留更大字号：${amountBottoms.join(", ")}`);
     const values = full.users.find((user) => user.username === name).spark;
     assert.equal(values.at(-1), amount);
     assert.equal(values.slice(0, -1).reduce((sum, value) => sum + value, 0), 0);
