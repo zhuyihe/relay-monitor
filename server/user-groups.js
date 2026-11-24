@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { businessTimeZone, dayKeyInTz, dayStartInTz } from "../lib/business-time.js";
 import { presetTimeRange } from "../lib/time-range.js";
-import { QUOTA_PER_UNIT, queryOwnData, queryOwnFlow } from "../lib/providers.js";
+import { QUOTA_PER_UNIT, queryOwnData, queryOwnFlow, queryOwnGroupRatios } from "../lib/providers.js";
 import { OWN_RATE_LIMIT, ownRequestState } from "../lib/own-request-budget.js";
 
 const HOUR = 3600000, HISTORY_TTL = 10 * 60000, PAGE_SIZE = 50;
@@ -19,7 +19,8 @@ export function resolveUserGroupsWindow(input, now = Date.now(), tz = businessTi
 }
 
 // 保留原始额度再汇总；同组内的模型、渠道和 Key 只做加总，不重新乘倍率。
-export function buildUserGroupPage({ directory, current = [], usage = [], flow = [], ready, live, startMs, endMs, asOf, balanceAt, rate, paused, error = null, intervalMs, tz, preset }, input = {}) {
+export function buildUserGroupPage({ directory, current = [], usage = [], flow = [], ready, live, startMs, endMs, asOf, balanceAt, rate, paused, error = null, intervalMs, tz, preset,
+  ratios = null, ratiosAt = null, ratiosError = null }, input = {}) {
   const totals = new Map(), grouped = new Map(), currentByName = new Map(current.map(user => [user.username, user]));
   for (const row of usage) {
     const name = row.username ?? row.key;
@@ -46,8 +47,13 @@ export function buildUserGroupPage({ directory, current = [], usage = [], flow =
     return { id: user.id, username: user.username, disabled: user.status !== 1, big: previous?.big || false,
       balanceUsd: user.quotaUsd ?? previous?.balanceUsd ?? null, days: previous?.days ?? null, runwayState: previous?.runwayState ?? "unknown",
       total: ready ? total.quota / QUOTA_PER_UNIT : null, requests: ready ? total.requests : null, pending,
-      groups: !ready || assigned > total.quota ? null : groups.map(group => ({ name: group.name, amount: group.quota / QUOTA_PER_UNIT, requests: group.requests,
-        share: total.quota > 0 ? group.quota / total.quota : 0, pending: group.pending === true })) };
+      groups: !ready || assigned > total.quota ? null : groups.map(group => {
+        const special = group.name == null ? null : ratios?.overrides[user.group]?.[group.name] ?? null;
+        const ratio = special ?? (group.name == null ? null : ratios?.base[group.name] ?? null);
+        return { name: group.name, amount: group.quota / QUOTA_PER_UNIT, requests: group.requests, ratio,
+          ratioSource: ratio == null ? null : special != null ? "user" : "group",
+          share: total.quota > 0 ? group.quota / total.quota : 0, pending: group.pending === true };
+      }) };
   }).filter(user => !user.disabled || user.total > 0);
   const groupNames = [...new Set(allRows.flatMap(user => user.groups || []).filter(group => group.name != null).map(group => group.name))].sort((a, b) => a.localeCompare(b));
   const q = String(input.q || "").trim().toLowerCase(), group = input.channelGroup || "", sort = ["amount", "balance", "user"].includes(input.sort) ? input.sort : "amount", dir = input.dir === "asc" ? 1 : -1;
@@ -62,14 +68,14 @@ export function buildUserGroupPage({ directory, current = [], usage = [], flow =
   });
   const pages = Math.max(1, Math.ceil(matched.length / PAGE_SIZE)), page = Math.min(pages, Math.max(1, Math.floor(Number(input.page)) || 1));
   const selected = allRows.find(user => Number(user.id) === Number(input.user));
-  return { preset, startMs, endMs, asOf, balanceAt, rate, tz, paused, error, starting: !ready, intervalMs, channelGroups: groupNames,
+  return { preset, startMs, endMs, asOf, balanceAt, rate, tz, paused, error, ratiosAt, ratiosError, starting: !ready, intervalMs, channelGroups: groupNames,
     hasUnclassified: allRows.some(user => user.groups?.some(item => item.name == null && !item.pending)), pendingUsers: allRows.filter(user => user.pending).length,
     selectedUser: selected ? { ...selected, shownAmount: selected.total, shownGroups: selected.groups } : null,
     summary: { users: matched.length, amount: ready ? matched.reduce((sum, user) => sum + (user.shownAmount || 0), 0) : null },
     list: { rows: matched.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), total: matched.length, page, pages, pageSize: PAGE_SIZE } };
 }
 
-export async function userGroupsPage(rt, { own, page, directory, ops, input, refresh = false, now = Date.now(), readers = { user: queryOwnData, flow: queryOwnFlow } }) {
+export async function userGroupsPage(rt, { own, page, directory, ops, input, refresh = false, now = Date.now(), readers = { user: queryOwnData, flow: queryOwnFlow, ratios: queryOwnGroupRatios } }) {
   const window = resolveUserGroupsWindow(input, now), midnight = dayStartInTz(dayKeyInTz(now, window.tz), window.tz);
   if (refresh && !window.live && !page.paused) await ops.refreshLive();
   const identity = createHash("sha256").update(JSON.stringify([own.id, own.baseUrl, own.userId, own.authVersion, own.accessToken])).digest("hex");
@@ -114,7 +120,18 @@ export async function userGroupsPage(rt, { own, page, directory, ops, input, ref
     if (window.startMs < midnight) reads.push(collect(window.startMs, midnight, false));
     reads.push(collect(Math.max(window.startMs, midnight), window.endMs, true));
   } else reads.push(collect(window.startMs, window.endMs, false));
+  // 倍率独立缓存、独立失败：改设置后可刷新查看，既不重算消费，也不因读不到倍率隐藏金额。
+  let ratioEntry = rt._userGroups.ratios;
+  if (!page.paused && !ratioEntry?.promise && (refresh || !ratioEntry || now - ratioEntry.at >= intervalMs)) {
+    ratioEntry ||= { data: null, asOf: null, error: null };
+    rt._userGroups.ratios = ratioEntry; ratioEntry.at = now;
+    ratioEntry.promise = (async () => {
+      try { budget(1); ratioEntry.data = await readers.ratios(own); ratioEntry.asOf = now; ratioEntry.error = null; }
+      catch { ratioEntry.data = null; ratioEntry.asOf = null; ratioEntry.error = "OWN_GROUP_RATIOS_UNAVAILABLE"; }
+    })().finally(() => { ratioEntry.promise = null; });
+  }
   const entries = await Promise.all(reads);
+  await ratioEntry?.promise;
   // 余额可以比消费新；消费本身始终使用一整份缓存，不拼新总额和旧分组。
   const current = rt._userOpsPageCache?.payload || page, liveDirectory = rt._userOpsDirectory?.stationId === own.id ? rt._userOpsDirectory : directory;
   const ready = !!liveDirectory && entries.every(entry => entry.data);
@@ -122,5 +139,6 @@ export async function userGroupsPage(rt, { own, page, directory, ops, input, ref
   return buildUserGroupPage({ directory: liveDirectory?.users || [], current: current.users || [], usage: ready ? data.flatMap(item => item.usage) : [], flow: ready ? data.flatMap(item => item.flow) : [], ready,
     live: window.live, preset: window.preset, startMs: window.startMs, endMs: ready ? data.at(-1).endMs : window.endMs,
     asOf: ready ? data.at(-1).at : null, balanceAt: liveDirectory?.at ?? page.balanceSyncedMs ?? null,
-    rate: page.rate, paused: page.paused, error: entries.find(entry => entry.error)?.error || null, intervalMs, tz: window.tz }, input);
+    rate: page.rate, paused: page.paused, error: entries.find(entry => entry.error)?.error || null, intervalMs, tz: window.tz,
+    ratios: ratioEntry?.data, ratiosAt: ratioEntry?.asOf, ratiosError: ratioEntry?.error }, input);
 }

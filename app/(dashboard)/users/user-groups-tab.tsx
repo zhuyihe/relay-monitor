@@ -9,11 +9,11 @@ import { money } from "./users-format";
 import type { UsersPage } from "./users-format";
 import "../../styles/pages/user-groups.css";
 
-export type UserGroup = { name: string | null; amount: number; share: number; requests: number | null; pending: boolean };
+export type UserGroup = { name: string | null; amount: number; share: number; requests: number | null; pending: boolean; ratio: number | null; ratioSource: "user" | "group" | null };
 export type UserGroupRow = { id: number; username: string; big: boolean; disabled: boolean; balanceUsd: number | null; days: number | null; runwayState: string;
   total: number | null; shownAmount: number | null; requests: number | null; groups: UserGroup[] | null; shownGroups: UserGroup[] | null; pending: boolean };
 export type UserGroupsPage = { preset: string; startMs: number; endMs: number; asOf: number | null; balanceAt: number | null; rate: number; tz: string; paused: boolean;
-  starting: boolean; error: string | null; intervalMs: number; pendingUsers: number; channelGroups: string[]; hasUnclassified: boolean; selectedUser: UserGroupRow | null;
+  starting: boolean; error: string | null; ratiosAt: number | null; ratiosError: string | null; intervalMs: number; pendingUsers: number; channelGroups: string[]; hasUnclassified: boolean; selectedUser: UserGroupRow | null;
   summary: { users: number; amount: number | null }; list: { rows: UserGroupRow[]; total: number; page: number; pages: number; pageSize: number } };
 export type GroupQuery = { q: string; channelGroup: string; active: boolean; sort: string; dir: string; page: number };
 
@@ -21,7 +21,7 @@ function GroupDetails({ row, groups, rate }: { row: UserGroupRow; groups: UserGr
   if (groups == null) return <p className="jy-ug-empty">{row.total == null ? "分组消费尚未读取，当前余额仍可查看。" : "分组明细正在更新，用户总消费保持主站金额。"}</p>;
   if (!groups.length) return <p className="jy-ug-empty">所选时间内没有分组消费。</p>;
   return <table className="jy-ug-details" aria-label={`${row.username} 的渠道分组消费`}><thead><tr><th>渠道分组</th><th>消费金额</th><th>占用户总消费</th><th>请求数</th></tr></thead><tbody>{groups.map(group => <tr key={group.name || "__unknown"}>
-    <td><span className="jy-ug-group-name">{group.name || (group.pending ? "明细待补齐" : "未归类")}</span></td><td className="jy-num">{money(group.amount, rate)}</td>
+    <td><span className="jy-ug-group-name">{group.name || (group.pending ? "明细待补齐" : "未归类")}</span>{group.name != null && <span className="jy-ug-ratio">当前倍率 <b className="jy-num">{group.ratio == null ? EMPTY : `${group.ratio.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}×`}</b>{group.ratioSource === "user" && <Tooltip title="主站为该客户的用户分组单独设置了这个倍率，优先于渠道分组的默认倍率。"><span className="jy-ug-ratio-special" tabIndex={0}>专属</span></Tooltip>}</span>}</td><td className="jy-num">{money(group.amount, rate)}</td>
     <td><span className="jy-ug-share"><i aria-hidden="true"><b style={{ width: `${group.share * 100}%` }} /></i>{formatPct(group.share)}</span></td><td className="jy-num">{group.requests == null ? EMPTY : formatInt(group.requests)}</td>
   </tr>)}</tbody></table>;
 }
@@ -43,6 +43,7 @@ export function UserGroupsTab({ data, base, query, rangeKey, userId, loading, er
   const toggle = (id: number) => { const next = new Set(expanded ?? (rows[0] ? [rows[0].id] : [])); next.has(id) ? next.delete(id) : next.add(id); setExpanded(next); };
   const allOpen = rows.length > 0 && rows.every(row => isOpen(row.id));
   const asOf = (at: number | null | undefined) => at == null ? "尚未同步" : formatZonedTime(at, tz);
+  const ratioNote = data?.ratiosError ? "当前倍率暂未读到，消费金额仍按实际扣费展示。" : `倍率为主站当前设置${data?.ratiosAt ? `，读于 ${asOf(data.ratiosAt)}` : ""}；历史消费保留当时的实际扣费金额。`;
   const sort = (key: string) => onQuery({ sort: key, dir: query.sort === key && query.dir === "desc" ? "asc" : "desc" });
   const name = (row: UserGroupRow) => <><button className="jy-link jy-ug-user-name" onClick={() => onOpenUser(row.id)} aria-label={`查看 ${row.username} 的渠道分组消费`}>{row.username}</button>{row.big && <span className="jy-users-big">重点</span>}</>;
   return <section className="jy-ug" aria-label="用户渠道分组消费">
@@ -72,13 +73,14 @@ export function UserGroupsTab({ data, base, query, rangeKey, userId, loading, er
       <div className="jy-ug-footer"><span>{data ? `${data.list.total} 位用户` : "正在读取分组明细"}</span><span>占比以该用户在所选时间内的全部消费为准</span>{data && data.list.pages > 1 && <span><Button disabled={data.list.page <= 1} onClick={() => onQuery({ page: data.list.page - 1 })}>上一页</Button> {data.list.page} / {data.list.pages} <Button disabled={data.list.page >= data.list.pages} onClick={() => onQuery({ page: data.list.page + 1 })}>下一页</Button></span>}</div>
     </Panel>
     <p className="jy-users-progress"><span>消费读于 {asOf(data?.asOf)}</span><span>余额读于 {asOf(data?.balanceAt ?? base.balanceSyncedMs)}</span><span>历史时间按整点汇总，金额与用户运营保持一致。</span></p>
+    <p className="jy-users-progress">{ratioNote}</p>
     <Drawer className="jy-drawer jy-users-drawer jy-ug-drawer" open={userId != null} onClose={onCloseUser} size={phone ? "100%" : 640} title={selected?.username || "用户渠道分组消费"}>
       <div className="jy-ug-balance-lead"><span className="jy-caption">当前余额</span><strong className="jy-num">{money(selected?.balanceUsd, rate)}</strong><span className="jy-caption">余额读于 {asOf(data?.balanceAt ?? base.balanceSyncedMs)}</span></div>
       <div className="jy-ug-drawer-heading"><h3>渠道分组消费</h3><span className="jy-caption">消费读于 {asOf(data?.asOf)}</span></div>
       <p className="jy-caption">{data ? `${new Date(data.startMs).toLocaleDateString("zh-CN", { timeZone: tz })} — ${new Date(data.endMs - 1).toLocaleDateString("zh-CN", { timeZone: tz })}` : "正在读取所选时间范围"}</p>
       <p className="jy-ug-drawer-total">所选时间内总消费 <strong className="jy-num">{money(selected?.total, rate)}</strong></p>
       {selected ? <GroupDetails row={selected} groups={selected.groups} rate={rate} /> : <p className="jy-ug-empty">正在读取该用户的渠道分组消费。</p>}
-      <p className="jy-caption jy-ug-drawer-foot">日期只影响消费统计，余额始终显示当前值；占比以该用户在同一时间内的全部消费为准。</p>
+      <p className="jy-caption jy-ug-drawer-foot">{ratioNote}余额始终显示当前值；占比以该用户在同一时间内的全部消费为准。</p>
     </Drawer>
   </section>;
 }

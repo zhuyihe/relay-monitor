@@ -200,6 +200,27 @@
   overflow-wrap:anywhere;
   line-height:1.6;
 }
+.jy-ug-ratio {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:4px;
+  margin-top:3px;
+  color:var(--jy-ink-3);
+  font-size:11px;
+  line-height:1.6;
+}
+.jy-ug-ratio b {
+  font-weight:500;
+  color:var(--jy-ink-2);
+}
+.jy-ug-ratio-special {
+  padding:0 4px;
+  border:1px solid var(--jy-rule);
+  border-radius:3px;
+  font-size:10px;
+  white-space:nowrap;
+}
 .jy-ug-share {
   display:flex;
   align-items:center;

@@ -11,8 +11,8 @@ const baseURL = process.env.USER_GROUPS_UI_BASE_URL || "http://localhost:3099";
 const now = Date.parse("2026-11-24T08:00:00Z"), tz = "Asia/Shanghai";
 const groupA = "AWSB全模型-不带F-Coding", groupB = "A社官转不带F";
 const directory = [
-  { id: 1, username: "jyzzz", role: 1, status: 1, quotaUsd: 24714.39 },
-  { id: 2, username: "Lucky-gangshen", role: 1, status: 1, quotaUsd: 2722.47 },
+  { id: 1, username: "jyzzz", role: 1, status: 1, quotaUsd: 24714.39, group: "vip" },
+  { id: 2, username: "Lucky-gangshen", role: 1, status: 1, quotaUsd: 2722.47, group: "default" },
   { id: 3, username: "grace123", role: 1, status: 1, quotaUsd: 6357.54 },
   { id: 4, username: "zero-user", role: 1, status: 1, quotaUsd: 100 },
 ];
@@ -24,7 +24,7 @@ const source = [{ user: "jyzzz", group: groupA, amount: 7000, requests: 70 }, { 
 
 function response(params) {
   const input = Object.fromEntries(params), window = resolveUserGroupsWindow(input, now, tz), scale = input.preset === "yesterday" ? 2 : 1;
-  return buildUserGroupPage({ ...window, directory, current: full.users, ready: true, rate: 1, asOf: now, balanceAt: now, intervalMs: 60000,
+  return buildUserGroupPage({ ...window, directory, current: full.users, ready: true, rate: 1, asOf: now, balanceAt: now, intervalMs: 60000, ratiosAt: now, ratios: { base: { [groupA]: 3.8, [groupB]: 4 }, overrides: { vip: { [groupA]: 2.8 } } },
     usage: directory.map(user => ({ key: user.username, quotaUnits: source.filter(row => row.user === user.username).reduce((sum, row) => sum + row.amount * 500000 * scale, 0), requests: 100 })),
     flow: source.map(row => ({ ...row, quotaUnits: row.amount * 500000 * scale })) }, input);
 }
@@ -68,6 +68,19 @@ test("用户是主行，真实渠道分组合并展示；不会访问模型分�
   assert.equal(await page.getByRole('button', { name: '展开全部', exact: true }).count(), 1);
   assert.equal(calls.some(call => /own\/analytics|reconciliation|users\/\d+/.test(call.path)), false);
   assert.deepEqual(errors, []);
+});
+
+test("分组明细与用户抽屉显示客户专属倍率，默认倍率与历史消费不混用", async t => {
+  const { page } = await openPage(t);
+  const details = page.getByRole('table', { name: 'jyzzz 的渠道分组消费', exact: true });
+  assert.match(await details.textContent(), /AWSB全模型-不带F-Coding当前倍率 2\.80×专属.*7,000\.00/s);
+  assert.match(await details.textContent(), /A社官转不带F当前倍率 4\.00×.*1,000\.00/s);
+  await page.getByRole('button', { name: '展开 grace123 的渠道分组明细', exact: true }).click();
+  assert.match(await page.getByRole('table', { name: 'grace123 的渠道分组消费', exact: true }).textContent(), /当前倍率 3\.80×/);
+  await page.getByRole('button', { name: '查看 jyzzz 的渠道分组消费', exact: true }).click();
+  const drawer = page.locator('.ant-drawer-body'); await drawer.waitFor();
+  assert.match(await drawer.textContent(), /当前倍率 2\.80×专属/);
+  assert.match(await drawer.textContent(), /历史消费保留当时的实际扣费金额/);
 });
 
 test("筛选分组后保留总消费和原占比，搜索与排序走独立参数", async t => {
