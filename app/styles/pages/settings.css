@@ -1,8 +1,8 @@
 /* 系统设置页：只放本页特有的布局，通用外观用 jy.css */
 
 .jy-settings-field .ant-input-number { width: 200px; }
-/* 同一块里两个字段之间空 16px（「自动刷新间隔」和「算应付成本」，设计验收 10-26）；名字和开关同一行，开关不拉满 */
-.jy-settings-field + .jy-settings-field { margin-top: 16px; }
+/* 字段按任务分隔；名字和开关同一行，开关不拉满。 */
+.jy-settings-field + .jy-settings-field { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--jy-rule); }
 .jy-settings-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .jy-settings-switch .ant-switch { flex: none; }
 .jy-settings-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -22,20 +22,35 @@
 .jy-settings-health .jy-kv { grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); font-size: 13px; }
 
 .jy-settings-form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
-.jy-settings-form .jy-two { gap: 16px; }
-/* 表单本身有 16px 行距，保存区只补到和其他分组一样的 20px */
-.jy-settings-form > .jy-settings-actions { margin-top: 4px; }
+.jy-settings-form .jy-two { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+/* 显式提交的账户表单把保存操作留在末尾。 */
+.jy-settings-form > .jy-settings-actions { margin-top: 8px; padding-top: 20px; border-top: 1px solid var(--jy-rule); }
 .jy-settings-inline-error { margin: -16px -24px 16px; }
 .jy-settings-banner-text { display: flex; flex-direction: column; gap: 2px; }
 .jy-settings-banner-text b { font-weight: 600; }
 .jy-settings-banner-text span { font-size: 13px; color: var(--jy-ink-2); }
 
-.jy-settings-about dd { display: flex; flex-direction: column; gap: 2px; }
-.jy-settings-about b { font-weight: 600; }
-.jy-settings-code { align-self: flex-start; padding: 0 6px; border-radius: var(--jy-r1); background: var(--jy-sunken); color: var(--jy-ink); font-size: 12px; line-height: 20px; }
+.jy-settings-about { row-gap: 16px; }
+.jy-settings-about dt { font-size: 12px; color: var(--jy-ink-3); }
+.jy-settings-about dd { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.jy-settings-about b { font-weight: 500; }
+.jy-settings-code { align-self: flex-start; padding: 0 6px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r1); background: var(--jy-sheet); color: var(--jy-ink); font-size: 12px; line-height: 20px; }
 .jy-settings-confirm p { margin: 0 0 4px; }
+
+/* 按任务分栏，字段、说明与保存状态使用同一条阅读线。 */
+.jy-settings-grid { align-items: start; gap: 20px; }
+.jy-settings-grid > .jy-stack { gap: 20px; min-width: 0; }
+.jy-settings .jy-panel-head { flex-wrap: wrap; align-items: center; }
+.jy-settings .jy-field > label, .jy-settings-switch > label { font-size: 13px; font-weight: 500; line-height: 20px; }
+.jy-settings .jy-field > .jy-caption { max-width: 60ch; font-size: 12px; line-height: 20px; }
+.jy-settings .jy-panel-body > .jy-caption:last-child { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--jy-rule); }
+.jy-settings-health-line { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--jy-rule); }
 
 @media (max-width: 767px) {
   .jy-settings-health { grid-template-columns: minmax(0, 1fr); }
   .jy-settings-inline-error { margin: -12px -16px 12px; }
+  .jy-settings-grid, .jy-settings-grid > .jy-stack { gap: 16px; }
+  .jy-settings-field + .jy-settings-field { margin-top: 16px; padding-top: 16px; }
+  .jy-settings-field .ant-input-number { width: min(100%, 200px); }
+  .jy-settings .ant-btn { min-height: 44px; }
 }

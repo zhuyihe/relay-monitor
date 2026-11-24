@@ -1,0 +1,31 @@
+.jy-time-range-trigger { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; max-width: 100%; padding: 9px 16px; border: 1px solid var(--jy-rule); border-radius: 999px; background: var(--jy-sunken); color: var(--jy-ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; font-variant-numeric: tabular-nums; }
+.jy-time-range-trigger:hover { border-color: var(--jy-ink-3); }
+.jy-time-range-trigger:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
+.jy-time-range-trigger > .jy-icon { flex: none; width: 16px; height: 16px; color: var(--jy-ink-2); }
+.jy-time-range-values { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.jy-time-range-values time { display: flex; flex-wrap: wrap; gap: 2px 5px; }
+.jy-time-range-to { color: var(--jy-ink-3); }
+.jy-time-range-popup { max-width: calc(100vw - 24px); }
+.jy-time-range-popup .ant-popover-container { padding: 20px; border: 1px solid var(--jy-rule); border-radius: 16px; background: var(--jy-sheet); box-shadow: var(--jy-shadow); }
+.jy-time-range-panel { width: min(600px, calc(100vw - 66px)); color: var(--jy-ink); }
+.jy-time-range-fields { display: grid; grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr); align-items: end; gap: 12px; }
+.jy-time-range-fields label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--jy-ink-2); font-size: 13px; }
+.jy-time-range-fields .ant-input { width: 100%; min-width: 0; min-height: 44px; border-radius: 999px; padding: 8px 12px; background: var(--jy-sheet); color: var(--jy-ink); font-size: 14px; font-variant-numeric: tabular-nums; }
+.jy-time-range-separator { padding-bottom: 12px; color: var(--jy-ink-3); }
+.jy-time-range-presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 8px; margin-top: 16px; }
+.jy-time-range-presets button { min-height: 40px; padding: 6px; border: 1px solid transparent; border-radius: 999px; background: var(--jy-sunken); color: var(--jy-ink-2); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.jy-time-range-presets button:hover { border-color: var(--jy-rule); color: var(--jy-ink); }
+.jy-time-range-presets button[aria-pressed="true"] { background: var(--jy-cobalt-tint); color: var(--jy-cobalt); border-color: var(--jy-cobalt); }
+.jy-time-range-presets button:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
+.jy-time-range-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.jy-time-range-foot .ant-btn { min-height: 40px; padding-inline: 20px; border-radius: 999px; }
+.jy-time-range-error { margin: 12px 0 0; color: var(--jy-crit); font-size: 12px; line-height: 20px; }
+@media (max-width: 600px) {
+  .jy-time-range-trigger { width: 100%; padding-inline: 12px; border-radius: 12px; }
+  .jy-time-range-values { flex: 1; justify-content: space-between; }
+  .jy-time-range-values time { flex-direction: column; }
+  .jy-time-range-values time > span:last-child { font-size: 12px; color: var(--jy-ink-2); }
+  .jy-time-range-fields { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .jy-time-range-separator { display: none; }
+  .jy-time-range-presets button, .jy-time-range-foot .ant-btn { min-height: 44px; }
+}

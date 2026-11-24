@@ -2,17 +2,22 @@
 // 状态名「快用完」「余额用完」是上游已有的档位名（lib/format.js BALANCE_STATE_TEXT），「在下滑」「已流失」「新消费」是新的。
 import { BALANCE_STATE_TEXT } from "../../../lib/format.js";
 
-export type UsersTab = "overview" | "users" | "churn";
+export type UsersTab = "overview" | "users" | "groups" | "churn";
 export type UserStatus = "empty" | "soon" | "down" | "churned" | "new";
 
 export const COPY = Object.freeze({
   tabsLabel: "用户运营视图",
-  tabs: Object.freeze({ overview: "概览", users: "用户", churn: "流失" }),
+  tabs: Object.freeze({ overview: "概览", users: "用户", groups: "渠道分组消费", churn: "流失" }),
   comingSoon: "即将上线",
   // 没设置自营站点
   setupDesc: "用户运营会看自营站点上用户的消费、余额，谁在涨、谁在掉、谁快用完了。",
   setupFigure: "设置完成后，这里会列出每个用户近 7 天的消费和余额，快用完的会标出来。",
   unreadable: "读不到用户数据",
+  noData: "还没有用户数据",
+  syncDirectory: "同步用户数据",
+  syncPaused: "系统设置里关了「读取用户数据」。",
+  enableSync: "去打开",
+  basicOnly: "已读到用户和余额，消费统计还没准备好。",
   // 补数据（刚上线：每小时用量往回补 90 天，余额从那一刻开始记）
   backfill: (days: number, total: number, eta: string, withTrend: boolean) =>
     `数据补全中 ${days}/${total} 天，大约还要 ${eta}。${withTrend ? `趋势图先画补好的 ${days} 天；` : ""}「比前 7 天」「在下滑」「已流失」等补满再算；可用天数、快用完等余额记满 24 小时再算。`,
@@ -27,6 +32,9 @@ export const COPY = Object.freeze({
   bigTip: (own: number, count: number, group: number) => `重点用户：占近 7 天消费 ${own}%。${count} 个重点用户合起来占 ${group}%`,
   bigTipPlain: "重点用户",
   disabled: "已禁用",
+  syncPartial: "部分数据未能同步，请查看消费和余额的更新时间。",
+  consumptionWindow: "近 7 天消费和近 14 天趋势包含今天；消费对比截至昨天。",
+  consumptionReadAt: (time: string) => `消费读于 ${time}`,
   // 概览
   overview: Object.freeze({
     sentenceWait: "数据补全中，补满以后再说近 7 天谁在涨、谁在掉。",
@@ -97,7 +105,7 @@ export const COPY = Object.freeze({
     noMatch: "没有找到这个用户。",
     noUsers: "还没有用户。",
     noOnly: "没有符合的用户。",
-    cols: Object.freeze({ user: "用户", spark: "近 14 天", week: "近 7 天消费", today: "今天", balanceDays: "余额和可用时间", lastUsed: "最近使用" }),
+    cols: Object.freeze({ user: "用户", spark: "近 14 天", week: "近 7 天消费", today: "今日消费", lastUsed: "最近使用" }),
     vsPrev: (delta: string) => `比前 7 天 ${delta}`,
     vsNone: "前 7 天没有消费",
     pageNote: (total: number, size: number) => `共 ${total} 个，每页 ${size} 个`,
@@ -109,6 +117,18 @@ export const COPY = Object.freeze({
     total: (n: number) => `合计（${n} 个用户）`,
     totalMatched: (n: number) => `匹配的 ${n} 个用户`,
     balanceWord: "余额",
+    currentBalance: "当前余额",
+    expectedRunway: "预计可用",
+    sortLabel: "排序",
+    sortAria: "用户排序",
+    sortOptions: [
+      { value: "balance:asc", label: "余额从低到高" }, { value: "balance:desc", label: "余额从高到低" },
+      { value: "days:asc", label: "可用时间从短到长" }, { value: "days:desc", label: "可用时间从长到短" },
+      { value: "today:desc", label: "今日消费从高到低" }, { value: "today:asc", label: "今日消费从低到高" },
+      { value: "week:desc", label: "近 7 天消费从高到低" }, { value: "week:asc", label: "近 7 天消费从低到高" },
+      { value: "last:desc", label: "最近使用从近到远" }, { value: "last:asc", label: "最近使用从远到近" },
+      { value: "user:asc", label: "用户名正序" }, { value: "user:desc", label: "用户名倒序" },
+    ],
     newLabel: "新",
     notUsed: "还没用过",
     today: "今天",
@@ -122,6 +142,7 @@ export const COPY = Object.freeze({
   }),
   // 流失页签（design 用户运营 流失 v1）
   churn: Object.freeze({
+    readModels: "读取主要模型",
     kpiLabel: "流失的四个数",
     kpiDown: "在下滑",
     kpiDownHint: "近 3 天日均比之前 14 天日均少一半以上的用户；损失是他们一天比之前少花的钱加起来",
@@ -183,6 +204,9 @@ export const COPY = Object.freeze({
   }),
   // 抽屉
   drawer: Object.freeze({
+    readBalance: "读取最新余额",
+    balanceReadAt: (time: string) => `余额读于 ${time}`,
+    balanceFailed: "读不到最新余额",
     group: "分组",
     created: "注册时间",
     used: "累计消费",

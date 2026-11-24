@@ -90,6 +90,7 @@ const PATHS: Record<string, React.ReactNode> = {
   check: <path d="m3 8.5 3 3 7-7" />,
   sort: <path d="M8 13V3M4.5 6.5 8 3l3.5 3.5" />,
   "sort-down": <path d="M8 3v10M4.5 9.5 8 13l3.5-3.5" />,
+  "sort-both": <path d="M5 13V3M2.5 5.5 5 3l2.5 2.5M11 3v10M8.5 10.5 11 13l2.5-2.5" />,
   restore: (
     <>
       <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" />

@@ -4,6 +4,7 @@
 import { queryStation } from "../lib/providers.js";
 import { evaluateStation } from "../lib/alerts.js";
 import { OWN_LOAD } from "../lib/own-load.js";
+import { userOpsOf } from "./user-ops.js";
 
 // ---------------------------------------------------------------------------
 // 余额刷新 + 历史 + 告警
@@ -79,9 +80,11 @@ async function doRefreshOne(rt, station, options = {}) {
 
 // background：定时器来的。自营站点（只用来发现读不到、令牌失效）每 OWN_LOAD.STATION_POLL_MS 才读一次，别的站点每轮都读；
 // 手动刷新、保存设置后的刷新（background 不给）所有站点都读
-export async function refreshAll(rt, { background = false, now = Date.now() } = {}) {
+export async function refreshAll(rt, { background = false, now = Date.now(), scope = "all" } = {}) {
+  // 用户余额共用站点刷新节拍；采集在后台进行，用户统计或回补不会拖住供应商余额。
+  if (rt.pool && scope === "all") userOpsOf(rt).ops.runOnce().catch(() => {});
   const polledAt = (rt._ownPolledAt ||= new Map());
-  return Promise.all(rt.store.list({ includeArchived: false }).map((s) => {
+  return Promise.all(rt.store.list({ includeArchived: false }).filter((s) => scope !== "upstreams" || !s.isOwn).map((s) => {
     if (background && s.isOwn) {
       if (now - (polledAt.get(s.id) ?? -Infinity) < OWN_LOAD.STATION_POLL_MS) return null;
       polledAt.set(s.id, now);

@@ -445,7 +445,7 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-settings">
       {restricted ? (
         <div className="jy-banner jy-banner--crit">
           <Sym kind="crit" />

@@ -74,6 +74,7 @@ export function ruleFromRow(row, channels = []) {
     billingPolicy: row.billing_policy || "legacy-v3",
     scopeVersion: Number(row.scope_version || 1),
     billingEffectiveFrom: row.billing_effective_from_ms == null ? null : Number(row.billing_effective_from_ms),
+    ...(row.history_from_ms == null ? {} : { historyFromMs: Number(row.history_from_ms) }),
     accountingFloorMs: row.accounting_floor_ms == null ? null : Number(row.accounting_floor_ms),
     boundAtMs: row.bound_at_ms == null ? null : Number(row.bound_at_ms),
     costCoverage: row.cost_coverage || "unknown",
@@ -456,6 +457,13 @@ export class ReconciliationRepository {
     } finally {
       conn.release();
     }
+    return this.getRule(id);
+  }
+
+  async extendHistory(id, fromMs) {
+    await this.pool.query(`UPDATE reconciliation_rules
+      SET history_from_ms = LEAST(COALESCE(history_from_ms, ?), ?)
+      WHERE id = ? AND enabled = 1 AND archived_at IS NULL`, [fromMs, fromMs, id]);
     return this.getRule(id);
   }
 

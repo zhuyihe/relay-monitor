@@ -1,7 +1,7 @@
 // 用户运营「流失」页签的接口：谁在少花钱、一天少收多少。算数在 lib/user-ops-churn.js；这里管读数据：
 //   - 每位用户的消费、状态：用户页那一份（server/user-ops-page.js 的整页缓存，不再读一遍）；
 //   - 今天到现在、过去 7 天同一时段的小时用量：读库里的按小时用量；过去 7 个整天的小时数按天记在内存里（结束 6 小时以后、回补读到了的才记），之后每次只读今天的；
-//   - 每位用户近 30 天主要用的模型：读自营站点的 /api/data/flow 一个请求（和自营业务共用 server/own-raw-rows.js 的缓存读法），打开页签才读，缓存 10 分钟；
+//   - 每位用户近 30 天主要用的模型：点读取才问自营站点的 /api/data/flow（和自营业务共用缓存，10 分钟）；
 //     额度紧、断路、读失败都不拦页面，「主要用的模型」写「—」，接口里 modelsError 说原因。
 import { businessTimeZone, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { QUOTA_PER_UNIT } from "../lib/providers.js";
@@ -9,8 +9,8 @@ import { ownRequestState } from "../lib/own-request-budget.js";
 import { buildChurnView, queryChurn } from "../lib/user-ops-churn.js";
 import { dayGrid, filledFromOf } from "../lib/user-ops-view.js";
 import { readOwnRows } from "./own-raw-rows.js";
-import { USER_OPS } from "./user-ops.js";
-import { usersPage } from "./user-ops-page.js";
+import { USER_OPS, ownStationOf } from "./user-ops.js";
+import { localUsersPage } from "./user-ops-page.js";
 
 const HOUR_MS = 3600000;
 const SAME_LAG_MS = 10 * 60000; // 最近这一小时的数据看板还没落齐：今天只算到「现在 − 10 分钟」之前的整点
@@ -106,23 +106,27 @@ async function mainModels(rt, own, { now, tz }) {
 }
 
 // 地址栏的写法：only=todayLow|down|churned|returned、big=1、q=、page=
-export async function churnResponse(rt, ops, store, params, { now = Date.now() } = {}) {
-  const page = await usersPage(rt, ops, store, { now });
+export async function churnResponse(rt, ops, store, params, { now = Date.now(), readModels = false } = {}) {
+  const page = await localUsersPage(rt, ops, store, { now });
   if (page.unset || page.starting) return page;
-  const own = rt.store.list().find((station) => station.isOwn && station.type === "newapi" && !station.archivedAt);
+  if (page.basicOnly) return { starting: true };
+  const own = ownStationOf(rt);
   const tz = businessTimeZone();
   const cache = rt._userOpsPageCache;
   const grid = dayGrid(now, tz);
   const filledFrom = filledFromOf(page.backfill, now);
-  const [sameTime, models] = await Promise.all([
+  const modelKey = [own.id, own.authVersion, grid.today].join("|");
+  const [sameTime, requestedModels] = await Promise.all([
     sameTimeUsage(rt, store, own, { now, tz, grid, filledFrom, fresh: page.fresh !== false }),
-    mainModels(rt, own, { now, tz }),
+    readModels && !page.paused ? mainModels(rt, own, { now, tz }) : null,
   ]);
-  const view = buildChurnView({ now, tz, rows: page.users, daily: cache.daily, sameTime: sameTime?.users ?? null, models: models.models, ready: page.ready, backfill: page.backfill });
+  if (requestedModels) rt._userOpsChurnModels = { key: modelKey, ...requestedModels };
+  const models = rt._userOpsChurnModels?.key === modelKey ? rt._userOpsChurnModels : null;
+  const view = buildChurnView({ now, tz, rows: page.users, daily: cache.daily, sameTime: sameTime?.users ?? null, models: models?.models, ready: page.ready, backfill: page.backfill });
   const query = { only: params.get("only"), big: params.get("big") === "1", q: params.get("q"), page: params.get("page") };
   return {
     asOf: page.asOf, syncedMs: page.syncedMs, tz, rate: page.rate, ownStationId: page.ownStationId, fresh: page.fresh,
-    backfill: page.backfill, ready: view.ready, sameUntilMs: sameTime?.upTo ?? null, summary: view.summary, modelsError: models.error,
+    backfill: page.backfill, ready: view.ready, sameUntilMs: sameTime?.upTo ?? null, summary: view.summary, modelsError: models?.error ?? null,
     list: queryChurn(view, query),
   };
 }

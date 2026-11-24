@@ -11,9 +11,10 @@ const hook = registerHooks({ load(url, context, nextLoad) {
     source: "export const withAuth = handler => handler; export const json = (value, status = 200) => Response.json(value, {status});" };
   return nextLoad(url, context);
 } });
-let list, one, big, churn;
+let list, sync, balance, one, big, churn;
 try {
-  list = (await import("./route.js")).GET;
+  ({ GET: list, POST: sync } = await import("./route.js"));
+  balance = (await import("./[id]/balance/route.js")).POST;
   one = (await import("./[id]/route.js")).GET;
   big = (await import("./big/route.js")).GET;
   churn = (await import("./churn/route.js")).GET;
@@ -52,6 +53,51 @@ test("后台还没读到过数：整页是 starting（页面写数据补全中�
   const missing = await one(request("/api/users/7"), rt, { id: "7" });
   assert.equal(missing.status, 404);
   assert.equal((await missing.json()).code, "USER_NOT_FOUND");
+});
+
+test("打开概览或流失不采集，手动同步批量读取普通用户余额和今天消费", async (t) => {
+  const rt = fresh();
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({
+    success: true, data: { items: [{ id: 7, username: "alice", role: 1, status: 1, quota: 625000 }], total: 1 },
+  }));
+  await list(request("/api/users"), rt);
+  await churn(request("/api/users/churn"), rt);
+  assert.equal(fetch.mock.callCount(), 0);
+  const response = await sync(request("/api/users"), rt);
+  assert.equal(response.status, 200);
+  const page = await response.json();
+  assert.equal(page.basicOnly, true);
+  assert.deepEqual(page.list.rows.map(({ username, balanceUsd }) => [username, balanceUsd]), [["alice", 1.25]]);
+  assert.equal(fetch.mock.callCount(), 2);
+  assert.equal(new URL(fetch.mock.calls[0].arguments[0]).pathname, "/api/user/");
+});
+
+test("核对最新余额只发一次单用户请求，返回余额和读取时间，保留真实的零", async (t) => {
+  const rt = fresh();
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({
+    success: true, data: { id: 7, role: 1, quota: 0, email: "private@example.test", access_token: "fixture-secret" },
+  }));
+  const response = await balance(request("/api/users/7/balance"), rt, { id: "7" });
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.ok(data.readMs > 0);
+  assert.deepEqual(data, { balanceUsd: 0, readMs: data.readMs });
+  assert.equal(fetch.mock.callCount(), 1);
+  assert.equal(new URL(fetch.mock.calls[0].arguments[0]).pathname, "/api/user/7");
+  assert.equal(rt._userOpsStore.calls.addBalancePoints, 0, "手动查余额不改告警快照");
+});
+
+test("关闭采集后仍可读本地数据，首次同步和最新余额都不发请求", async (t) => {
+  const rt = fresh();
+  rt.store.settings.userOpsEnabled = false;
+  const fetch = t.mock.method(globalThis, "fetch", async () => { throw new Error("unexpected upstream call"); });
+  assert.equal((await (await list(request("/api/users"), rt)).json()).paused, true);
+  const responses = [await sync(request("/api/users"), rt), await balance(request("/api/users/7/balance"), rt, { id: "7" })];
+  for (const response of responses) {
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).code, "USER_DATA_DISABLED");
+  }
+  assert.equal(fetch.mock.callCount(), 0);
 });
 
 test("没有数据库（rt.pool 空）：不报错，整页是 starting，抽屉 404；没设置自营站点仍是 400", async () => {

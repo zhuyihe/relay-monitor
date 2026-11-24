@@ -80,24 +80,24 @@ export default function MyStationPage() {
   const rangeRef = useRef<string>(range);
   rangeRef.current = range;
 
-  const load = useCallback(async (force: boolean, r: string = rangeRef.current, rethrow = false) => {
+  const load = useCallback(async (force: boolean, r: string = rangeRef.current, rethrow = false, refresh = false) => {
     const cached = cacheRef.current[r];
     if (!force && cached && !cached.data?.profit?.incomeUnconfirmed && Date.now() - cached.at < 60000) {
       setData(cached.data);
       setErr(null);
       setUnconfigured(false);
-      setAsOf(cached.at);
+      setAsOf(Date.parse(cached.data.generatedAt) || null);
       return;
     }
     try {
-      const res = await api(`/api/own/analytics?range=${r}`);
+      const res = await api(`/api/own/analytics?range=${r}`, refresh ? { method: "POST" } : undefined);
       cacheRef.current[r] = { at: Date.now(), data: res };
       // 响应回来时范围已切走则丢弃
       if (rangeRef.current !== r) return;
       setData(res);
       setErr(null);
       setUnconfigured(false);
-      setAsOf(Date.now());
+      setAsOf(Date.parse(res.generatedAt) || null);
     } catch (e: any) {
       if (rangeRef.current !== r) return;
       // 没设置自营站点是引导场景，不当错误处理（接口带 OWN_STATION_UNSET，lib/error-copy.js）
@@ -115,7 +115,7 @@ export default function MyStationPage() {
   // 范围变化立即拉取；约 30 秒自动刷新一次，切回标签页立即刷一次
   useEffect(() => {
     load(false, range);
-    return visibleInterval(() => load(true), 30000);
+    return visibleInterval(() => load(true), 60000);
   }, [range, load]);
 
   // 范围一换，上一次细算的结果就不是这段时间的了
@@ -142,12 +142,12 @@ export default function MyStationPage() {
   };
 
   const reload = useCallback(() => load(true), [load]);
-  const onRefresh = useCallback(() => load(true, rangeRef.current, true), [load]);
+  const onRefresh = useCallback(() => load(true, rangeRef.current, true, true), [load]);
 
   // 外壳会把范围控件渲染两次，元素要稳定；没设置自营站点时不给范围
   const rangePicker = useMemo(
-    () => (unconfigured ? undefined : <RangePicker value={range} options={RANGE_OPTIONS} onChange={(x) => setRange(x as OwnRange)} />),
-    [unconfigured, range, setRange],
+    () => (unconfigured ? undefined : <RangePicker value={range} options={RANGE_OPTIONS} tz={data?.tz} range={data?.range === range && data.startMs != null ? data : undefined} onChange={(x) => setRange(x as OwnRange)} />),
+    [unconfigured, range, setRange, data],
   );
   useShellPage({ onRefresh, asOf, range: rangePicker, tz: data?.tz });
 
@@ -155,7 +155,7 @@ export default function MyStationPage() {
 
   if (unconfigured) {
     return (
-      <div className="jy-page">
+      <div className="jy-page jy-my">
         <Onboarding
           title={OWN_STATION_UNSET_TITLE}
           desc={COPY.setupDesc}
@@ -177,7 +177,7 @@ export default function MyStationPage() {
   if (!view || (currentErr && data.range !== range)) {
     if (currentErr) {
       return (
-        <div className="jy-page">
+        <div className="jy-page jy-my">
           <Panel label={NAV_LABELS.my}>
             <ErrorState center what={COPY.unreadable} error={currentErr.error} onRetry={() => load(true)} />
           </Panel>
@@ -186,7 +186,7 @@ export default function MyStationPage() {
     }
     const blank = { value: null };
     return (
-      <div className="jy-page" aria-busy="true">
+      <div className="jy-page jy-my" aria-busy="true">
         {/* 和概览同一个版式（指标行、等式、两行 8 + 4），数据回来时不跳 */}
         <PanelSkeleton title={OVERVIEW_TITLES.metrics} lines={1} />
         <ProfitEquation title={EQ_TEXT.business(RANGE_TEXT[range])} revenue={blank} upstream={blank} fixed={blank} loading />
@@ -218,7 +218,7 @@ export default function MyStationPage() {
   };
 
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-my">
       {currentErr && (
         // 自动刷新失败不清空页面，保留上次的数据
         <RefreshFailedBanner asOf={asOf} tz={data.tz} error={currentErr.error} onRetry={() => load(true)} />

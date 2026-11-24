@@ -14,13 +14,13 @@ import { keepOrder } from "../../../lib/keep-order.js";
 import { OWN_LOAD } from "../../../lib/own-load.js";
 import { orderUpstreams } from "../../../lib/upstream-order.js";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
-import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
+import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
-import { balanceMoneyOf } from "../../../lib/profit";
+import { balanceMoneyOf, rateSnapshotOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { failureText, refreshAllText, refreshOneText } from "../../../lib/error-copy";
-import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES } from "../../../lib/channel-onboarding.js";
+import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, onboardingBaseUrl } from "../../../lib/channel-onboarding.js";
 import { EmptyState, ErrorState, RefreshFailedBanner, Skeleton } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
@@ -28,6 +28,7 @@ import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
 import { Seg } from "../../components/seg";
+import { SortHeader } from "../../components/sort-header";
 import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
@@ -51,7 +52,7 @@ import type { StationDrawerHandle } from "./station-drawer";
 
 const FILTERS = ["all", "attention", "ok", "archived"] as const;
 type Filter = (typeof FILTERS)[number];
-const SORTS = ["", "days", "-days"] as const;
+const SORTS = ["", "balance", "-balance", "days", "-days", "burn", "-burn"] as const;
 type Sort = (typeof SORTS)[number];
 const COLS = 7;
 
@@ -108,6 +109,8 @@ const COPY = Object.freeze({
   demo: "演示",
   noAddress: `还没填${CREDENTIAL_FIELDS.baseUrl.label}`,
   refreshing: "正在刷新",
+  renewal: "请登录上游后更新授权。",
+  loginUpstream: "前往上游登录",
   // 这个上游的数据比别的上游旧两轮刷新以上时，状态格下一行写「数据截至 14:20」（ui-copy-spec §6）
   staleTip: "后面几次刷新都没读到这个上游的新数据",
   // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 个问题」，「⋯」里「按钮名：标题」
@@ -135,6 +138,14 @@ const COPY = Object.freeze({
   byStatus: "按状态筛选",
   byType: "按类型筛选",
   allTypes: "全部类型",
+  sortLabel: "排序",
+  sortAria: "上游排序",
+  sortOptions: [
+    { value: "", label: "需处理优先" },
+    { value: "balance", label: "余额从低到高" }, { value: "-balance", label: "余额从高到低" },
+    { value: "days", label: "可用时间从短到长" }, { value: "-days", label: "可用时间从长到短" },
+    { value: "-burn", label: "日均花费从高到低" }, { value: "burn", label: "日均花费从低到高" },
+  ],
   filter: Object.freeze({ all: "全部", attention: ATTENTION, ok: "无需处理", archived: "已归档" }),
   unownedBefore: (n: number) => `另有 ${n} 件需处理的事不在某一个上游上，在`,
   unownedAfter: "里处理。",
@@ -145,7 +156,7 @@ const COPY = Object.freeze({
 const actionKey = (s: any) => String(s.id || stationDisplayName(s));
 
 
-function compareDays(a: number | null, b: number | null, dir: 1 | -1) {
+function compareNumbers(a: number | null, b: number | null, dir: 1 | -1) {
   if (a === b) return 0;
   if (a == null) return 1; // 无法计算的永远排最后
   if (b == null) return -1;
@@ -220,7 +231,7 @@ export default function StationsPage() {
   const drawerRef = useRef<StationDrawerHandle>(null);
   // 上游下面的渠道：右边抽屉 + 「绑定渠道」「解绑」小窗口；只管绑定、解绑，和利润没有关系；数据只有 /api/reconciliation/channels/options 一个读
   const ownStation = stations.find((item: any) => item.isOwn && !item.archivedAt);
-  const channelOptions = useChannelOptions(ownStation?.id);
+  const channelOptions = useChannelOptions(ownStation?.id, accountsToken);
   // 绑定、解绑以后重读渠道，也刷新需处理（解绑的渠道那条「Key 没用量」要跟着消失）
   const afterChannelChange = async () => { await channelOptions.reload(); void loadWorkflowActions(true, ["bills"]); };
   const [channelsOf, setChannelsOf] = useState<Upstream | null>(null);
@@ -259,7 +270,7 @@ export default function StationsPage() {
       if (r.tz) setTz(r.tz);
       setLoaded(true);
       setLoadError(null);
-      setRefreshedAt(Date.now());
+      setRefreshedAt(r.asOf ?? null);
       return r.stations as any[];
     } catch (e: any) {
       setLoadError(e);
@@ -305,10 +316,11 @@ export default function StationsPage() {
     return () => clearInterval(t);
   }, [refreshSec, reload]);
 
-  // 外壳的刷新只重新读取；向上游重新读余额是工具栏的「刷新」
+  // 顶部和列表工具栏共用同一刷新范围：更新上游余额和 Key 当前倍率。
   useShellPage({
-    onRefresh: () => Promise.all([reload(), metaError || !types.length ? loadMeta() : null]),
+    onRefresh: () => onRefreshAll(),
     asOf: refreshedAt,
+    autoRefreshMs: refreshSec * 1000,
     tz,
   });
 
@@ -354,10 +366,12 @@ export default function StationsPage() {
   const onRefreshAll = async () => {
     setRefreshingAll(true);
     try {
-      const r = await api("/api/refresh", { method: "POST", body: {} });
+      const r = await api("/api/refresh", { method: "POST", body: { scope: "upstreams" } });
       // /api/refresh 只返回在监控的上游；重新读取完整列表，归档与暂停监控的上游一并保留。
       // 刷新已经做完：读列表失败时由列表顶上的「读取失败」交代，这里照旧报刷新结果
       await reload().catch(() => {});
+      if (metaError || !types.length) await loadMeta();
+      await channelOptions.reload(true);
       // 和运营总览同一句：有读不到余额的说几个
       const done = refreshAllText(r?.stations);
       if (done.failed) message.warning(done.text);
@@ -553,10 +567,17 @@ export default function StationsPage() {
     .filter((v) => !typeFilter || v.s.type === typeFilter)
     .filter((v) => !q || [v.s.name, v.s.baseUrl, v.host, v.s.balance?.account].some((x) => String(x || "").toLowerCase().includes(q)));
   // 默认排法（lib/upstream-order.js）：要马上动手的 → 正在花钱的（照最近的花法还能撑多少小时）→ 没在花钱的（按余额）→ 自营站点和不再续费的；点表头排序和已归档标签页照旧
-  const byDays = (dir: 1 | -1) => (a: StationView, b: StationView) => compareDays(a.sortDays, b.sortDays, dir) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
+  const byDays = (dir: 1 | -1) => (a: StationView, b: StationView) => compareNumbers(a.sortDays, b.sortDays, dir) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
+  const sortKey = sort.replace(/^-/, "");
+  const sortDirection = sort.startsWith("-") ? "desc" : "asc";
+  const sortValue = (v: StationView) => {
+    if (sortKey === "days") return v.sortDays;
+    if (sortKey === "balance") return !v.fixed && v.s.balance?.ok ? Number(v.s.balance.remaining) * v.rate : null;
+    if (v.archived) return null;
+    return v.fixed ? v.fx?.daily ?? null : v.s.prediction?.burnPerDay != null ? v.s.prediction.burnPerDay * v.rate : null;
+  };
   const orderedViews = (() => {
-    if (sort === "days") return [...matched].sort(byDays(1));
-    if (sort === "-days") return [...matched].sort(byDays(-1));
+    if (sort) return [...matched].sort((a, b) => compareNumbers(sortValue(a), sortValue(b), sortDirection === "asc" ? 1 : -1) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN"));
     if (filter === "archived") return [...matched].sort((a, b) => rankOf(a) - rankOf(b) || byDays(1)(a, b));
     const byId = new Map(matched.map((v) => [v.id, v]));
     return orderUpstreams(matched.map((v) => {
@@ -581,8 +602,7 @@ export default function StationsPage() {
     lastWrittenQuery.current = "";
     setParams({ filter: null, type: null, q: null });
   };
-  const nextSort: Record<Sort, Sort> = { "": "days", days: "-days", "-days": "" };
-  const ariaSort = sort === "days" ? "ascending" : sort === "-days" ? "descending" : undefined;
+  const onSort = (key: "balance" | "days" | "burn") => setSort(sortKey === key ? (sortDirection === "asc" ? `-${key}` : key) : key === "burn" ? "-burn" : key);
 
   // 弹窗内 KPI 用列表里的最新站点数据（轮询会更新）
   const trendCur = trendStation ? stations.find((x) => x.id === trendStation.id) || trendStation : null;
@@ -640,6 +660,15 @@ export default function StationsPage() {
   // 读不到余额的问题收进名字后面的红色感叹号：悬停一句，点开小气泡（第一句是原因或测试读取的结果、数据截至、详细原因、测试读取；
   // 登录信息、权限、人机验证这三类多一个「更新登录信息」，打开编辑抽屉、停在登录那一栏）。行高不变
   const loginFieldOf = (type: string) => (type === "sub2api-password" ? "password" : type === "newapi-key" ? "apiKey" : "accessToken") as "password" | "apiKey" | "accessToken";
+  const renewalNotice = (v: StationView) => {
+    if (v.archived || !v.s.type?.startsWith("sub2api") || !["auth", "captcha"].includes(String(v.issue?.category))) return null;
+    const baseUrl = onboardingBaseUrl(v.s.baseUrl);
+    if (!baseUrl) return null;
+    return <div className="jy-stations-renewal" role="note" aria-label={`${stationDisplayName(v.s)} 登录授权提醒`}>
+      <span>{COPY.renewal}</span>
+      <Button type="link" size="small" href={`${baseUrl}/login`} target="_blank" rel="noopener noreferrer" icon={<Icon name="external" />}>{COPY.loginUpstream}</Button>
+    </div>;
+  };
   const issueBang = (v: StationView, mobile = false) => {
     const popKey = `${mobile ? "m" : "t"}:${v.id}`; // 表格和手机卡片各一个，只开被点的那个
     const issue = v.issue;
@@ -727,13 +756,12 @@ export default function StationsPage() {
     return (
       <>
         {label ? <StatusText level={level}>{label}</StatusText> : null}
-        {note ? subLine(note, stale) : null}
+        {renewalNotice(v) || (note ? subLine(note, stale) : null)}
       </>
     );
   };
 
-  // 余额的写法和运营总览同一处（balanceMoneyOf）：按上游自己的币种写，设了汇率下面写「约 ¥88.56」，
-  // 没设置汇率下面写「没设置汇率」，悬停是整句
+  // 沿用余额的现有单位；有换算金额时补一行，默认 1:1 不重复提示。
   // 「渠道」一列：这个上游下挂了几个渠道、几个要处理；不能挂渠道的上游类型写「—」。都能点开右边的抽屉
   const channelCell = (v: StationView) => {
     const listed = channelOptions.options?.ok ? channelOptions.options.channels.filter((item) => item.upstreamStationId === v.id) : null;
@@ -747,14 +775,14 @@ export default function StationsPage() {
     const b = v.s.balance;
     if (v.fixed || !b?.ok) return <span className="jy-muted">{EMPTY}</span>;
     const m = balanceMoneyOf(v.s, Number(b.remaining));
-    // 上一行近 48 小时的小图在左、余额在右（没有小图的行留同样宽的空位，金额上下对齐），下一行换算或「没设置汇率」
+    // 小图在左、余额在右，没有小图的行保留同样的金额位置。
     return (
       <>
         <span className="jy-stations-money">
           <span className="jy-stations-spark">{sparkButton(v)}</span>
-          {m.text}
+          <strong className="jy-stations-balance">{m.text}</strong>
         </span>
-        <span className="jy-sub-money" title={m.note}>{m.cny || RATE_UNSET}</span>
+        {m.cny && <span className="jy-sub-money" title={m.note}>{m.cny}</span>}
       </>
     );
   };
@@ -978,19 +1006,15 @@ export default function StationsPage() {
         <div className="jy-table-wrap has-mobile">
           <table className="jy-data jy-stations-table">
             <caption className="sr-only">{STATION_TABS.list}</caption>
+            <colgroup><col className="jy-stations-col-name" /><col className="jy-stations-col-status" /><col className="jy-stations-col-ch" /><col className="jy-stations-col-balance" /><col className="jy-stations-col-burn" /><col className="jy-stations-col-days" /><col className="jy-stations-col-actions" /></colgroup>
             <thead>
               <tr>
                 <th scope="col" className="jy-stations-pin-l">{COPY.col.name}</th>
                 <th scope="col">{COPY.col.status}</th>
-                <th scope="col" className="jy-stations-ch">{CHANNEL_BINDING.column}</th>
-                <th scope="col" className="r">{COPY.col.balance}</th>
-                <th scope="col" className="r">{COPY.col.burn}</th>
-                <th scope="col" aria-sort={ariaSort}>
-                  <button type="button" className="jy-stations-sort" onClick={() => setSort(nextSort[sort])}>
-                    {COPY.col.days}
-                    {sort ? <Icon name={sort === "days" ? "sort" : "sort-down"} /> : null}
-                  </button>
-                </th>
+                <th scope="col" className="r jy-stations-ch">{CHANNEL_BINDING.column}</th>
+                <th scope="col" className="r" aria-sort={sortKey === "balance" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><SortHeader label={COPY.col.balance} direction={sortKey === "balance" ? sortDirection : undefined} onClick={() => onSort("balance")} /></th>
+                <th scope="col" className="r" aria-sort={sortKey === "burn" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><SortHeader label={COPY.col.burn} direction={sortKey === "burn" ? sortDirection : undefined} onClick={() => onSort("burn")} /></th>
+                <th scope="col" className="r" aria-sort={sortKey === "days" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><SortHeader label={COPY.col.days} direction={sortKey === "days" ? sortDirection : undefined} onClick={() => onSort("days")} /></th>
                 <th scope="col" className="r jy-stations-pin-r">{COPY.col.actions}</th>
               </tr>
             </thead>
@@ -1001,10 +1025,10 @@ export default function StationsPage() {
                     <tr>
                       <td className="jy-stations-pin-l">{resourceCell(v)}</td>
                       <td>{statusCell(v)}</td>
-                      <td className="jy-stations-ch">{channelCell(v)}</td>
+                      <td className="r jy-stations-ch">{channelCell(v)}</td>
                       <td className="r">{balanceCell(v)}</td>
                       <td className="r">{burnCell(v)}</td>
-                      <td>{runwayCell(v)}</td>
+                      <td className="r">{runwayCell(v)}</td>
                       <td className="r jy-stations-pin-r">
                         <div className="jy-row-actions">
                           {primaryAction(v)}
@@ -1034,9 +1058,9 @@ export default function StationsPage() {
             const { label, level, note, stale, title } = statusOf(v);
             const todo = todoAction(v, true);
             const refreshing = !!refreshingIds[v.s.id];
+            const renewal = renewalNotice(v);
             // 手机上一张卡片两行（ui-design-spec §4.7、§5.2）：名称、状态、「⋯」；余额 · 可用天数，后面带正在刷新或数据截至。
-            // 有要处理的事时多一行：那件事的标题（放不下省略）和按钮。余额设了汇率只写金额，没设置汇率照写「（没设置汇率）」，
-            // 不让人当成人民币。小图、刷新、编辑、余额趋势都在「⋯」里，点名称也能编辑
+            // 有要处理的事时多一行标题和按钮。余额只写金额；小图、刷新、编辑、余额趋势都在「⋯」里。
             return (
               <li key={v.id}>
                 <span className="m-name">
@@ -1049,14 +1073,18 @@ export default function StationsPage() {
                 </span>
                 <div className="m-sub">
                   {v.fixed ? (
-                    <span>{COPY.col.burn} <b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
+                    <span className="m-metric"><small>{COPY.col.burn}</small><b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
                   ) : (
-                    <span title={money?.cny ? `${money.full}，${money.note}` : money?.note}>{COPY.col.balance} <b>{money ? (money.cny ? money.text : money.full) : EMPTY}</b></span>
+                    <span className="m-metric" title={money?.cny ? `${money.full}，${money.note}` : undefined}><small>{COPY.col.balance}</small><b>{money ? money.text : EMPTY}</b></span>
                   )}
-                  {v.runway ? <span>{COPY.col.days} <b>{v.runway.text}</b></span> : null}
+                  <span className="m-metric"><small>{COPY.col.days}</small><b>{v.runway?.text || EMPTY}</b></span>
+                  {!v.fixed && !v.archived ? <span className="m-metric m-metric--wide"><small>{COPY.col.burn}</small><span className="m-value">{burnCell(v)}</span></span> : null}
+                </div>
+                <div className="m-links">
                   {!v.archived && !v.s.isOwn && BINDABLE_UPSTREAM_TYPES.includes(v.s.type) && channelOptions.options?.ok ? <span>{CHANNEL_BINDING.column} {channelCell(v)}</span> : null}
                   {refreshing || stale ? subLine(note!, stale) : null}
                 </div>
+                {renewal ? <div className="m-todo-line">{renewal}</div> : null}
                 {todo ? (
                   <div className="m-todo-line">
                     {title ? <span className="m-title" title={title}>{title}</span> : null}
@@ -1105,7 +1133,8 @@ export default function StationsPage() {
       <div>
         <div>
           <MergeNotice counts={mergeCounts} onOpen={merge.open} />
-          <div className="jy-toolbar">
+          <Panel body={false} title={STATION_TABS.list} label={STATION_TABS.list} className="jy-stations-panel">
+          <div className="jy-toolbar jy-stations-toolbar">
             <Input
               prefix={<Icon name="search" />}
               allowClear
@@ -1127,8 +1156,9 @@ export default function StationsPage() {
               onChange={(value: string) => setTypeFilter(value)}
               options={[{ value: "", label: COPY.allTypes }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
             />
+            <label className="jy-stations-order"><span>{COPY.sortLabel}</span><Select aria-label={COPY.sortAria} value={sort} options={COPY.sortOptions} onChange={setSort} /></label>
             <span className="spacer" />
-            {/* 向每个在看余额的上游重新读一遍余额；顶栏的刷新只重新读本页 */}
+            {/* 与顶栏共用：向正在监控的上游重新读取余额。 */}
             <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>{REFRESH}</Button>
             {/* 合过以后留一项「合并记录」，打开同一个抽屉（只剩记录那一块） */}
             {(mergeCounts?.records ?? 0) > 0 ? (
@@ -1139,7 +1169,8 @@ export default function StationsPage() {
             {addButton}
           </div>
 
-          <Panel body={false} label={STATION_TABS.list}>{body}</Panel>
+          {body}
+          </Panel>
           {/* 「另有 N 件」放在列表下面，当小字，不挤在列表上面 */}
           {filter === "attention" && unowned > 0 ? (
             <p className="jy-caption jy-stations-unowned">
@@ -1218,7 +1249,7 @@ export default function StationsPage() {
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} onOpenChange={setEditorOpen} />
-      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); setSwapping(null); }}
+      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} purchaseRate={rateSnapshotOf(stations.find((station) => station.id === channelsOf?.id)).cnyPerUsd} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); setSwapping(null); }}
         onBind={() => setBinding(true)} onUnbind={setUnbinding} onSwap={setSwapping} />
       {ownStation ? <>
         <BindChannelModal upstream={binding ? channelsOf : null} ownStationId={ownStation.id} options={channelOptions.options} onClose={() => setBinding(false)} onDone={afterChannelChange} />

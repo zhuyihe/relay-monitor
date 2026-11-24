@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { App, Button, Drawer, Grid, Input, Modal, Radio, Select } from "antd";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
-import { formatDayKey } from "../../../lib/format";
+import { formatDayKey, formatZonedDateTime } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { channelChoices, defaultChannelId, keyChoices } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
@@ -16,31 +16,44 @@ import { useDrawerEscape } from "../../components/drawer-escape";
 export type ChannelOption = {
   channelId: number; name: string; address: string; enabled: boolean; ruleId: string | null; upstreamStationId: string | null; tokenId: number | null; tokenName: string | null;
   tokenGroup: string | null; sinceDay: string | null; suggestedUpstreamId: string | null;
+  tokenRatio?: number | null; tokenRatioReadAt?: number | null;
 };
 export type ChannelOptions = { ok: true; channels: ChannelOption[]; upstreams: { id: string; name: string }[] } | { ok: false; code: string };
 
-export function useChannelOptions(ownStationId: string | null | undefined) {
+export function useChannelOptions(ownStationId: string | null | undefined, reloadToken = 0) {
   const [options, setOptions] = useState<ChannelOptions | null>(null);
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (force = false) => {
     if (!ownStationId) { setOptions(null); return; }
-    try { setOptions(await api(`/api/reconciliation/channels/options?ownStationId=${encodeURIComponent(ownStationId)}`)); } catch { setOptions(null); }
+    try { setOptions(await api(`/api/reconciliation/channels/options?ownStationId=${encodeURIComponent(ownStationId)}${force ? "&force=true" : ""}`)); } catch { setOptions(null); }
   }, [ownStationId]);
-  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => { void reload(); }, [reload, reloadToken]);
   return { options, reload };
 }
 
 export type Upstream = { id: string; name: string; address?: string };
 
+function KeyRatio({ channel, purchaseRate, tz }: { channel: ChannelOption; purchaseRate: number; tz: string }) {
+  const ratio = channel.tokenRatio;
+  const format = (value: number) => value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  const title = ratio == null ? CHANNEL_BINDING.ratioUnread : [CHANNEL_BINDING.ratioSource,
+    channel.tokenRatioReadAt ? CHANNEL_BINDING.ratioReadAt(formatZonedDateTime(channel.tokenRatioReadAt, tz)) : ""].filter(Boolean).join(" · ");
+  return <div className="jy-channels-ratio">
+    <div className="jy-key-ratio" title={title}>{CHANNEL_BINDING.ratio} <b>{ratio == null ? "—" : `${format(ratio * purchaseRate)}×`}</b></div>
+    <div className="jy-key-ratio-formula"><span>{CHANNEL_BINDING.upstreamRatio} {ratio == null ? "—" : `${format(ratio)}×`}</span>{" × "}<span>{CHANNEL_BINDING.purchaseRate} {format(purchaseRate)}</span></div>
+    {channel.tokenRatioReadAt ? <span className="jy-caption">{CHANNEL_BINDING.ratioReadAt(formatZonedDateTime(channel.tokenRatioReadAt, tz))}</span> : null}
+  </div>;
+}
+
 // 右边抽屉：这个上游下挂着的渠道
-export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbind, onSwap }: {
-  upstream: Upstream | null; channels: ChannelOption[]; tz: string; onClose: () => void; onBind: () => void; onUnbind: (channel: ChannelOption) => void; onSwap: (channel: ChannelOption) => void;
+export function ChannelsDrawer({ upstream, channels, purchaseRate, tz, onClose, onBind, onUnbind, onSwap }: {
+  upstream: Upstream | null; channels: ChannelOption[]; purchaseRate: number; tz: string; onClose: () => void; onBind: () => void; onUnbind: (channel: ChannelOption) => void; onSwap: (channel: ChannelOption) => void;
 }) {
   const screens = Grid.useBreakpoint();
   const mine = useMemo(() => channels.filter((item) => item.upstreamStationId === upstream?.id).sort((a, b) => String(a.sinceDay).localeCompare(String(b.sinceDay)) || a.channelId - b.channelId), [channels, upstream]);
   useDrawerEscape(!!upstream, onClose);
   const C = CHANNEL_BINDING;
   return <Drawer
-    className="jy-drawer jy-channels-drawer" placement="right" size={screens.md === false ? "100%" : 720} open={!!upstream} onClose={onClose} keyboard={false} destroyOnHidden
+    className="jy-drawer jy-channels-drawer" placement="right" size={screens.md === false ? "100%" : 900} open={!!upstream} onClose={onClose} keyboard={false} destroyOnHidden
     title={upstream ? <>{C.drawerTitle(upstream.name)} <span className="jy-caption">{mine.length}</span></> : null}
   >
     <div className="jy-channels-top"><Button size="small" onClick={onBind}>{`＋ ${C.bindButton}`}</Button></div>
@@ -49,6 +62,7 @@ export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbi
       <ul className="jy-channels-cards">
         {mine.map((channel) => <li key={channel.channelId}>
           <div className="jy-channels-cards__top"><strong>{channel.name}</strong><span className="jy-caption">{channel.tokenName ? C.keyOf(channel.tokenName, channel.tokenGroup) : ""}</span></div>
+          <KeyRatio channel={channel} purchaseRate={purchaseRate} tz={tz} />
           <div className="jy-channels-cards__bottom">
             <span className="jy-caption">{channel.sinceDay ? `${C.cols.since} ${formatDayKey(channel.sinceDay, tz)}` : ""}</span>
             <span className="jy-channels-cards__actions">
@@ -65,7 +79,7 @@ export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbi
           <tbody>
             {mine.map((channel) => <tr key={channel.channelId}>
               <td>{channel.name}</td>
-              <td>{channel.tokenName ? C.keyOf(channel.tokenName, channel.tokenGroup) : ""}</td>
+              <td><span>{channel.tokenName ? C.keyOf(channel.tokenName, channel.tokenGroup) : ""}</span><KeyRatio channel={channel} purchaseRate={purchaseRate} tz={tz} /></td>
               <td>{channel.sinceDay ? formatDayKey(channel.sinceDay, tz) : ""}</td>
               <td className="r">
                 <Button type="link" size="small" aria-label={`${C.swap} ${channel.name}`} onClick={() => onSwap(channel)}>{C.swap}</Button>
@@ -117,6 +131,7 @@ function KeySelect({ aria, placeholder, value, keys, failed, disabled, onChange 
   const M = CHANNEL_BINDING.bindModal;
   return <Select
     showSearch virtual={false} className="jy-bind-select" aria-label={aria} placeholder={placeholder} value={value ?? undefined} options={keys?.options ?? []} loading={keys == null && !failed} disabled={disabled}
+    getPopupContainer={(triggerNode) => triggerNode.parentElement!}
     filterOption={(input, option) => `${option?.label ?? ""} ${(option as KeyOption | undefined)?.reason ?? ""}`.toLowerCase().includes(input.trim().toLowerCase())}
     optionRender={(option) => { const item = option.data as KeyOption; return item.disabled ? <span className="jy-key-off"><span>{item.label}</span><small>{item.reason}</small></span> : item.label; }}
     popupRender={(menu) => <>{keys && keys.usable === 0 && keys.options.length ? <div className="jy-key-none">{CHANNEL_BINDING.keyReason.none}</div> : null}{menu}</>}

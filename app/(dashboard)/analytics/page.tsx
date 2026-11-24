@@ -56,14 +56,16 @@ export default function AnalyticsPage() {
   }, []);
 
   // 返回这次加载的报错（成功或已被更新的请求取代时返回 null），顶栏刷新按钮原样往外抛，由外壳按码归类
-  const load = useCallback(async (start: string): Promise<Error | null> => {
+  const load = useCallback(async (start: string, refresh = false): Promise<Error | null> => {
     const my = ++seq.current;
     try {
-      const data = (await api("/api/reconciliation/profit", { method: "POST", body: { preset: "custom", startMs: dayStartInTz(start, tz), endMs: Date.now() } })) as ProfitPageResponse;
+      const window = { preset: "custom", startMs: dayStartInTz(start, tz), endMs: Date.now() };
+      if (refresh) await api("/api/reconciliation/query", { method: "POST", body: { ...window, observe: true } });
+      const data = (await api("/api/reconciliation/profit", { method: "POST", body: window })) as ProfitPageResponse;
       if (my !== seq.current) return null;
       setProfit(data);
       setLoadedStart(start);
-      setAsOf(Date.now());
+      setAsOf(Date.parse(data.asOf) || null);
       setLoadError(null);
       setLoading(false);
       return null;
@@ -92,6 +94,8 @@ export default function AnalyticsPage() {
     () => (
       <RangePicker
         value={rangeValue}
+        tz={tz}
+        range={loadedStart === startDay ? profit?.range : undefined}
         options={RANGE_OPTIONS}
         onChange={(v) => setUrl({ range: v === "30d" ? null : v, start: null })}
         custom={{
@@ -102,15 +106,16 @@ export default function AnalyticsPage() {
         }}
       />
     ),
-    [rangeValue, customOk, rawStart, minDate, today, setUrl],
+    [rangeValue, customOk, rawStart, minDate, today, setUrl, tz, loadedStart, startDay, profit?.range],
   );
 
   useShellPage({
     onRefresh: async () => {
-      const error = await load(startDay);
+      const error = await load(startDay, true);
       if (error) throw error;
     },
     asOf,
+    autoRefreshMs: POLL_MS,
     range,
     tz,
   });
@@ -124,9 +129,11 @@ export default function AnalyticsPage() {
   // 首次加载：骨架与真实布局一致
   if (!profit && loading) {
     return (
-      <div className="jy-page" aria-busy="true">
-        <PanelSkeleton title={COPY.panel.mix} lines={5} />
-        <PanelSkeleton title={COPY.panel.daily} height={300} />
+      <div className="jy-page jy-analytics" aria-busy="true">
+        <div className="jy-analytics-charts">
+          <PanelSkeleton title={COPY.panel.daily} height={300} />
+          <PanelSkeleton title={COPY.panel.mix} lines={5} />
+        </div>
       </div>
     );
   }
@@ -135,7 +142,7 @@ export default function AnalyticsPage() {
   const stale = !!profit && loadedStart !== startDay;
   if (!profit || (stale && loadError && !loading)) {
     return (
-      <div className="jy-page">
+      <div className="jy-page jy-analytics">
         <Panel title={COPY.panel.mix} extra={toDaily}>
           <ErrorState what={COPY.readFailed} error={loadError} onRetry={retry} center />
         </Panel>
@@ -145,7 +152,7 @@ export default function AnalyticsPage() {
 
   if (!profit.rows.length) {
     return (
-      <div className="jy-page">
+      <div className="jy-page jy-analytics">
         <Panel title={COPY.panel.mix} extra={toDaily}>
           <EmptyState
             title={NO_UPSTREAM_TEXT}
@@ -162,10 +169,12 @@ export default function AnalyticsPage() {
   }
 
   return (
-    <div className={`jy-page${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
+    <div className={`jy-page jy-analytics${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
       {loadError && <RefreshFailedBanner asOf={asOf} tz={tz} error={loadError} onRetry={retry} />}
-      <MixPanel profit={profit} extra={toDaily} />
-      <DailyCostPanel profit={profit} tz={tz} emptyText={emptyNote(profit, COPY.dailyEmpty)} />
+      <div className="jy-analytics-charts">
+        <DailyCostPanel profit={profit} tz={tz} emptyText={emptyNote(profit, COPY.dailyEmpty)} />
+        <MixPanel profit={profit} extra={toDaily} />
+      </div>
     </div>
   );
 }
@@ -199,7 +208,7 @@ function MixPanel({ profit, extra }: { profit: ProfitPageResponse; extra?: React
   const items: HBarItem[] = [...byUpstream.entries()].map(([id, entry]) => ({ key: id, name: entry.name, value: r2(entry.value) })).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   const total = items.reduce((sum, item) => sum + (item.value ?? 0), 0);
   return (
-    <Panel title={COPY.panel.mix} caption={COPY.mixCaption} extra={extra}>
+    <Panel className="jy-analytics-mix" title={COPY.panel.mix} caption={COPY.mixCaption} extra={extra}>
       <HBars
         items={items}
         color="var(--jy-s2)"

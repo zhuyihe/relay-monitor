@@ -17,7 +17,7 @@ import { Bars } from "../components/bars";
 import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
 import { useElementWidth } from "../components/use-width";
-import { Seg } from "../components/seg";
+import { RangePicker } from "../components/range-picker";
 import { Sym } from "../components/icons";
 
 // 时间选项的名字和其他页同一份（RANGE_TEXT）
@@ -413,7 +413,8 @@ export default function TrendModal({
 
           <div className="jy-trend-sub">
             <h3>{COPY.balanceTitle}</h3>
-            <Seg<Range> options={[...RANGES]} value={range} onChange={setRange} label={COPY.range} size="sm" />
+            <RangePicker options={[...RANGES]} value={range} onChange={(value) => setRange(value as Range)} label={COPY.range} tz={tz}
+              getRange={(preset) => { const now = Date.now(); return { startMs: now - Number(preset) * HOUR, endMs: now }; }} />
           </div>
 
           <div className="jy-trend-body" aria-busy={loading}>

@@ -174,22 +174,23 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { rules, ruleOf };
   }
 
-  async function options(ownStationId) {
+  async function options(ownStationId, { force = false } = {}) {
     ownStationOf(ownStationId);
     const catalogue = onboarding()?.getSourceCatalogue?.();
     if (!catalogue?.ownSource || catalogue.stale) return { ok: false, code: "CHANNEL_CATALOGUE_STALE" };
     const { rules, ruleOf } = await channelRules(ownStationId);
     const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && !station.archivedAt && BILLING_TYPES.has(station.type));
     // 抽屉要的：每个渠道绑在哪个上游、哪把 Key（名、分组）、从哪天绑的；还没绑的渠道带它自己的地址和地址对得上的上游。
-    // 上游的 Key 列表走现有的 5 分钟缓存，不新读用户的 New API；两处（抽屉、小窗口）共用这一个读
+    // Key 和当前倍率共用现有的 5 分钟目录缓存；顶部手动刷新时才跳过缓存，每个上游只读一次。
     const tokensOf = new Map();
-    await Promise.all([...new Set(rules.map((rule) => rule.upstreamStationId))].map(async (id) => tokensOf.set(id, await reconciliation().upstreamTokens(id))));
+    await Promise.all([...new Set(rules.map((rule) => rule.upstreamStationId))].map(async (id) => tokensOf.set(id, await reconciliation().upstreamTokens(id, { force }))));
     const channels = catalogue.channels.filter((channel) => !channel.missing).map((channel) => {
       const rule = ruleOf.get(Number(channel.id)) || null;
       const start = rule ? reconciliationAccountingStart(rule) : null;
+      const token = tokensOf.get(rule?.upstreamStationId)?.find((token) => Number(token.id) === Number(rule?.tokenId));
       return { channelId: Number(channel.id), name: channel.name, address: hostOf(channel.baseUrl), enabled: Number(channel.status) === 1, ruleId: rule?.id ?? null, upstreamStationId: rule?.upstreamStationId ?? null,
         tokenId: rule?.tokenId ?? null, tokenName: rule?.tokenName ?? null,
-        tokenGroup: tokensOf.get(rule?.upstreamStationId)?.find((token) => Number(token.id) === Number(rule?.tokenId))?.group || null,
+        tokenGroup: token?.group || null, tokenRatio: token?.currentRatio ?? null, tokenRatioReadAt: token?.ratioReadAt ?? null,
         sinceDay: start != null ? dayKeyInTz(start, rule.timezone) : null,
         suggestedUpstreamId: rule ? null : matchCostStations(upstreams, channel.baseUrl)[0]?.id ?? null };
     });

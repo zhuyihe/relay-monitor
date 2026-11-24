@@ -5,7 +5,7 @@
 //     窗口的两头都对齐到整秒（站点的 start/end 按秒、两头包含；不对齐的话边界那一秒两边都不读，审核 #123 中-1）；
 //   - 窗口大小自适应：第一页就知道这个窗口有多少条，超过 PAGES_PER_WINDOW 页就对半切（/api/log/ 每页都要 COUNT 一次，窗口小 COUNT 才便宜，翻页也不深）；
 //     很稀的窗口翻倍，上限 1 小时；下限 5 秒（每秒几十条的站点也能一个窗口一个窗口往前走，审核 #123 中-2）；
-//   - 每轮最多 MAX_PAGES_PER_ROUND 页、MAX_ROUND_MS 毫秒；落后超过 BEHIND_MS 时每轮放宽到 MAX_PAGES_BEHIND 页（180 秒 45 个、限流的 12.5%），追平回到 6 页；
+//   - 每轮最多 MAX_PAGES_PER_ROUND 页、MAX_ROUND_MS 毫秒；消费日志落后超过 15 分钟时每轮放宽到 MAX_PAGES_BEHIND 页，追平回到 6 页；
 //     每发一个请求之前都看一眼时间和断路器，到了就停；每页暂存去重编号和桶，下轮从下一页继续（审核 #123 中-3）；
 //   - 第一次跑只从昨天 0 点（业务时区）起，不往前补更早的；
 //   - 停机、站点读不到、令牌失效造成的掉队，不管多久都照常按保底慢慢追，不跳、不清桶（总指挥 10-26 定第三轮）；
@@ -78,7 +78,7 @@ export const cachedRetrySettings = (rt, own) => rt._ownRetrySettings?.get(own.id
 export const CONSUME_KIND = Object.freeze({
   name: "consume", type: 2, tag: "own-log-ingest", slotMs: OWN_LOG_SLOT_MS, accumulate: accumulateBuckets, keyOf: bucketKeyOf, needsAdmins: true,
   // 追平以后每 5 分钟才读一次（落后不到 5 分钟又没有读到一半的窗口，这一轮不发请求）：给用户站减负，桶只用于结账、应付成本和今天的汇总，不需要分钟级
-  limits: Object.freeze({ minAdvanceMs: OWN_LOAD.CONSUME_LOG_MS }),
+  limits: Object.freeze({ minAdvanceMs: OWN_LOAD.CONSUME_LOG_MS, behindMs: OWN_LOAD.BUCKET_TODAY_MAX_LAG_MS }),
 });
 export const ERROR_KIND = Object.freeze({
   name: "error", type: 5, tag: "own-error-ingest", slotMs: OWN_ERROR_SLOT_MS, accumulate: accumulateErrorBuckets, keyOf: errorBucketKeyOf, needsAdmins: false,
@@ -101,7 +101,7 @@ const ownBase = (own) => String(own?.baseUrl || "").replace(/\/+$/, "");
 const wholeSecond = (ms) => Math.floor(ms / 1000) * 1000;
 
 export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () => Date.now(), log = () => {} } = {}) {
-  const limit = { pagesPerRound: INGEST.MAX_PAGES_PER_ROUND, pagesBehind: INGEST.MAX_PAGES_BEHIND, windowStartMs: INGEST.WINDOW_START_MS, windowMaxMs: INGEST.WINDOW_MAX_MS, minAdvanceMs: 0, ...kind.limits };
+  const limit = { pagesPerRound: INGEST.MAX_PAGES_PER_ROUND, pagesBehind: INGEST.MAX_PAGES_BEHIND, behindMs: INGEST.BEHIND_MS, windowStartMs: INGEST.WINDOW_START_MS, windowMaxMs: INGEST.WINDOW_MAX_MS, minAdvanceMs: 0, ...kind.limits };
   const windowSizes = new Map(); // 站点 id → 现在用的窗口大小（自适应，进程内）
   const lagWarnedAt = new Map(); // 站点 id → 上次打「落后太多」日志的时刻
   let lastPruneAt = 0;
@@ -143,7 +143,7 @@ export function createOwnLogIngest(rt, { store, kind = CONSUME_KIND, now = () =>
       lagWarnedAt.set(own.id, at);
       log(kind.tag, own.id, `behind ${Math.round(behind / 3600000)}h`);
     }
-    const maxPages = behind > INGEST.BEHIND_MS ? limit.pagesBehind : limit.pagesPerRound;
+    const maxPages = behind > limit.behindMs ? limit.pagesBehind : limit.pagesPerRound;
     let budget = Math.min(allowance.allowed, maxPages), pages = 0, windows = 0;
     const deadline = at + INGEST.MAX_ROUND_MS;
     const mayRequest = () => budget > 0 && now() < deadline && !ownRequestState(base, now()).broken;

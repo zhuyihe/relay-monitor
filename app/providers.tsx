@@ -4,7 +4,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { ConfigProvider, App, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { antdThemeConfig } from "../lib/design-tokens";
+import { antdThemeConfig, palette } from "../lib/design-tokens";
 import { LEGACY_THEME_KEY, readLegacyTheme, writeThemeCookie } from "../lib/theme";
 
 type ThemeMode = "light" | "dark";
@@ -27,7 +27,7 @@ export default function Providers({
 
   useEffect(() => {
     if (!initialTheme) {
-      // 没有 cookie：内联脚本已按旧设置或系统偏好写好 data-theme，这里同步给 antd
+      // 没有 cookie：内联脚本已按旧的手动选择或默认白色写好 data-theme，这里同步给 antd
       const legacy = readLegacyTheme();
       if (legacy) {
         writeThemeCookie(legacy);
@@ -38,6 +38,10 @@ export default function Providers({
     // PWA：注册 service worker（网络优先壳缓存，来自 v1.12）
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   }, [initialTheme]);
+
+  useEffect(() => {
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", palette[mode].plane);
+  }, [mode]);
 
   // data-theme 只在用户切换时改写；首帧的值来自服务端或内联脚本
   const toggle = () => {

@@ -4,9 +4,10 @@
 // 按美元显示时不换算。金额不写 0（算不出的写「—」），写法按 design/ui-copy-spec.md §5.7、§6、§7。
 import type { ProfitDetailResponse, ProfitKeyRow, ProfitPageResponse, ProfitRow, ReconciliationCurrency } from "../../../lib/client";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view.js";
-import { EMPTY, MINUS, RATE_UNSET_USD, UPSTREAM_GONE, formatAsOfTime, formatCompact, formatDayKey, formatPct, formatUnitPrice, formatZonedTime, weekdayOfDayKey } from "../../../lib/format.js";
+import { EMPTY, MINUS, UPSTREAM_GONE, formatAsOfTime, formatCompact, formatDayKey, formatPct, formatUnitPrice, formatZonedTime, weekdayOfDayKey } from "../../../lib/format.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel, tzOffsetMs } from "../../../lib/business-time.js";
 import { keepOrder } from "../../../lib/keep-order.js";
+import { costInMainUnit } from "../../../lib/profit.js";
 import { COPY } from "./copy"; // 同目录的 .ts 不带后缀（Turbopack 不认 "./copy.js"；node 跑测试时 profit-format.test.js 的 resolve 钩子补 .ts）
 
 // zoneOf：这一行上游算一天的时区（从绑定配置里取），只给 DAY_BOUNDARY_UNSUPPORTED 那一句写时差用
@@ -36,6 +37,10 @@ export const rateText = (rate: number) => rate < 0 ? COPY.gap.underRate(pctText(
 
 // 一行各项在显示币种下的数：收入按自营站点的汇率，成本按这个上游的汇率；毛利 = 收入 − 实付（两边各自换算后再减）
 export function rowMoney(row: ProfitRow, currency: ReconciliationCurrency) {
+  if (currency === "USD") {
+    const income = row.incomeUsd, actual = row.actualCostMain !== undefined ? row.actualCostMain : row.rates?.costBasis === "fixed" ? 0 : costInMainUnit(row.actualCostUsd, row.rates?.cost, row.rates?.income);
+    return { income, actual, gross: income != null && actual != null ? income - actual : null, uncountedIncome: row.uncountedIncomeUsd };
+  }
   // 人民币：接口按天换好的数（每天按那天结账时记下的汇率）优先；没给的退回按这一行现在的汇率
   const exact = currency === "CNY" && finite(row.incomeCny) && finite(row.actualCostCny);
   const income = exact ? row.incomeCny! : toDisplay(row.incomeUsd, row.rates?.income, currency), actual = exact ? row.actualCostCny! : toDisplay(row.actualCostUsd, row.rates?.cost, currency);
@@ -49,7 +54,11 @@ export function rowMoney(row: ProfitRow, currency: ReconciliationCurrency) {
 // 整页的数在显示币种下：按美元直接用接口的 pageTotals；按人民币时各行按各自的汇率换算再加（接口只给美元）
 export function pageMoney(page: ProfitPageResponse, currency: ReconciliationCurrency) {
   const counted = page.rows.filter((row) => row.counted);
-  if (currency !== "CNY") return { income: page.pageTotals.incomeUsd, actual: page.pageTotals.actualCostUsd, gross: page.pageTotals.grossProfitUsd, fixedCost: page.fixedCostUsd, fixedExact: true, net: page.netProfitUsd, approx: false };
+  if (currency !== "CNY") {
+    if (page.accountingTotals) return { ...page.accountingTotals, fixedExact: true, approx: false };
+    return { income: page.pageTotals.incomeUsd, actual: page.pageTotals.actualCostUsd, gross: page.pageTotals.grossProfitUsd,
+      fixedCost: page.fixedCostUsd, fixedExact: true, net: page.netProfitUsd, approx: false };
+  }
   const moneys = counted.map((row) => rowMoney(row, currency));
   const income = counted.length ? sum(moneys.map((item) => item.income ?? 0)) : null, actual = counted.length ? sum(moneys.map((item) => item.actual ?? 0)) : null;
   const gross = income != null && actual != null ? income - actual : null;
@@ -101,10 +110,10 @@ export function attentionSuffix(page: ProfitPageResponse) {
 }
 // 页顶一句（设计稿 §2）
 export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
-  const asOf = Date.parse(page.asOf);
+  const asOf = Date.parse(page.asOf ?? "");
   const suffix = attentionSuffix(page);
   const base = (() => {
-    if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)} 0:00–${formatZonedTime(Number.isFinite(asOf) ? asOf : ctx.now ?? Date.now(), ctx.tz)} · ${COPY.todayCaption}`;
+    if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)}${Number.isFinite(asOf) ? ` 0:00–${formatZonedTime(asOf, ctx.tz)}` : ` · ${COPY.cutoffUnknown}`} · ${COPY.todayCaption}`;
     const text = rangeText(page, ctx);
     if (page.range?.preset === "since") return `${text} · ${COPY.presets.since}`; // 「10月20日–今天 · 开始算以来」
     // 看一天：固定了写「已固定」；没固定、又有渠道在读取时，页顶后面那句「其中 N 个渠道还在读取」已经说了，这里不再单独写「还在读取」（不连着出现两次）
@@ -117,12 +126,10 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
 }
 
 // ---- 轮询 ----
-// 范围里含今天才轮询（不带 observe）：「今天」和终点晚于今天 0 点的自定义范围 30 秒一次；「近 7 天」「本月」也含今天，和旧页面一样 5 分钟一次
-// （不比旧页面多发请求）；昨天、不含今天的自定义范围的日子都已固定，不轮询（审核 #128）。
-// 例外：不管选的哪个范围，当前结果里还有「还在读取」的日子（零点以后正在结账的那几个小时）就 5 分钟重读一次，没有了就停（审核 2 #128）。tz 是接口给的业务时区，没读到页面数据时用默认
-export const LIVE_POLL_MS = 30000;
+// 含今天的范围每分钟更新今天；已固定的历史范围停止，缺账时每五分钟检查补账进度。
+export const LIVE_POLL_MS = 60000;
 export const LIVE_POLL_LONG_MS = 300000;
-// 有渠道今天的数还没读到：10 秒再要一次整页（服务端只读缓存、不发外面的请求，后台轮询读到就补上），都读到了回到上面的节奏
+// 有行还在读取时十秒检查一次；今日现读仍共用一分钟结果，已有在读任务不重复启动。
 export const ROWS_READING_POLL_MS = 10000;
 export function livePollMs(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null, reading = false, rowsReading = false): number | null {
   const base = livePollBase(window, now, tz);
@@ -131,7 +138,7 @@ export function livePollMs(window: { preset: string; startMs?: number; endMs?: n
 }
 function livePollBase(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null): number | null {
   if (window.preset === "today") return LIVE_POLL_MS;
-  if (window.preset === "7d" || window.preset === "month" || window.preset === "since") return LIVE_POLL_LONG_MS;
+  if (window.preset === "7d" || window.preset === "month" || window.preset === "since") return LIVE_POLL_MS;
   if (window.preset === "custom" && Number.isFinite(window.endMs)) return (window.endMs as number) > dayStartInTz(dayKeyInTz(now, tz || undefined), tz || undefined) ? LIVE_POLL_MS : null;
   return null;
 }
@@ -180,9 +187,9 @@ export const swappedUpstream = (row: ProfitRow) => new Set((row.keys || []).map(
 export const keyLabel = (key: { name: string; ratio: number | null; upstream: { name: string | null } }, withUpstream: boolean) =>
   `${withUpstream ? `${key.upstream?.name ?? UPSTREAM_GONE} · ` : ""}${key.name}${ratioPart(key.ratio)}`;
 // Key 行的数：和渠道行同一套换算（收入按自营站点汇率、成本按这个上游的汇率）；读不到的写「—」
-export function keyCells(key: Pick<ProfitKeyRow, "incomeUsd" | "costUsd"> & { incomeCny?: number | null; costCny?: number | null }, row: ProfitRow, ctx: Ctx) {
+export function keyCells(key: Pick<ProfitKeyRow, "incomeUsd" | "costUsd"> & { incomeCny?: number | null; costCny?: number | null; costMain?: number | null }, row: ProfitRow, ctx: Ctx) {
   const exact = ctx.currency === "CNY" && finite(key.costCny) && (key.incomeUsd == null || finite(key.incomeCny));
-  const income = exact && key.incomeUsd != null ? key.incomeCny! : toDisplay(key.incomeUsd, row.rates?.income, ctx.currency), actual = exact ? key.costCny! : toDisplay(key.costUsd, row.rates?.cost, ctx.currency);
+  const income = exact && key.incomeUsd != null ? key.incomeCny! : toDisplay(key.incomeUsd, row.rates?.income, ctx.currency), actual = ctx.currency === "USD" ? key.costMain !== undefined ? key.costMain : costInMainUnit(key.costUsd, row.rates?.cost, row.rates?.income) : exact ? key.costCny! : toDisplay(key.costUsd, row.rates?.cost, ctx.currency);
   const gross = income != null && actual != null ? income - actual : null;
   return { income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null };
 }
@@ -224,6 +231,43 @@ export function sortRows(rows: ProfitRow[], sort: Sort, ctx: Ctx): ProfitRow[] {
     const x = rowCells(a, ctx)[sort.key], y = rowCells(b, ctx)[sort.key];
     if (x == null || y == null) return x == null && y == null ? byName(a, b) : x == null ? 1 : -1;
     return x === y ? byName(a, b) : sign * (x - y);
+  });
+}
+
+export type SupplierItem = { id: string; row: ProfitRow; key: ProfitKeyRow | null; income: number | null; actual: number | null; gross: number | null; margin: number | null };
+export type SupplierGroup = { id: string; name: string; items: SupplierItem[]; channels: number; keys: number; issues: number; income: number | null; actual: number | null; gross: number | null; margin: number | null };
+// 按已经分配好的 Key 金额归供应商，换过供应商的渠道不把整行重复计入两家。未计入的行保留明细，不加进供应商合计。
+export function supplierGroups(rows: ProfitRow[], ctx: Ctx, sort: Sort | null): SupplierGroup[] {
+  const groups = new Map<string, { name: string; items: SupplierItem[]; channels: Set<string>; keys: Set<string>; issues: Set<string> }>();
+  for (const row of rows) {
+    const parts = row.keys?.length ? row.keys : [null];
+    for (const key of parts) {
+      const upstream = key?.upstream ?? row.upstream, id = upstream.stationId;
+      const group = groups.get(id) ?? { name: upstream.name ?? UPSTREAM_GONE, items: [], channels: new Set<string>(), keys: new Set<string>(), issues: new Set<string>() };
+      const money = parts.length > 1 && key ? keyCells(key, row, ctx) : rowCells(row, ctx);
+      const income = row.counted ? money.income : null, actual = row.counted ? money.actual : null;
+      const gross = income != null && actual != null ? income - actual : null;
+      group.items.push({ id: `${row.rowKey}:${key?.tokenId ?? "row"}`, row, key, income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null });
+      for (const channel of row.channels) group.channels.add(`${row.rowKey.split(":")[1]}:${channel.channelId}`);
+      group.keys.add(String(key?.tokenId ?? row.key.name));
+      if (row.reading || row.attention || row.notice || row.excludedDays || !row.counted || (key && key.pendingDays > 0)) group.issues.add(row.rowKey);
+      groups.set(id, group);
+    }
+  }
+  const totals = [...groups].map(([id, group]) => {
+    const counted = group.items.filter((item) => item.row.counted);
+    const income = counted.length && counted.every((item) => item.income != null) ? sum(counted.map((item) => item.income!)) : null;
+    const actual = counted.length && counted.every((item) => item.actual != null) ? sum(counted.map((item) => item.actual!)) : null;
+    const gross = income != null && actual != null ? income - actual : null;
+    return { id, name: group.name, items: group.items, channels: group.channels.size, keys: group.keys.size, issues: group.issues.size,
+      income, actual, gross, margin: gross != null && income != null && income > 0 ? gross / income : null };
+  });
+  const order = sort ?? DEFAULT_SORT, sign = order.dir === "desc" ? -1 : 1;
+  return totals.sort((a, b) => {
+    const byName = a.name.localeCompare(b.name, "zh-CN");
+    if (order.key === "name") return sign * byName;
+    const x = a[order.key], y = b[order.key];
+    return x == null || y == null ? x == null && y == null ? byName : x == null ? 1 : -1 : x === y ? byName : sign * (x - y);
   });
 }
 
@@ -273,7 +317,7 @@ export function chartDays(page: ProfitPageResponse, ctx: Ctx): ChartDay[] {
       if (!cell || cell.state === "notStarted" || cell.state === "future") continue;
       if (cell.state !== "fixed") fixed = false;
       const exact = ctx.currency === "CNY" && finite(cell.incomeCny) && finite(cell.actualCostCny);
-      const i = exact ? cell.incomeCny! : toDisplay(cell.incomeUsd, row.rates?.income, ctx.currency), c = exact ? cell.actualCostCny! : toDisplay(cell.actualCostUsd, row.rates?.cost, ctx.currency);
+      const i = exact ? cell.incomeCny! : toDisplay(cell.incomeUsd, row.rates?.income, ctx.currency), c = ctx.currency === "USD" ? cell.actualCostMain !== undefined ? cell.actualCostMain : costInMainUnit(cell.actualCostUsd, row.rates?.cost, row.rates?.income) : exact ? cell.actualCostCny! : toDisplay(cell.actualCostUsd, row.rates?.cost, ctx.currency);
       if (i == null || c == null) continue;
       income += i; actual += c; any = true;
     }
@@ -330,7 +374,18 @@ export function footerNotes(page: ProfitPageResponse, ctx: Ctx, hrefs: { upstrea
   const unsupported = (page.unsupportedChannels || []).filter((channel) => channel.reason === "KEY_IN_OTHER_UPSTREAM" && channel.upstreamNames.length)
     .map((channel) => COPY.notice.unsupportedKeyInUpstreams(channel.name, channel.upstreamNames));
   if (unsupported.length) notes.push({ key: "unsupported", text: COPY.notice.unsupported(unsupported.slice(0, 3), unsupported.length) });
-  if (ctx.currency !== "CNY" && page.rateUnset?.length) notes.push({ key: "rate", text: RATE_UNSET_USD });
+
+  if (page.coverage) {
+    const scope = page.coverage, failed = scope.channels.filter((channel) => ["billing_missing", "row_attention"].includes(channel.status)).length;
+    notes.push({ key: "coverage", text: `当前算进利润的渠道：${scope.accountedChannelCount}/${scope.knownChannelCount}；${failed} 个渠道读取未完成。${scope.catalogueState !== "verified" ? "渠道清单还未确认。" : ""}未绑定渠道是否有消费尚未确认，合计不代表全站利润。` });
+  }
+  if (page.timing?.provisional) {
+    const time = (value: number | null) => value == null ? "未确认" : formatZonedTime(value, ctx.tz);
+    notes.push({ key: "timing", text: `今日利润为暂估：收入截至 ${time(page.timing.incomeThroughMs)}，成本截至 ${time(page.timing.costThroughMs)}；两侧截止时间可能不同。` });
+  }
+  if (page.accountingTotals) notes.push({ key: "coefficient", text: "单位与主站一致；采购系数沿用上游配置，未配置按 1，实扣中的分组和模型倍率不重复相乘。" });
+  const preview = page.historicalRatePreview;
+  if (preview?.entries) notes.push({ key: "historical", text: `当前范围有 ${preview.entries} 条历史记录未保存完整系数，按历史默认 1 展示；成本合计 ${fmtMoney(preview.costAfter, ctx.currency)}。沿用当前配置会为 ${fmtMoney(preview.costBefore, ctx.currency)}。此处只展示计算变化，历史记录未改写。` });
   if (ownLog && finite(ownLog.coveredToMs)) {
     const behind = finite(ownLog.behindMs) ? ownLog.behindMs : (ctx.now ?? Date.now()) - ownLog.coveredToMs;
     if (behind >= OWN_LOG_LAG_MS) notes.push({ key: "lagging", text: COPY.notice.logLagging(formatAsOfTime(ownLog.coveredToMs, ctx.tz, ctx.now)), link: { text: COPY.notice.goSettings, href: hrefs.settings } });

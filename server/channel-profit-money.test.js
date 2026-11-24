@@ -1954,8 +1954,8 @@ test("页面只读缓存：「数据截至」写那份数真实的时刻（轮�
   const cached = await cachedPage(f);
   assert.equal(Date.parse(cached.asOf), SH("2026-10-30T10:10:00"));
   assert.equal(Date.parse((await f.rt.reconciliation.profitPage({ preset: "today" })).asOf), SH("2026-10-30T10:12:00"));
-  await f.at("2026-10-30T10:30:00"); // 太旧、都在读取：没有真实时刻可写，用现在
-  assert.equal(Date.parse((await cachedPage(f)).asOf), SH("2026-10-30T10:30:00"));
+  await f.at("2026-10-30T10:30:00"); // 太旧、都在读取：没有真实时刻，不写查询时间
+  assert.equal((await cachedPage(f)).asOf, null);
 });
 
 test("只含今天的范围（自选今天、开始算以来都在今天、每月 1 号的本月）：和今天一样取轮询的结果，有数、不是「—」；结果太旧时「还在读取」", async (t) => {
@@ -2588,3 +2588,74 @@ for (const failing of ["listDayKeys 读对方的", "listDayKeys 读自己的", "
     assert.ok(await f.rt.reconciliation.changeRuleKeyManual(mine.ruleId, 30));
   });
 }
+
+test("历史渠道已解绑但金额计入：渠道数量与期间合计一致", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9, 10], noAgent: true, channelKey: {} });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T20:00:00");
+  await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+  await f.at("2026-10-11T10:00:00");
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 2, upstreamStationId: f.supplier.id, tokenId: 10 });
+  await f.round("2026-10-12T10:00:00");
+  f.rt._reconciliationResultCache.clear();
+  const page = await cachedPage(f, { preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-12T00:00:00") });
+  assert.equal(page.counts.countedChannels, 2);
+  assert.equal(page.coverage.accountedChannelCount, 2);
+  assert.equal(page.coverage.channels.find((channel) => channel.channelId === 1).status, "accounted");
+  assert.equal(page.unlinkedChannelCount, 5);
+});
+
+test("主站收入读不到：保留成本真实时间，收入及整页截止时间不冒充现在", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], noAgent: true, channelKey: {} });
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  await f.round("2026-10-10T10:00:00");
+  const before = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    return url.host === "own.test" && url.pathname === "/api/log/stat"
+      ? { status: 500, text: async () => JSON.stringify({ success: false }) } : before(input, init);
+  });
+  await f.at("2026-10-10T11:00:00");
+  await f.rt.reconciliation.queryRules({ preset: "today" }, { mode: "observe", origin: "manual", force: true });
+  const page = await cachedPage(f);
+  assert.equal(page.ownIncomeUnavailable.code, "OWN_BILLING_UNAVAILABLE");
+  assert.equal(page.timing.incomeThroughMs, null);
+  assert.equal(page.timing.costThroughMs, f.state.now);
+  assert.equal(page.asOf, null);
+});
+
+test("对账今日现读绕过落后明细，多个页面一分钟内共用结果，手动刷新立即重读", async (t) => {
+  const { f } = await usageCheckFixture(t);
+  await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+  f.rt.reconciliation = createReconciliationModule(f.rt, { repository: f.repository, ownLogStore: f.ownLogStore });
+  await f.at("2026-10-10T12:01:00");
+  let channelReads = 0;
+  const fetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && url.searchParams.has("channel") && !url.searchParams.has("username") && !url.searchParams.has("token_name")) channelReads += 1;
+    return fetch(input, init);
+  });
+  const stats = () => channelReads;
+  const before = stats();
+  const [a, b] = await Promise.all([0, 1].map(() => f.rt.reconciliation.profitPage({ preset: "today" }, { cacheOnly: true, refreshToday: true })));
+  assert.equal(stats() - before, 1, "同时打开两个页面只查询一次渠道汇总");
+  assert.equal(a.rows[0].incomeUsd, 2 * (12 * 3600 + 60), "用最新汇总，不拿十分钟前的桶金额当今天收入");
+  assert.deepEqual(a.accountingTotals, b.accountingTotals);
+  assert.equal(a.timing.incomeThroughMs, f.state.now);
+  const after = stats();
+  f.state.now += 30000;
+  await f.rt.reconciliation.profitPage({ preset: "7d" }, { cacheOnly: true, refreshToday: true });
+  assert.equal(stats(), after, "换时间范围仍共用同一份今天");
+  await f.rt.reconciliation.profitPage({ preset: "month" }, { cacheOnly: true, refreshToday: true, forceToday: true });
+  assert.equal(stats(), after + 1, "手动刷新不等一分钟缓存过期");
+  const ledger = structuredClone(f.repository.tables.ledger);
+  const readAt = stats();
+  await f.rt.reconciliation.profitPage({ preset: "yesterday" }, { cacheOnly: true, refreshToday: true, forceToday: true });
+  assert.equal(stats(), readAt, "看昨天不查询今天，也不重读历史");
+  assert.deepEqual(f.repository.tables.ledger, ledger, "页面刷新不重写历史金额");
+  f.state.now += 61000;
+  await f.rt.reconciliation.profitPage({ preset: "today" }, { cacheOnly: true, refreshToday: true });
+  assert.equal(stats(), readAt + 1, "过一分钟自动取得新数据");
+});

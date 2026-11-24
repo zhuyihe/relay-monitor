@@ -7,11 +7,12 @@ export const COPY = Object.freeze({
   // 时间范围（§6）
   presets: Object.freeze({ today: "今天", yesterday: "昨天", "7d": "近 7 天", month: "本月", since: "开始算以来", custom: "自定义" }),
   rangeLabel: "时间范围",
-  customRangeLabel: "自定义时间范围",
+  customRangeLabel: "选择时间范围",
   query: "查询",
   pickRange: "请选开始和结束日期",
   // 页顶一句（设计稿 §2）：今天 / 已固定 / 几天已固定，今天实时 / 还在读取
   todayCaption: "今天的数还会变，过了零点自动固定",
+  cutoffUnknown: "数据截止时间未确认",
   fixed: "已固定",
   live: "实时",
   daysFixed: (n: number) => `${n} 天已固定`,

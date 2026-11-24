@@ -38,6 +38,13 @@ test("channels 接口：请求不对给 400 和码；模块抛的带码的错原
   assert.doesNotMatch(body.error, /secret-pat/, "原文里的令牌不能原样给出去");
 });
 
+test("channels options：只有 force=true 跳过倍率目录缓存", async () => {
+  const calls = [];
+  const { rt } = runtime({ options: async (id, options) => { calls.push({ id, ...options }); return { ok: true, channels: [] }; } });
+  for (const query of ["", "&force=true", "&force=false"]) await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/options?ownStationId=own" + query), rt, "options");
+  assert.deepEqual(calls, [{ id: "own", force: false }, { id: "own", force: true }, { id: "own", force: false }]);
+});
+
 test("channels 接口：key-usage 是只读的 GET，读 ?ownStationId=&channelId=&upstreamStationId=&tokenId=，原样交给对账模块；没有自营站点是 400", async () => {
   const calls = [];
   const rt = { store: { get: () => ({ id: "own" }) }, channelOnboarding: {}, channelProfit: {}, reconciliation: { checkKeyUsage: async (input) => { calls.push(input); return { checked: true, idle: true }; } } };

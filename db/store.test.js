@@ -7,11 +7,41 @@ import { evaluateStation } from "../lib/alerts.js";
 
 import { fakePool } from "./test-support/fake-pool.js";
 
+test("导入 Sub2API 人工登录授权后，改名保留续期、更新授权替换缓存、换站点不沿用授权", async () => {
+  const store = new Store(fakePool());
+  const session = { accessToken: "authorized-jwt", refreshToken: "authorized-refresh", expiresAt: 12345 };
+  const station = await store.add({ type: "sub2api", baseUrl: "https://session.test", session });
+  assert.equal(station.accessToken, session.accessToken);
+  assert.deepEqual(station.s2Tokens, { ...session, site: "https://session.test:443" });
+  await store.update(station.id, { name: "CCrouter" });
+  assert.equal(station.s2Tokens.refreshToken, session.refreshToken);
+  await store.update(station.id, { session: { ...session, accessToken: "new-jwt", refreshToken: "new-refresh" } });
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.s2Tokens.refreshToken, "new-refresh");
+  await assert.rejects(store.update(station.id, { baseUrl: "https://other.test" }), { code: "ENDPOINT_CHANGED_SECRET_REQUIRED" });
+  await store.update(station.id, { baseUrl: "https://other.test", accessToken: "other-jwt" });
+  assert.equal(station.s2Tokens, null);
+  await assert.rejects(store.add({ type: "sub2api", session: { accessToken: "incomplete" } }), { code: "INVALID_SUB2_SESSION" });
+});
+
 test("旧站点数据升级时默认保持续费", async () => {
   const store = await new Store(fakePool([{ id: "old", name: "旧站点", fixedPurchases: [] }])).load();
   assert.equal(store.get("old").noRenewal, false);
   assert.equal(store.get("old").monitorEnabled, true);
   assert.equal(store.get("old").authVersion, 1);
+});
+
+test("密码模式可导入人工验证后的会话，保留账密供续期失效后重新登录", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "sub2api", baseUrl: "https://session.test", accessToken: "old-jwt" });
+  const session = { accessToken: "authorized-jwt", refreshToken: "authorized-refresh", expiresAt: Date.now() + 3600000 };
+  await store.update(station.id, { type: "sub2api-password", email: "a@example.test", password: "secret", session });
+  assert.equal(station.email, "a@example.test");
+  assert.equal(station.password, "secret");
+  assert.equal(station.s2Tokens.refreshToken, session.refreshToken);
+  assert.equal(station.accessToken, "");
+  await store.update(station.id, { name: "CCrouter" });
+  assert.equal(station.s2Tokens.accessToken, session.accessToken);
 });
 
 test("暂停和恢复保留原成本设置、费率及实际持久化值", async (t) => {

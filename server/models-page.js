@@ -55,7 +55,7 @@ const guardOf = (own, now) => () => {
   if (request.broken || request.used + 1 > USER_OPS.BUDGET_MAX_USED) throw busy();
 };
 
-async function read(rt, own, now, tz, rate) {
+async function read(rt, own, now, tz, rate, refresh) {
   const beforeRead = guardOf(own, now);
   const grid = dayGrid(now, tz, MODELS_VIEW.DAYS);
   const N = grid.days;
@@ -63,9 +63,9 @@ async function read(rt, own, now, tz, rate) {
   rt.reconciliation ||= createReconciliationModule(rt);
   const channelProfit = (rt.channelProfit ||= createChannelProfitModule(rt));
   const [rows, channels, flow, perf, rules] = await Promise.allSettled([
-    readOwnRows(rt, own, "model", grid.starts[0], now, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead }),
-    ownChannelList(rt, own, { beforeRead }),
-    readOwnRows(rt, own, "flow", flowFrom, flowTo, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead }),
+    readOwnRows(rt, own, "model", grid.starts[0], now, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead, refresh }),
+    ownChannelList(rt, own, { beforeRead, refresh }),
+    readOwnRows(rt, own, "flow", flowFrom, flowTo, { ttlMs: MODELS_TTL_MS, failTtlMs: MODELS_TTL_MS, now, beforeRead, refresh }),
     Promise.resolve().then(() => { beforeRead(); return queryOwnPerfSummary(own, MODELS_VIEW.SUCCESS_HOURS); }),
     channelProfit.channelRules(own.id),
   ]);
@@ -89,7 +89,7 @@ async function read(rt, own, now, tz, rate) {
 }
 
 // 整页（带抽屉要的）：10 分钟内不重读；同一时间来几个请求只读一次；读失败的 2 分钟内不重读（直接给同一个错），被额度、断路拦下的不记
-async function context(rt, { now = Date.now() } = {}) {
+async function context(rt, { now = Date.now(), refresh = false } = {}) {
   const own = ownOf(rt);
   if (!own) return { unset: true };
   const tz = businessTimeZone();
@@ -97,11 +97,11 @@ async function context(rt, { now = Date.now() } = {}) {
   const key = [own.id, own.baseUrl, own.userId || "", own.authVersion ?? "", tz, rate].join("|");
   const hit = rt._modelsPage;
   if (hit?.key === key) {
-    if (hit.value && now - hit.at < MODELS_TTL_MS) return { own, ...hit.value };
-    if (hit.error && now - hit.at < MODELS_FAIL_TTL_MS) throw hit.error;
+    if (!refresh && hit.value && now - hit.at < MODELS_TTL_MS) return { own, ...hit.value };
+    if (!refresh && hit.error && now - hit.at < MODELS_FAIL_TTL_MS) throw hit.error;
     if (hit.promise) return { own, ...(await hit.promise) };
   }
-  const promise = read(rt, own, now, tz, rate);
+  const promise = read(rt, own, now, tz, rate, refresh);
   rt._modelsPage = { key, promise, at: now };
   try {
     const value = await promise;

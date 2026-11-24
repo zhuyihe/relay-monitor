@@ -285,6 +285,17 @@ export class MemoryReconciliationRepository {
     return this.getRule(id);
   }
 
+  async extendHistory(id, fromMs) {
+    await this.#transaction("extendHistory", async (tx) => {
+      await this.#lock(tx, `rule:${id}`);
+      const entry = this.#ruleEntry(tx, id);
+      if (entry && entry.row.enabled && entry.row.archived_at == null) {
+        this.#update(tx, "rules", [entry], { history_from_ms: Math.min(Number(entry.row.history_from_ms ?? fromMs), fromMs) });
+      }
+    });
+    return this.getRule(id);
+  }
+
   async appendChannels(id, channels, confirmation = {}, { guard = null } = {}) {
     return this.updateRule(id, { channels, ...confirmation }, { append: true, guard });
   }

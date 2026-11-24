@@ -2,23 +2,23 @@
 
 /* 规则表：条件控件在单元格内换行排布 */
 .jy-notifications-rules td { vertical-align: top; }
-.jy-notifications-rules .col-switch { width: 80px; }
-.jy-notifications-rules .col-to { width: 320px; }
+.jy-notifications-rules .col-switch { width: 70px; }
+.jy-notifications-rules .col-to { width: 220px; }
 .jy-notifications-rules .col-to .ant-select { width: 100%; }
 .jy-notifications-rule-title { display: block; font-weight: 500; color: var(--jy-ink); }
 /* 「用户」一组的小标题行：占满整行，下面两行灰字说明这一组管谁 */
-.jy-notifications-rules tr.jy-notifications-group td { padding-top: 20px; background: var(--jy-sunken); border-top: 1px solid var(--jy-rule); }
+.jy-notifications-rules tr.jy-notifications-group td { padding-block: 16px; background: var(--jy-sheet); border-top: 1px solid var(--jy-rule); }
 .jy-notifications-group h3 { margin: 0 0 4px; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
 .jy-notifications-group p { margin: 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
-.jy-notifications-rule-desc { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
+.jy-notifications-rule-desc { display: block; margin-top: 3px; font-size: 12px; line-height: 20px; color: var(--jy-ink-3); }
 .jy-notifications-rules tr.is-off .jy-notifications-rule-title { color: var(--jy-ink-2); }
-.jy-notifications-cond { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; font-size: 13px; color: var(--jy-ink-2); }
-.jy-notifications-cond .ant-input-number { width: 104px; }
+.jy-notifications-cond { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; font-size: 12px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-notifications-cond .ant-input-number { width: 96px; }
 .jy-notifications-cond .ant-select { width: 80px; }
 .jy-notifications-cond .jy-err { flex-basis: 100%; }
 .jy-notifications-note { margin: 8px 0 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
 
-.jy-notifications-pad { padding: 4px 24px 24px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-notifications-pad { padding: 16px 24px 24px; border-top: 1px solid var(--jy-rule-soft); }
 .jy-notifications-pad .jy-field .ant-input-number { width: 160px; }
 .jy-notifications-actions { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
 .jy-notifications-actions .jy-caption { flex: 1 1 240px; }
@@ -26,9 +26,9 @@
 /* 渠道类型铭牌 */
 .jy-notifications-type { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .jy-notifications-plate {
-  display: inline-grid; place-items: center; min-width: 28px; height: 20px; padding: 0 4px;
-  border-radius: var(--jy-r1); background: var(--jy-sunken); color: var(--jy-ink-2);
-  font-size: 11px; line-height: 1; font-weight: 600; letter-spacing: .02em;
+  display: inline-grid; place-items: center; min-width: 28px; height: 22px; padding: 0 5px;
+  border: 1px solid var(--jy-rule); border-radius: 4px; color: var(--jy-ink-2);
+  font-size: 11px; line-height: 1; font-weight: 500;
 }
 .jy-notifications-toggle { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--jy-ink-2); }
 .jy-notifications-test { display: inline-flex; flex-direction: column; gap: 2px; }
@@ -67,14 +67,37 @@
 .jy-notifications-lines { display: flex; flex-direction: column; gap: 12px; }
 
 /* 版式（ui-design-spec §5.7）：左 8 列提醒规则，右 4 列通知方式和日报；手机上通知方式在最前（页面里就换了先后，见 page.tsx） */
-.jy-notifications-side { min-width: 0; }
+.jy-notifications-grid { grid-template-columns: minmax(0, 1.9fr) minmax(300px, 1fr); align-items: start; gap: 20px; }
+.jy-notifications-grid > .jy-panel { height: auto; }
+.jy-notifications-side { min-width: 0; gap: 20px; }
+.jy-notifications .jy-panel-head { flex-wrap: wrap; align-items: center; }
+.jy-notifications .jy-panel-head .extra { margin-left: auto; }
+.jy-notifications-rules > tbody > tr:not(.jy-notifications-group) > td { padding-block: 18px; }
+.jy-notifications-rule-title { font-size: 13px; line-height: 21px; }
 /* 通知方式一个一行（4 列里放不下表格），桌面和手机同一个样子 */
 .jy-m-list.jy-notifications-chlist { display: block; }
 .jy-notifications-chlist .m-sub { align-items: center; }
+.jy-notifications-chlist > li { padding-block: 16px; gap: 8px 12px; }
+.jy-notifications-chlist .m-top { font-size: 13px; font-weight: 500; }
+.jy-notifications-chlist .m-sub { font-size: 12px; line-height: 20px; }
 /* 日报在 4 列里排紧：开关和发送时间一行，发到哪里横排（ui-design-spec §5.7） */
-.jy-notifications-dr-row { display: flex; flex-wrap: wrap; gap: 0 24px; }
+.jy-notifications-dr-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.jy-notifications-dr-row .ant-form-item { margin-bottom: 16px; }
+.jy-notifications-dr .ant-form-item-label > label { font-size: 12px; }
 .jy-notifications-dr-to { width: 100%; }
 /* 「还有 N 个通知方式」：和列表左右对齐 */
 .jy-notifications-more { padding: 8px 16px 16px; }
 .jy-notifications-more .jy-more__body { margin: 8px -16px 0; }
 .jy-notifications-pace-hint { margin: 0 0 8px; }
+
+@media (min-width: 768px) and (max-width: 1279px) {
+  .jy-notifications-grid { grid-template-columns: minmax(0, 1fr); }
+  .jy-notifications-side { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .jy-notifications-rules .col-to { width: 260px; }
+}
+@media (max-width: 767px) {
+  .jy-notifications-grid, .jy-notifications-side { gap: 16px; }
+  .jy-notifications-rules > tbody > tr:not(.jy-notifications-group) > td { padding-block: 0; }
+  .jy-notifications-rules td.col-to { padding-top: 4px; }
+  .jy-notifications .ant-btn { min-height: 44px; }
+}

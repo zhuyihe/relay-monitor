@@ -1,6 +1,6 @@
 // 用户运营页的纯函数（概览那句话、五个数、用户表的地址栏和文字）：不依赖 React，单测直接跑（users-format.test.js）。
 // 用户表的筛选、排序、分页在服务端（lib/user-ops-view.js 的 queryUsers），这里只管怎么摆。
-// 钱从接口来都是美元，页面按自营站点的汇率（rate）换算；「近 7 天」是最近 7 个整天，不含今天。
+// 钱从接口来都是美元，页面按自营站点的汇率（rate）换算；近 7 天和近 14 天趋势包含今天；环比按截至昨天的完整日。
 import { EMPTY, formatDays, formatDayKey, formatDeltaPct, formatMoney, formatPct, formatZonedTime } from "../../../lib/format.js";
 import { dayKeyInTz } from "../../../lib/business-time.js";
 import { COPY } from "./copy";
@@ -8,14 +8,14 @@ import type { UserStatus, UsersTab } from "./copy";
 
 export type UsersRow = {
   id: number; username: string; big: boolean; disabled: boolean; group: string; createdAtMs: number | null; usedUsd: number | null; isNew: boolean;
-  week: number; prevWeek: number; today: number; balanceUsd: number | null;
+  week: number; closedWeek: number; prevWeek: number; today: number; balanceUsd: number | null;
   runwayState: string; days: number | null; burnPerDay: number | null; level: number;
   status: UserStatus | null; lastUsed: { ms: number; precise: boolean } | null; spark: number[];
 };
 export type TrendDay = { day: string; available: boolean; cost: number; users: number; newUsers: number; newTop: { username: string; cost: number }[]; top: { username: string; cost: number }[] };
 export type Only = "all" | "soon" | "down" | "new" | "churned";
 export type Scope = "active30" | "all";
-export type SortKey = "user" | "week" | "today" | "balance" | "last";
+export type SortKey = "user" | "week" | "today" | "balance" | "days" | "last";
 export type UsersList = {
   rows: UsersRow[]; total: number; page: number; pages: number; pageSize: number;
   totals: { count: number; week: number; prevWeek: number; today: number; balance: number };
@@ -24,13 +24,15 @@ export type UsersList = {
 };
 export type UsersPage = {
   starting?: boolean; unset?: boolean; asOf: number; syncedMs: number; tz: string; today: string; rate: number; ownStationId: string; level1Days?: number;
+  basicOnly?: boolean; paused?: boolean; directoryError?: string | null;
+  balanceSyncedMs?: number; todaySyncedMs?: number | null; statsSyncedMs?: number; refreshIntervalMs?: number; syncErrors?: string[];
   ready: { backfillDone?: boolean; week?: boolean; compare?: boolean; churn?: boolean; down?: boolean; balance?: boolean; prepaidCompare?: boolean };
   availableDays: number; fresh: boolean;
   backfill: { done: boolean; core?: boolean; days: number; total: number };
   big: { ready: boolean; ids: number[]; count: number };
   summary: {
-    todayCost: number; yesterdaySameTime: number; weekCost: number; prevWeekCost: number; weekUsers: number; prevWeekUsers: number;
-    weekNewUsers: number; prevWeekNewUsers: number; newUsers30: number; prevNewUsers30: number; prepaid: number; prepaidAgo: number | null; bigWeek: number;
+    todayCost: number; yesterdaySameTime: number; weekCost: number; closedWeekCost: number; prevWeekCost: number; weekUsers: number; closedWeekUsers: number; prevWeekUsers: number;
+    weekNewUsers: number; closedWeekNewUsers: number; prevWeekNewUsers: number; newUsers30: number; prevNewUsers30: number; prepaid: number; prepaidAgo: number | null; bigWeek: number;
   } | null;
   facts?: { riser: { id: number; username: string; delta: number } | null; down: { id: number; username: string }[]; soonBig: number };
   trend: TrendDay[]; prevTrend: { day: string; available: boolean; cost: number; users: number; newUsers: number }[];
@@ -38,13 +40,13 @@ export type UsersPage = {
 };
 export type DetailModels = { models: { model: string; cost: number; share: number }[] | null; others?: { count: number; cost: number; share: number } | null; total?: number; error: string | null };
 export type UserDetail = {
-  id: number; username: string; dayBars: { day: string; cost: number }[]; hourBars: { hourMs: number; cost: number }[];
+  id: number; username: string; dayBars?: { day: string; cost: number }[]; hourBars?: { hourMs: number; cost: number }[];
   balance: { t: number; usd: number }[]; recharges: { t: number; usd: number }[];
   user: UsersRow | null; rate: number; ready: UsersPage["ready"]; backfill: UsersPage["backfill"]; models: DetailModels;
 };
 
-export const TABS: readonly UsersTab[] = ["overview", "users", "churn"];
-export const OPEN_TABS: readonly UsersTab[] = ["overview", "users", "churn"];
+export const TABS: readonly UsersTab[] = ["overview", "users", "groups", "churn"];
+export const OPEN_TABS: readonly UsersTab[] = ["overview", "users", "groups", "churn"];
 export const ONLY_VALUES = ["all", "soon", "down", "new", "churned"] as const;
 export const ONLY_LABEL: Record<Only, string> = { all: COPY.users.filterAll, soon: COPY.status.soon, down: COPY.status.down, new: COPY.status.new, churned: COPY.status.churned };
 
@@ -78,8 +80,8 @@ export function bigTipText(row: UsersRow, page: UsersPage): string {
 // 个数跟着前面的筛选（范围）算：count 是当前范围里的重点用户数
 export const bigLabel = (page: UsersPage, count: number = page.big.count) => COPY.users.onlyBig(page.big.ready ? String(count) : EMPTY);
 
-// 小趋势线的 14 个点：补数据还没补到的天是 null（不画成 0）；补到的天数从昨天往前数
-export const sparkValues = (row: UsersRow, availableDays: number): (number | null)[] => row.spark.map((value, index) => (index >= row.spark.length - availableDays ? value : null));
+// 小趋势线的 14 个点包含今天；可用的完整日从昨天往前数，今天单独加一格
+export const sparkValues = (row: UsersRow, availableDays: number): (number | null)[] => row.spark.map((value, index) => (index >= row.spark.length - availableDays - 1 ? value : null));
 
 // 最近使用：今天 / 昨天 / 10月20日；最近两天有消费的那一小时是准的，抽屉里再带时间（用量按小时记，写那一小时的起点「今天 14:00」）
 export function lastUsedText(row: Pick<UsersRow, "lastUsed"> & { isNew?: boolean }, page: Pick<UsersPage, "asOf" | "tz" | "today">, withTime = false): string {
@@ -90,9 +92,10 @@ export function lastUsedText(row: Pick<UsersRow, "lastUsed"> & { isNew?: boolean
   return withTime && row.lastUsed.precise ? `${day} ${formatZonedTime(row.lastUsed.ms - 3600000, page.tz)}` : day;
 }
 
-// 可用天数那一格的字：快用完、够用写「约 13 天」，余额用完写「—」，近期没有消费、还算不出写原话
+// 可用时间：已用完明确写状态，和时间未知的「—」区分。
 export function runwayText(row: UsersRow): string {
   if (row.runwayState === "soon" || row.runwayState === "ok") return formatDays(row.days);
+  if (row.runwayState === "empty") return COPY.status.empty;
   if (row.runwayState === "none") return COPY.users.noSpend;
   return EMPTY;
 }
@@ -106,7 +109,7 @@ export function overviewSentence(page: UsersPage): SentencePart[] {
   const parts: SentencePart[] = [text(COPY.overview.weekLead(money(s.weekCost, rate)))];
   if (!page.ready.compare) return [...parts, text(`。${COPY.overview.afterFill}`)];
   if (s.prevWeekCost > 0) {
-    const change = (s.weekCost - s.prevWeekCost) / s.prevWeekCost;
+    const change = (s.closedWeekCost - s.prevWeekCost) / s.prevWeekCost;
     parts.push(text(`，${Math.abs(change) < 0.0005 ? COPY.overview.same : change > 0 ? COPY.overview.more(pctText(change)) : COPY.overview.less(pctText(change))}`));
   } else parts.push(text(`，${COPY.overview.prevNone}`));
   // 集中度：几个重点用户占近 7 天消费的百分之几（「5 个重点用户」是链接，到用户页签勾上「只看重点用户」）
@@ -144,20 +147,20 @@ export function overviewKpis(page: UsersPage): Kpi[] {
   const peopleVs = (cur: number, prev: number) => (cur === prev ? COPY.overview.usersSame : `${COPY.overview.vsPrevWeek} ${COPY.overview.usersDelta(cur - prev)}`);
   return [
     { key: "today", title: COPY.overview.kpiToday, value: money(s.todayCost, rate), sub: vs(COPY.overview.vsYesterday, s.todayCost, s.yesterdaySameTime) },
-    { key: "week", title: COPY.overview.kpiWeek, value: c.week ? money(s.weekCost, rate) : EMPTY, sub: c.compare ? vs(COPY.overview.vsPrevWeek, s.weekCost, s.prevWeekCost) : COPY.overview.afterFillCompare },
-    { key: "users", title: COPY.overview.kpiUsers, titleHint: COPY.overview.kpiUsersHint, value: c.week ? COPY.overview.usersCount(s.weekUsers) : EMPTY, sub: c.compare ? peopleVs(s.weekUsers, s.prevWeekUsers) : COPY.overview.afterFillCompare },
-    { key: "fresh", title: COPY.overview.kpiNew, titleHint: COPY.overview.kpiNewHint, value: c.week ? COPY.overview.usersCount(s.weekNewUsers) : EMPTY, sub: c.compare ? peopleVs(s.weekNewUsers, s.prevWeekNewUsers) : COPY.overview.afterFillCompare },
+    { key: "week", title: COPY.overview.kpiWeek, value: c.week ? money(s.weekCost, rate) : EMPTY, sub: c.compare ? vs(COPY.overview.vsPrevWeek, s.closedWeekCost, s.prevWeekCost) : COPY.overview.afterFillCompare },
+    { key: "users", title: COPY.overview.kpiUsers, titleHint: COPY.overview.kpiUsersHint, value: c.week ? COPY.overview.usersCount(s.weekUsers) : EMPTY, sub: c.compare ? peopleVs(s.closedWeekUsers, s.prevWeekUsers) : COPY.overview.afterFillCompare },
+    { key: "fresh", title: COPY.overview.kpiNew, titleHint: COPY.overview.kpiNewHint, value: c.week ? COPY.overview.usersCount(s.weekNewUsers) : EMPTY, sub: c.compare ? peopleVs(s.closedWeekNewUsers, s.prevWeekNewUsers) : COPY.overview.afterFillCompare },
     { key: "prepaid", title: COPY.overview.kpiPrepaid, titleHint: COPY.overview.prepaidTitle, value: money(s.prepaid, rate), sub: c.prepaidCompare && s.prepaidAgo != null ? vs(COPY.overview.vsWeekAgo, s.prepaid, s.prepaidAgo) : COPY.overview.afterWeekCompare },
   ];
 }
 
 // ---- 地址栏 ----
-export const parseTab = (raw: string | null): UsersTab => (raw === "users" || raw === "churn" ? raw : "overview");
+export const parseTab = (raw: string | null): UsersTab => (raw === "users" || raw === "groups" || raw === "churn" ? raw : "overview");
 export const parseOnly = (raw: string | null): Only => ((ONLY_VALUES as readonly string[]).includes(raw ?? "") ? (raw as Only) : "all");
 export const parseScope = (raw: string | null): Scope => (raw === "all" ? "all" : "active30");
-export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "last"];
+export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "days", "last"];
 export const parseSort = (raw: string | null, dir: string | null): { key: SortKey; dir: "asc" | "desc" } =>
-  ((SORT_KEYS as readonly string[]).includes(raw ?? "") ? { key: raw as SortKey, dir: dir === "asc" ? "asc" : "desc" } : { key: "week", dir: "desc" });
+  ((SORT_KEYS as readonly string[]).includes(raw ?? "") ? { key: raw as SortKey, dir: dir === "asc" ? "asc" : dir === "desc" ? "desc" : ["balance", "days", "user"].includes(raw!) ? "asc" : "desc" } : { key: "balance", dir: "asc" });
 export const parseGroups = (raw: string | null): string[] => (raw ? raw.split(",").map((value) => value.trim()).filter(Boolean) : []);
 export const parsePageNo = (raw: string | null): number => (/^\d+$/.test(raw || "") && Number(raw) >= 1 ? Number(raw) : 1);
 
@@ -169,7 +172,7 @@ export function listQueryString(query: ListQuery): string {
   if (query.big) params.set("big", "1");
   if (query.only !== "all") params.set("only", query.only);
   if (query.groups.length) params.set("group", query.groups.join(","));
-  if (query.sort !== "week" || query.dir !== "desc") { params.set("sort", query.sort); params.set("dir", query.dir); }
+  if (query.sort !== "balance" || query.dir !== "asc") { params.set("sort", query.sort); params.set("dir", query.dir); }
   if (query.page > 1) params.set("page", String(query.page));
   if (query.q.trim()) params.set("q", query.q.trim());
   return params.toString();

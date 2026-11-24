@@ -179,6 +179,19 @@ export function defineReconciliationRepositoryContract({ name, create, cleanup =
 
 // ---- 规则：创建、读取、列表 ----
 
+contract("extendHistory preserves creation and financial scope, and only moves the requested history earlier", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ billingPolicy: "immediate", costCoverage: "complete" });
+  const first = Date.now() - 5 * DAY, earlier = first - DAY;
+  const extended = await repository.extendHistory(rule.id, first);
+  assert.equal(extended.historyFromMs, first);
+  assert.equal(extended.createdAt, rule.createdAt);
+  assert.equal(extended.billingEffectiveFrom, rule.billingEffectiveFrom);
+  assert.equal(extended.scopeVersion, rule.scopeVersion);
+  assert.equal((await repository.extendHistory(rule.id, first + DAY)).historyFromMs, first);
+  assert.equal((await repository.extendHistory(rule.id, earlier)).historyFromMs, earlier);
+  assert.deepEqual((await repository.getRule(rule.id)).channels, rule.channels);
+});
+
 contract("createRule stores the rule, name-ordered channels and one operator-confirmed segment", async ({ repository, fixture }) => {
   const before = Date.now();
   // 排序规则不区分大小写和重音：alpha 与 Alpha 并列时按渠道编号，Ångström 排在 alpha 与 beta 之间。

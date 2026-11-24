@@ -2430,6 +2430,23 @@ test("多分段两侧取数并行发出", async (t) => {
   }
 });
 
+test("上游渠道倍率：只读取当前分组配置，共用目录缓存；立即刷新读到新倍率与时间，读取失败不猜倍率", async (t) => {
+  let ratio = 2.4, unavailable = false;
+  const { module, state } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }], metadataGroups: () => ({ g1: { ratio: unavailable ? null : ratio } }) });
+  const first = await module.upstreamTokens("upstream");
+  assert.equal(first[0].currentRatio, 2.4);
+  assert.ok(first[0].ratioReadAt > 0);
+  ratio = 1.9;
+  assert.deepEqual(await module.upstreamTokens("upstream"), first, "普通读取保留真实的上次读取时间");
+  assert.equal(state.requests.filter((r) => r.path === "/api/token/").length, 1);
+  assert.equal((await module.upstreamTokens("upstream", { force: true }))[0].currentRatio, 1.9);
+  unavailable = true;
+  const unread = await module.upstreamTokens("upstream", { force: true });
+  assert.deepEqual([unread[0].currentRatio, unread[0].ratioReadAt], [null, null]);
+  assert.equal(state.statCalls.length, 0, "展示当前倍率不采集用量账单");
+  assert.deepEqual(state.ratioWrites, [], "不写历史账本倍率");
+});
+
 test("站点凭据原地改写后，元数据和渠道目录缓存不再复用旧凭据读到的数据", async (t) => {
   let hold = null;
   const { stations, state, module } = liveReconciliationFixture(t, {
@@ -4158,12 +4175,12 @@ test("Sub2API 密码/邮箱变更废弃元数据缓存，JWT 自动续期不改�
   stations[0].s2Tokens = { accessToken: "rotated-jwt", expiresAt: Date.now() + 1000000 };
   await module.getUpstreamKeys("upstream");
   assert.equal(requests.filter((request) => request.path === "/api/v1/keys").length, 1);
-  Object.assign(stations[0], { email: "new@example.test", password: "new-password", authVersion: 2 });
+  Object.assign(stations[0], { email: "new@example.test", password: "new-password", authVersion: 2, s2Tokens: null });
   await module.getUpstreamKeys("upstream");
   const keys = requests.filter((request) => request.path === "/api/v1/keys");
   assert.equal(keys.length, 2);
   assert.equal(keys.at(-1).auth, "Bearer new-password");
-  assert.equal(stations[0].s2Tokens.accessToken, "rotated-jwt", "账单查询只使用临时连接");
+  assert.equal(stations[0].s2Tokens.accessToken, "new-password", "改密后重新登录的会话留给后续余额、账单共用");
 });
 
 test("目录在创建取数期间变化时，即使新的待核对状态稳定也不能提交过期确认", async (t) => {
@@ -4244,6 +4261,7 @@ function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
     if (url.pathname === "/api/v1/auth/me") return reply(200, { id: sub2.accountId });
     if (url.pathname === "/api/v1/keys") return reply(200, { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }] });
     if (url.pathname.startsWith("/api/v1/keys/")) { sub2.controls += 1; return reply(404, {}); }
+    if (url.pathname !== "/api/v1/usage/stats") return reply(404, {});
     sub2.stats.push(Object.fromEntries(url.searchParams));
     if (sub2.missing) return reply(200, { total_cost: 100 });
     const cost = url.searchParams.get("api_key_id") === "9" ? sub2.costs[url.searchParams.get("start_date")] ?? 0 : 0;
@@ -4665,6 +4683,59 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
   f.rt.onboardingSource = { getSourceCatalogue: () => structuredClone(catalogue), inspectSource: () => ({ version: catalogue.sourceVersion, status: "confirmed", issues: [] }) };
   return { ...f, rows, catalogue, channels };
 }
+
+test("按所选日期补新渠道历史：昨天补三条、固定后不再取数、更早自选日可补且不改创建时间", async (t) => {
+  const f = await completedDayFixture(t, { moduleOptions: { lookbackBudget: 10 } });
+  const created = new Date(Date.now() - 3600000);
+  for (const row of f.rows) { row.created_at = created; row.billing_effective_from_ms = created.getTime(); }
+  const before = await f.module.profitPage({ preset: "yesterday" }, { cacheOnly: true });
+  assert.equal(before.rows.every((row) => row.startedOn === "2026-10-09"), true);
+  const calls = f.state.requests.length;
+  assert.deepEqual(await f.module.requestHistory({ preset: "yesterday" }), { queued: 3, pending: 3 });
+  assert.equal(f.state.requests.length, calls, "登记补算不等上游请求");
+  assert.ok(f.rows.every((row) => row.created_at === created && row.billing_effective_from_ms === created.getTime()));
+  assert.ok(f.rows.every((row) => row.history_from_ms === Date.parse("2026-10-07T16:00:00Z")));
+  assert.deepEqual(await f.module.requestHistory({ preset: "yesterday" }), { queued: 0, pending: 3 }, "同一缺口不重复排队");
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.filter((row) => row.bill_date === "2026-10-08").length, 3);
+  const page = await f.module.profitPage({ preset: "yesterday" }, { cacheOnly: true });
+  assert.ok(page.rows.every((row) => row.reading === false));
+  assert.ok(page.pageTotals.grossProfitUsd > 0);
+  const saved = JSON.stringify(f.state.ledger), readCount = f.state.requests.length;
+  assert.deepEqual(await f.module.requestHistory({ preset: "yesterday" }), { queued: 0, pending: 0 });
+  assert.equal(f.state.requests.length, readCount);
+  assert.equal(JSON.stringify(f.state.ledger), saved, "已固定的账不重算");
+  const custom = { preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") };
+  assert.deepEqual(await f.module.requestHistory(custom), { queued: 3, pending: 3 });
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.filter((row) => row.bill_date === "2026-10-07").length, 3, "明确选择的日期不被创建时间或启动退避挡住");
+  assert.equal(f.state.ledger.length, 6);
+});
+
+test("历史请求按近7天、月和自选完整日登记，不把今天或自选半天写成整天账", async (t) => {
+  const f = await completedDayFixture(t);
+  const created = new Date(Date.now() - 3600000);
+  for (const row of f.rows) { row.created_at = created; row.billing_effective_from_ms = created.getTime(); }
+  assert.deepEqual(await f.module.requestHistory({ preset: "today" }), { queued: 0, pending: 0 });
+  assert.deepEqual(await f.module.requestHistory({ preset: "custom", startMs: Date.parse("2026-10-06T17:00:00Z"), endMs: Date.parse("2026-10-07T15:00:00Z") }), { queued: 0, pending: 0 });
+  assert.deepEqual(await f.module.requestHistory({ preset: "7d" }), { queued: 18, pending: 18 });
+  const days = [...new Set((await f.repository.listSettlementStates(f.rows.map((row) => row.id))).map((row) => row.billDate))].sort();
+  assert.deepEqual(days, ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]);
+  assert.deepEqual(await f.module.requestHistory({ preset: "month" }), { queued: 6, pending: 24 });
+});
+
+test("补新绑定的历史不占用同渠道旧绑定的日期", async (t) => {
+  const f = await completedDayFixture(t);
+  const created = new Date(Date.now() - 3600000);
+  for (const row of f.rows) { row.created_at = created; row.billing_effective_from_ms = created.getTime(); }
+  const archivedAt = Date.parse("2026-10-07T04:00:00Z");
+  f.rows.push({ ...f.rows[0], id: "rr_old", enabled: 0, created_at: new Date("2026-10-01T00:00:00Z"),
+    archived_at: new Date(archivedAt), archived_at_ms: archivedAt });
+  f.repository.tables.channels.push(...f.repository.tables.channels.filter((row) => row.rule_id === "rr_live").map((row) => ({ ...row, rule_id: "rr_old", active_channel_key: null })));
+  assert.deepEqual(await f.module.requestHistory({ preset: "7d" }), { queued: 13, pending: 13 });
+  assert.deepEqual(await requestedDays(f), ["2026-10-08"], "旧绑定解除当日及以前不写进新绑定");
+  assert.equal(f.rows.find((row) => row.id === "rr_live").history_from_ms, Date.parse("2026-10-07T16:00:00Z"));
+});
 
 // 自营站点的管理端日志列表替身（计划 P1a 判断有没有新的消费用），照 New API model/log.go GetAllLogs：
 // 按 start_timestamp 筛，按「时刻倒序、再按编号倒序」排，带 total（起点以后一共几条）；clickhouse 时编号换成显示序号（第一条永远是 1）
@@ -5632,17 +5703,17 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.ok(full.coverage.channels.find((channel) => channel.channelId === 9).actions.some((action) => action.href === "/stations?action=connect&ownStationId=own&channelIds=9"));
 });
 
-test("3b 核算按人民币：收入按本站汇率、成本按上游汇率", async (t) => {
+test("3b 核算保持主站单位：采购成本按上游系数折算", async (t) => {
   const f = await completedDayFixture(t);
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   f.stations.find((station) => station.id === "upstream").cnyPerUsd = 6;
   const full = await f.module.queryRules();
   assert.deepEqual(full.results[0].rates, { income: { stationId: "own", cnyPerUsd: 7, source: "configured" },
     cost: { stationId: "upstream", cnyPerUsd: 6, source: "configured" }, costBasis: "usage" });
-  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []]);
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []]);
   const display = full.commonSummary.totals.display;
-  assert.deepEqual([display.currency, display.knownIncome, display.knownCost, display.confirmedProfit], ["CNY", 52.5, 18, 34.5], "每条 $2.5×7 − $1×6");
-  assert.ok(Math.abs(display.confirmedMarginRate - 34.5 / 52.5) < 1e-9);
+  assert.deepEqual([display.currency, display.knownIncome, display.knownCost, display.confirmedProfit], ["USD", 7.5, 3 * (6 / 7), 7.5 - 18 / 7], "每条 $2.5×7 − $1×6");
+  assert.ok(Math.abs(display.confirmedMarginRate - (7.5 - 18 / 7) / 7.5) < 1e-9);
   assert.equal(full.commonSummary.totals.confirmedProfitUsd, 4.5, "USD 原始口径不变");
 });
 
@@ -5657,8 +5728,8 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率", async (t)
   assert.deepEqual(full.fixedOffProfitStations, [], "我的站点会摊销它的采购费");
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   full = await module.queryRules();
-  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []], "只需要本站汇率");
-  assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [52.5, 52.5]);
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []], "只需要本站汇率");
+  assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [7.5, 7.5]);
   // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，成本照样记 0
   const offProfit = [
     [{ includeInProfit: false }, "设为不计入成本的固定采购上游"],
@@ -5693,14 +5764,14 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率", async (t)
   assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }]);
 });
 
-test("3b 只设置了部分汇率：整页仍按 USD 原值显示，并列出还没设置的站点", async (t) => {
+test("3b 部分采购系数为空：默认 1，仍按主站单位核算", async (t) => {
   const f = await completedDayFixture(t);
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   const full = await f.module.queryRules();
   assert.equal(full.displayCurrency, "USD");
-  assert.deepEqual(full.unconfiguredRateStations, [{ id: "upstream", name: "上游" }]);
+  assert.deepEqual(full.unconfiguredRateStations, []);
   assert.equal(full.commonSummary.totals.display.currency, "USD");
-  assert.equal(full.commonSummary.totals.display.confirmedProfit, 4.5);
+  assert.equal(full.commonSummary.totals.display.confirmedProfit, 7.5 - 3 / 7);
 });
 
 test("U05首次局部缺其余账单证据为unknown，0规则仍0/10；凭据/Key业务变化不能借旧cache变accounted", async (t) => {
@@ -6148,7 +6219,7 @@ test("U06 actual identity/metadata冲突与每个await业务版本漂移均拒�
   });
 });
 
-test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立核验且共享JWT不写", async (t) => {
+test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立核验且只更新会话缓存", async (t) => {
   t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
   const f = upstreamReadFixture(t, "sub2api-password"), before = structuredClone(f.store.data);
   const first = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
@@ -6165,6 +6236,8 @@ test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone�
   assert.deepEqual([unknown.probe.amountUsd, unknown.probe.knownAmountUsd, unknown.probe.actualCostUsd], [null, null, null]);
   assert.equal(unknown.probe.capability.state, "unsupported");
   assert.doesNotMatch(JSON.stringify([first, zero, otherZone, unknown]), /raw-|saved-password|fresh-auto|stored-auto|accessToken/);
+  assert.equal(f.station.s2Tokens.accessToken, "fresh-auto-jwt");
+  before.stations[0].s2Tokens = f.station.s2Tokens;
   assert.deepEqual(f.store.data, before);
 });
 
@@ -7357,13 +7430,13 @@ test("1b接口：GET 和 POST 默认只读零写入，只有带 observe:true 的
   } finally { hooks.deregister(); delete globalThis.__p1bRuntime; }
 });
 
-test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率、改成固定采购，已结账的昨天照旧；当时没设的汇率按当前配置", async (t) => {
+test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率、改成固定采购，已结账的昨天照旧；未配置系数也保存 1", async (t) => {
   const f = await completedDayFixture(t);
   const own = f.stations.find((station) => station.id === "own"), upstream = f.stations.find((station) => station.id === "upstream");
   own.cnyPerUsd = 7.1;
   await f.module.refreshDue(Date.now());
   assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.revision, row.source, row.revenue_usd, row.cost_usd, row.revenue_rate, row.cost_rate, row.cost_basis]),
-    Array(3).fill(["2026-10-08", 1, "settle", 2.5, 1, 7.1, null, "usage"]));
+    Array(3).fill(["2026-10-08", 1, "settle", 2.5, 1, 7.1, 1, "usage"]));
   own.cnyPerUsd = 8; upstream.cnyPerUsd = 6.5; upstream.fixedPurchases = [{ amount: 300, days: 30 }];
   f.rt._reconciliationResultCache.clear();
   const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
@@ -7371,8 +7444,8 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
   for (const row of results) {
     assert.deepEqual([row.displayStatus.state, row.calculation.profitUsd], ["settled", 1.5], "已结账的毛利不按固定采购重算");
     assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
-      cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
-    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage",
+      cost: { stationId: "upstream", cnyPerUsd: 1, source: "configured" }, costBasis: "usage" });
+    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: 1 }, costBasis: "usage",
       expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）；没读全时 tokens 也不写（审核 R2 #125 中-4）");
   }
   // 今天还没结账，按当前配置：固定采购、成本记 0。
@@ -8627,6 +8700,8 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   // 三条绑定三把 Key：每条这天实付 1
   assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.actualCostUsd]).sort(), [["ch:own:1", [1], 1], ["ch:own:2", [2], 1], ["ch:own:3", [3], 1]]);
   assert.deepEqual(page.pageTotals, { incomeUsd: 7.5, actualCostUsd: 3, grossProfitUsd: 4.5, grossMarginRate: 0.6 });
+  assert.deepEqual(page.accountingTotals, { income: 7.5, actual: 3, gross: 4.5, fixedCost: 0, net: 4.5 });
+  assert.equal(page.historicalRatePreview.entries, 0, "新账明确保存默认系数 1");
   assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, attentionChannels: 0 });
   assert.deepEqual([page.fixedCostUsd, page.netProfitUsd, page.unlinkedChannelCount, page.rateUnset, page.ownIncomeUnavailable, page.asOf != null, page.tz], [0, 4.5, 7, [], null, true, "Asia/Shanghai"], "固定成本 0（没有固定采购的上游）；渠道目录里 10 个渠道只绑了 3 个");
   const dayDetail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
@@ -9957,6 +10032,7 @@ function upstreamReadFixture(t, type = "newapi") {
     if (url.pathname === "/api/log/self/stat") return reply(200, { quota: state.quota, accessToken: "raw-secret" });
     if (url.pathname === "/api/v1/settings/public") return reply(200, { turnstile_enabled: false });
     if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
+    if (url.pathname === "/api/v1/auth/refresh") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
     if (url.pathname === "/api/v1/keys") return state.directoryError ? reply(403, null)
       : reply(200, { total: 1, items: [{ id: 9, user_id: state.accountId, name: "actual-key", status: "active", group_id: null, key: "raw-call-secret" }] });
     if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, null);
@@ -10170,4 +10246,68 @@ test("PR C2 零点后头几分钟：00:03 看昨天，桶只读到 23:58 时退�
   const viaStat = await world.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page", force: false });
   assert.ok(yesterdayStats() > 0, "桶只读到 23:58 < 昨天终点 24:00：退回逐渠道 stat");
   assert.deepEqual(viaStat.results.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), viaBuckets.results.map((row) => row.downstream.channels.map((c) => c.quotaUnits)), "最后几分钟没有日志时两种读法数一样");
+});
+
+test("采购系数快照：修改配置只影响今天，旧账预览不重结、不补写历史价格", async (t) => {
+  const f = await completedDayFixture(t);
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.cnyPerUsd = 0.5;
+  await f.module.refreshDue(Date.now());
+  const saved = structuredClone(f.state.ledger);
+  upstream.cnyPerUsd = 2;
+  const page = await f.module.profitPage({ preset: "yesterday" });
+  assert.equal(page.displayCurrency, "USD");
+  assert.deepEqual(page.accountingTotals, { income: 7.5, actual: 1.5, gross: 6, fixedCost: 0, net: 6 });
+  assert.equal(page.historicalRatePreview.entries, 0);
+  assert.deepEqual(f.state.ledger, saved, "读取利润不改历史账本");
+  // 模拟上线前未保存系数的旧账；预览按默认 1，并保留与当前系数的差额供核对。
+  const readFacts = f.repository.listLedgerDayFacts.bind(f.repository);
+  t.mock.method(f.repository, "listLedgerDayFacts", async (...args) => (await readFacts(...args)).map((row) => ({ ...row, costRate: null })));
+  f.rt._reconciliationResultCache.clear();
+  const legacy = structuredClone(f.state.ledger);
+  const preview = await f.module.profitPage({ preset: "yesterday" });
+  assert.deepEqual(preview.historicalRatePreview, { entries: 3, days: ["2026-10-08"], costBefore: 6, costAfter: 3 });
+  assert.equal(preview.accountingTotals.actual, 3);
+  assert.deepEqual(f.state.ledger, legacy);
+});
+
+
+test("今日桶收入保留真实截止时间，页面暂估说明不会把查询时刻冒充到账时刻", async (t) => {
+  let nowMs = Date.parse("2026-10-09T03:00:00Z");
+  const world = await todayWorld(t, { expectedCost: true, now: () => nowMs });
+  await catchUpIngest(world);
+  nowMs += 3 * 60000;
+  await world.module.refreshDue(nowMs);
+  const cached = await world.module.profitPage({ preset: "today" }, { cacheOnly: true });
+  assert.equal(cached.timing.provisional, true);
+  assert.ok(cached.timing.incomeThroughMs < nowMs, "收入只读到日志游标，不能填现在");
+  assert.ok(cached.timing.costThroughMs >= cached.timing.incomeThroughMs);
+  assert.equal(Date.parse(cached.asOf), cached.timing.incomeThroughMs);
+});
+
+test("自营业务与日报读取每日系数：含已解绑规则，新配置不覆盖历史记录", async (t) => {
+  const f = await completedDayFixture(t);
+  const own = f.stations.find((station) => station.id === "own"), up = f.stations.find((station) => station.id === "upstream");
+  own.cnyPerUsd = 1; up.cnyPerUsd = 0.5;
+  await f.module.refreshDue(Date.now());
+  const before = structuredClone(f.state.ledger);
+  up.cnyPerUsd = 2;
+  const facts = await f.module.financialFacts({ ownStationId: own.id, startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), tz: "Asia/Shanghai" });
+  assert.equal(facts.length, 3);
+  assert.ok(facts.every((fact) => fact.costRate === 0.5 && fact.revenueRate === 1 && fact.upstreamStationId === up.id));
+  assert.deepEqual(f.state.ledger, before);
+});
+
+
+test("首页被动读取缓存不唤醒采集、不延长看页活动，每日利润原有刷新照常", async (t) => {
+  const f = await completedDayFixture(t);
+  let kicks = 0;
+  f.rt._reconciliationPollKick = () => { kicks += 1; };
+  f.rt._reconciliationLastTodayViewAt.at = 0;
+  await f.module.profitPage({ preset: "today" }, { cacheOnly: true, passive: true });
+  assert.equal(kicks, 0);
+  assert.equal(f.rt._reconciliationLastTodayViewAt.at, 0);
+  await f.module.profitPage({ preset: "today" }, { cacheOnly: true });
+  assert.equal(kicks, 1);
+  assert.ok(f.rt._reconciliationLastTodayViewAt.at > 0);
 });

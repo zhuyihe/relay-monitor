@@ -143,6 +143,20 @@ test("明文库第一次配上密钥启动：登录信息全部改成密文，�
   assert.ok(isCiphertext(pool.meta("billing_identity_key")));
 });
 
+test("人工登录授权导入后整组加密，轮换保存并重启后沿用最新续期令牌", async () => {
+  const pool = memoryPool(plainState());
+  const store = await new Store(pool, { secretKey: keyA }).load();
+  const station = await store.add({ type: "sub2api", baseUrl: "https://session.test",
+    session: { accessToken: "imported-jwt", refreshToken: "imported-refresh", expiresAt: 12345 } });
+  assert.ok(isCiphertext(pool.doc(station.id).s2Tokens));
+  assert.doesNotMatch(pool.dump(), /imported-jwt|imported-refresh/);
+  station.s2Tokens.refreshToken = "rotated-session-refresh";
+  await store.save();
+  const restarted = await new Store(pool, { secretKey: keyA }).load();
+  assert.equal(restarted.get(station.id).s2Tokens.refreshToken, "rotated-session-refresh");
+  assert.doesNotMatch(pool.dump(), /rotated-session-refresh/);
+});
+
 test("账单身份密钥：第一次加密时不换新（换了库里存的账单能力就对不上了），重启照旧；明文模式也有一个", async () => {
   const state = plainState();
   state.meta.billing_identity_key = "plain-billing-key";

@@ -1,5 +1,5 @@
 "use client";
-// 炬元控制台外壳：深色侧栏（分组导航 + 待处理计数）+ 56px 顶栏（标题、时间范围、数据截至、刷新、主题、账户）。
+// 统一导航与工作区；页面注册自己的数据时间、刷新动作和时间范围。
 // 页面通过 useShellPage 注册刷新动作、数据时间和时间范围控件，外壳只负责摆放。
 import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -10,7 +10,7 @@ import { visibleInterval } from "../../lib/visible-interval.js";
 import { formatAsOf, formatAsOfTime } from "../../lib/format";
 import { failureText } from "../../lib/error-copy";
 import { workflowActionMeta } from "../../lib/workflow-actions";
-import { BRAND, formatPageTitle, NAV_LABELS, VERSION_LABEL } from "../../lib/brand";
+import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
 import { NAV_GROUPS, NAV_ITEMS, navItemFor } from "../../lib/nav";
 import { buildOverviewActions } from "../../lib/overview-actions";
 import BrandMark from "../components/brand-mark";
@@ -20,7 +20,6 @@ import { ShellContext } from "../components/shell-context";
 import type { ShellPage } from "../components/shell-context";
 import { useThemeMode } from "../providers";
 import { useWorkflowActions } from "../components/use-workflow-actions";
-import pkg from "../../package.json";
 
 const SIDER_KEY = "jy-sider";
 const COUNT_POLL_MS = 60_000;
@@ -65,13 +64,14 @@ function useAttentionCount(enabled: boolean) {
     };
   }, [enabled]);
   return useMemo(() => {
-    if (!enabled || !source) return 0;
-    return buildOverviewActions(source.stations, {
+    if (!enabled || !source) return { count: 0, own: undefined };
+    const count = buildOverviewActions(source.stations, {
       tz: source.meta?.tz || undefined,
       rules: source.meta?.rules || {},
       settings: source.meta?.settings || {},
       workflowActions,
     }).all.length;
+    return { count, own: source.stations.find((station) => station.isOwn && !station.archivedAt) || null };
   }, [enabled, source, workflowActions]);
 }
 
@@ -92,7 +92,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const current = navItemFor(pathname);
   const title = passwordChangeRequired ? NAV_LABELS.settings : current?.label || BRAND.productName;
-  const attentionCount = useAttentionCount(!passwordChangeRequired);
+  const { count: attentionCount, own: ownStation } = useAttentionCount(!passwordChangeRequired);
 
   useEffect(() => {
     document.title = formatPageTitle(title);
@@ -184,13 +184,29 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     <ShellContext.Provider value={shellApi}>
       <div className={`jy-shell${collapsed ? " is-collapsed" : ""}${navOpen ? " is-nav-open" : ""}`}>
         <aside className="jy-sider" id="jy-sider" ref={siderRef} aria-label="主导航">
-          <Link href="/" className="jy-brand" aria-label={`${BRAND.productName}，回到${NAV_LABELS.home}`}>
-            <BrandMark size={28} inverse />
-            <div>
-              <strong>{BRAND.name}</strong>
-              <small>控制台</small>
-            </div>
-          </Link>
+          <div className="jy-brand-row">
+            <Link href="/" className="jy-brand" aria-label={`${BRAND.productName}，回到${NAV_LABELS.home}`}>
+              <BrandMark size={34} />
+              <div>
+                <strong>{BRAND.name}</strong>
+                <small>运营控制台</small>
+              </div>
+            </Link>
+            <button
+              type="button"
+              className="jy-collapse-btn"
+              onClick={toggleCollapsed}
+              aria-label={collapsed ? "展开导航" : "收起导航"}
+              aria-expanded={!collapsed}
+            >
+              <Icon name={collapsed ? "expand" : "collapse"} />
+            </button>
+          </div>
+          {!passwordChangeRequired && ownStation?.baseUrl && <a className="jy-workspace" href={`${ownStation.baseUrl.replace(/\/+$/, "")}/dashboard`} target="_blank" rel="noopener noreferrer" aria-label={`${ownStation.name}主站，打开主站控制台`} title="打开主站控制台">
+            <span className="jy-workspace-dot" aria-hidden="true" />
+            <span className="jy-workspace-name">{ownStation.name}主站</span>
+            <Icon name="external" />
+          </a>}
           <nav className="jy-nav">
             {groups.map((g) => (
               <Fragment key={g.label}>
@@ -203,7 +219,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       key={it.key}
                       href={it.path}
                       aria-current={active ? "page" : undefined}
-                      title={collapsed ? it.label : undefined}
+                      aria-label={count > 0 ? `${it.label}，需处理 ${count} 项` : it.label}
+                      title={it.label}
                     >
                       <Icon name={it.icon as IconName} />
                       <span className="label">{it.label}</span>
@@ -228,18 +245,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               退出登录
             </button>
           </div>
-          <div className="jy-sider-foot">
-            <span className="grow">{VERSION_LABEL} {pkg.version}</span>
-            <button
-              type="button"
-              className="jy-collapse-btn"
-              onClick={toggleCollapsed}
-              aria-label={collapsed ? "展开导航" : "收起导航"}
-              aria-expanded={!collapsed}
-            >
-              <Icon name={collapsed ? "expand" : "collapse"} />
-            </button>
-          </div>
         </aside>
         <div className="jy-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />
 
@@ -256,8 +261,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             >
               <Icon name="menu" />
             </button>
-            <h1>{title}</h1>
-            {range ? <div className="jy-topbar-range">{range}</div> : null}
+            <div className="jy-breadcrumb"><span>{current?.key === "settings" || current?.key === "notifications" ? "管理" : ["stations", "usage", "analytics"].includes(current?.key || "") ? "资源与分析" : "工作空间"}</span><span aria-hidden="true">/</span><span>{title}</span></div>
             <div className="jy-topbar-spacer" />
             {asOf != null && (
               <span
@@ -315,7 +319,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </header>
 
           <main className={`jy-content${refreshing ? " is-refreshing" : ""}`} aria-busy={refreshing || undefined}>
-            {range ? <div className="jy-mobile-range">{range}</div> : null}
+            <div className="jy-page-head"><div className="jy-page-title"><h1>{title}</h1>{page.subtitle ? <p>{page.subtitle}</p> : null}</div>{range || page.headingExtra ? <div className="jy-page-actions">{range ? <div className="jy-page-range">{range}</div> : null}{page.headingExtra}</div> : null}</div>
             {/* 页面用 useSearchParams 保存筛选状态，需要 Suspense 边界 */}
             <Suspense fallback={null}>{children}</Suspense>
           </main>

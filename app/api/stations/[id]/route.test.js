@@ -15,6 +15,23 @@ async function stationRoute() {
   try { return await import("./route.js"); } finally { hook.deregister(); }
 }
 
+test("PUT 导入人工登录授权：缓存可续期但响应不回传任何令牌，非法授权报400", async () => {
+  const { PUT } = await stationRoute();
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const station = await store.add({ type: "sub2api", baseUrl: "https://session.test", accessToken: "old-jwt", monitorEnabled: false });
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0, dailySpendView: () => ({ state: "pending", days: [] }) } };
+  const send = (session) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify({ session }) }), rt, { id: station.id });
+  const response = await send({ accessToken: "imported-access", refreshToken: "imported-refresh", expiresAt: 12345 });
+  assert.equal(response.status, 200);
+  assert.equal(station.s2Tokens.refreshToken, "imported-refresh");
+  assert.doesNotMatch(JSON.stringify(await response.json()), /imported-access|imported-refresh|s2Tokens/);
+  const invalid = await send({ accessToken: "incomplete" });
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).code, "INVALID_SUB2_SESSION");
+});
+
 test("公共PUT明确映射CAS，忽略伪造identity/markers/guard，restore保留用途设置", async () => {
   const { PUT } = await stationRoute();
   const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],

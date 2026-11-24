@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStations, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
-  ownUsersKey, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys, readOwnAdminDirectory,
+  ownUsersKey, seedOwnChannelList, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys, readOwnAdminDirectory,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -675,4 +675,36 @@ test("转售 Key 的 stat：已经过完的窗口（终点离现在超过 2 小�
   assert.equal(calls, 7, "读失败的不留，下一次照读");
   await computeResold({ ...own, accessToken: "other" }, 10, 5, settled[0], settled[1], keys);
   assert.equal(calls, 8, "换了令牌是另一份");
+});
+
+test("历史采购系数与每日利润一致：改系数只重算今天，历史空值按 1，读取次数不随天数增加", async (t) => {
+  const tz = "Asia/Shanghai", yesterday = dayStartInTz("2026-11-20", tz), today = dayStartInTz("2026-11-21", tz), now = today + 12 * 3600000;
+  t.mock.method(Date, "now", () => now);
+  const own = { id: "own", type: "newapi", isOwn: true, baseUrl: "https://own.test", cnyPerUsd: 2 };
+  const upstream = { id: "up", name: "Up", type: "newapi", baseUrl: "https://up.test", accessToken: "fixture", cnyPerUsd: 2 };
+  const facts = [{ upstreamStationId: "up", billDate: "2026-11-20", costRate: 0.5, revenueRate: 1 }];
+  const rt = { store: { list: () => [own, upstream] }, history: { usedBetween: () => 0 }, reconciliation: { financialFacts: async () => facts } };
+  seedOwnChannelList(rt, own, [{ id: 1, name: "channel", baseUrl: upstream.baseUrl, status: 1 }]);
+  let reads = 0;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(String(input));
+    assert.equal(url.host, "up.test"); assert.equal(url.pathname, "/api/data/self"); reads++;
+    const from = Number(url.searchParams.get("start_timestamp")) * 1000, to = Number(url.searchParams.get("end_timestamp")) * 1000;
+    const data = [{ at: yesterday + 3600000, usd: 60 }, { at: today + 3600000, usd: 5 }].filter((row) => row.at >= from && row.at <= to)
+      .map((row) => ({ model_name: "m", created_at: row.at / 1000, quota: row.usd * 500000, token_used: 10, count: 1 }));
+    return Response.json({ success: true, data });
+  });
+  const incomeDays = [{ date: "2026-11-20", incomeUsd: 100, adminUsageUsd: 0, resoldUsd: 0, resoldKeys: [] },
+    { date: "2026-11-21", incomeUsd: 20, adminUsageUsd: 0, resoldUsd: 0, resoldKeys: [] }];
+  const before = structuredClone(facts);
+  const week = await computeProfit(rt, own, 120, 0, { startMs: yesterday - 5 * 86400000, now, tz, range: "7d", incomeDays });
+  assert.deepEqual([week.incomeCny, week.upstreamCostCny, week.grossProfitCny], [140, 40, 100]);
+  assert.deepEqual(week.incomeDaily, [{ date: "2026-11-20", incomeCny: 100 }, { date: "2026-11-21", incomeCny: 40 }]);
+  const report = await computeProfit(rt, own, 100, 0, { startMs: yesterday, now: today, tz, range: "7d", incomeDays: incomeDays.slice(0, 1) });
+  assert.deepEqual([report.incomeCny, report.upstreamCostCny, report.grossProfitCny], [100, 30, 70]);
+  assert.deepEqual(facts, before);
+  facts[0].costRate = null;
+  const legacy = await computeProfit(rt, own, 100, 0, { startMs: yesterday, now: today, tz, range: "7d", incomeDays: incomeDays.slice(0, 1) });
+  assert.equal(legacy.upstreamCostCny, 60);
+  assert.equal(reads, 3, "每次整段只读取一次上游用量");
 });

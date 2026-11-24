@@ -15,6 +15,7 @@ import { workflowAction } from "../../../lib/workflow-actions";
 import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
 import { Panel } from "../../components/panel";
 import { useShellPage } from "../../components/shell-context";
+import { visibleInterval } from "../../../lib/visible-interval.js";
 import { useUrlParams } from "../../components/use-url-state";
 import { COPY } from "./copy";
 import { ModelDrawer } from "./model-drawer";
@@ -33,10 +34,10 @@ export default function ModelsPageRoute() {
   const [unset, setUnset] = useState(false);
   const latest = useRef(0);
 
-  const load = useCallback(async (rethrow = false) => {
+  const load = useCallback(async (rethrow = false, refresh = false) => {
     const mine = ++latest.current;
     try {
-      const res = await api("/api/models");
+      const res = await api("/api/models", refresh ? { method: "POST" } : undefined);
       if (mine !== latest.current) return;
       setPage(res); setUnset(false); setErr(null);
     } catch (e: any) {
@@ -47,11 +48,11 @@ export default function ModelsPageRoute() {
       if (rethrow) throw e;
     }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); return visibleInterval(() => load(), 10 * 60_000); }, [load]);
 
-  const onRefresh = useCallback(() => load(true), [load]);
+  const onRefresh = useCallback(() => load(true, true), [load]);
   // 「数据截至」写这份数读的时刻（服务端 10 分钟内不重读，页面上写的和服务端一致）
-  useShellPage({ onRefresh, asOf: unset ? null : page?.asOf ?? null, tz: page?.tz });
+  useShellPage({ onRefresh, asOf: unset ? null : page?.asOf ?? null, autoRefreshMs: 10 * 60_000, tz: page?.tz });
 
   const open = (name: string) => setParams({ model: name });
   const close = () => setParams({ model: null });

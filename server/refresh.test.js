@@ -28,6 +28,20 @@ function makeRt(t, { ownFails = false } = {}) {
 }
 const hits = (calls, host) => calls.filter((call) => call.startsWith(host)).length;
 
+test("用户余额共用供应商刷新节拍，历史回补在途时供应商刷新照常完成", async (t) => {
+  const { rt, calls } = makeRt(t);
+  let starts = 0, finish;
+  rt.pool = {};
+  rt.userOps = { runOnce: () => {
+    starts += 1;
+    return new Promise((resolve) => { finish = resolve; });
+  } };
+  await refreshAll(rt, { background: true, now: 1000000 });
+  assert.equal(starts, 1);
+  assert.equal(hits(calls, "up1.test"), 1);
+  finish();
+});
+
 test("后台轮询：上游站点每轮都读，自营站点每 5 分钟才读一次；手动刷新所有站点都读", async (t) => {
   const { rt, calls } = makeRt(t);
   let now = 1000000;
@@ -46,6 +60,15 @@ test("后台轮询：上游站点每轮都读，自营站点每 5 分钟才读�
   await refreshAll(rt, { background: true, now });
   assert.equal(hits(calls, "own.test"), 3, "手动刷新算一次读：之后又从头数 5 分钟");
   assert.equal(OWN_LOAD.STATION_POLL_MS, 5 * 60000);
+});
+
+test("上游页面刷新只读取上游，不启动用户采集或自营站点查询", async (t) => {
+  const { rt, calls } = makeRt(t);
+  rt.pool = {};
+  rt.userOps = { runOnce() { throw new Error("不应启动用户同步"); } };
+  await refreshAll(rt, { scope: "upstreams" });
+  assert.equal(hits(calls, "own.test"), 0);
+  assert.equal(hits(calls, "up1.test"), 1);
 });
 
 test("读不到自营站点时照样发现：后台轮询读到 401 就记 ok:false（告警评估照常），不会因为 5 分钟一次而丢；读失败的结果不被 /api/user/self 的共用留住", async (t) => {

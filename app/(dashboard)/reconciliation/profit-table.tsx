@@ -2,13 +2,15 @@
 // 每日利润的渠道表（设计 10-29）：桌面一行一个渠道（收入、上游成本、毛利、毛利率），默认按毛利从高到低、点表头换排法、亏钱的标红；
 // 点开一个渠道一天一行，行末「计算明细」打开那天的计算明细；需处理的渠道名字后面一个感叹号，点开写原因加按钮。手机一个渠道一张卡片。
 // 字都从 copy.ts 和 profit-format.ts 来，这里只负责摆。
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Alert, Button } from "antd";
+import { Alert, Button, Select } from "antd";
 import { RecheckConsumeLogButton } from "../../components/recheck-consume-log";
 import { IssueBang, IssuePop } from "../../components/issue-bang";
 import { CountBadge, Panel } from "../../components/panel";
 import { EmptyState } from "../../components/data-state";
+import { Seg } from "../../components/seg";
+import { ProfitSuppliers } from "./profit-suppliers";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import type { ProfitKeyRow, ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
 import { EMPTY } from "../../../lib/format";
@@ -18,13 +20,14 @@ import type { Ctx, RowGroup, RowLayout, Sort, SortKey } from "./profit-format";
 
 type Props = {
   page: ProfitPageResponse; ctx: Ctx; compact: boolean; switching: boolean;
-  sort: Sort | null; onSort: (key: SortKey) => void;
+  sort: Sort | null; onSort: (key: SortKey) => void; onSortChange: (sort: Sort) => void;
   // 看一天时是这一天（点这一行、「计算明细」打开这天的明细），看多天是 null（行不能点）；hold：开着计算明细时列表先别动
   detailDay: string | null; hold: boolean;
   onOpenDetail: (row: ProfitRow, day: string) => void;
   onRetry: (row: ProfitRow) => void; onRefresh: () => void;
   retryingKeys: Set<string>; retryErrors: Record<string, unknown>;
   empty: { href: string; label: string } | null;
+  revealRuleId?: string | null;
 };
 
 const COLUMNS: { key: SortKey; label: string }[] = [
@@ -104,6 +107,7 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
   const totals = totalsRow(page, ctx), columns = COLUMNS.length + (detailDay ? 1 : 0);
   return <div className="jy-table-wrap">
     <table className="jy-profit-table">
+      <colgroup><col className="jy-profit-col-name" /><col /><col /><col /><col />{detailDay ? <col className="jy-profit-col-detail" /> : null}</colgroup>
       <thead><tr>
         {COLUMNS.map((column) => <th key={column.key} className={column.key === "name" ? undefined : "jy-profit-num"} aria-sort={sort?.key === column.key ? (sort.dir === "desc" ? "descending" : "ascending") : undefined}>
           <button type="button" className="jy-profit-sort" onClick={() => onSort(column.key)}>{column.label}{sort?.key === column.key ? <span aria-hidden="true">{sort.dir === "desc" ? " ▼" : " ▲"}</span> : null}</button>
@@ -118,7 +122,7 @@ function DesktopTable(props: Props & { groups: RowGroup[]; popOpen: string | nul
           return <Fragment key={row.rowKey}><tr className={`jy-profit-row${openable ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={openable ? () => onOpenDetail(row, detailDay) : undefined}>
             <td className="jy-profit-row__name">
               <span className="jy-profit-row__line">
-                <strong>{name}</strong>
+                <strong title={name}>{name}</strong>
                 {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
                 <RowBang row={row} popKey={row.rowKey} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
               </span>
@@ -145,15 +149,21 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
       <ul className="jy-profit-cards">
         {group.rows.map((row) => {
           const name = rowName(row), money = rowMoney(row, ctx.currency), cells = rowCells(row, ctx);
-          const loss = cells.gross != null && cells.gross < 0, openable = detailDay != null && !row.reading; // 还在读取：点不开、不带箭头
+          const loss = cells.gross != null && cells.gross < 0, openable = detailDay != null && !row.reading, reading = readingText(row); // 还在读取：点不开、不带箭头
           return <li key={row.rowKey} className={`jy-profit-card${openable ? " is-clickable" : ""}`} data-row-key={row.rowKey} onClick={openable ? () => onOpenDetail(row, detailDay) : undefined}>
             <div className="jy-profit-card__head">
-              <strong>{name}</strong>
+              <strong title={name}>{name}</strong>
               {isUnbound(row) ? <em className="jy-tag jy-tag--type jy-profit-unbound-tag">{COPY.table.unboundTag}</em> : null}
               <RowBang row={row} popKey={`m:${row.rowKey}`} open={props.popOpen} onOpenChange={props.setPopOpen} onRetry={props.onRetry} onRefresh={props.onRefresh} retryingKeys={props.retryingKeys} retryErrors={props.retryErrors} />
-              <b className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : readingText(row) ?? EMPTY}</b>{openable ? <span className="jy-profit-card__chev" aria-hidden="true">›</span> : null}
+              {openable ? <button type="button" className="jy-profit-card__detail" aria-label={`${COPY.table.day.detail} ${name}`} onClick={(event) => { event.stopPropagation(); onOpenDetail(row, detailDay); }}>{COPY.table.day.detail}<span className="jy-profit-card__chev" aria-hidden="true">›</span></button> : null}
             </div>
-            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span><span>{readingText(row) ? null : COPY.table.mobileLine(fmtMoney(cells.income, ctx.currency), row.counted ? marginText(money.gross, money.income) : EMPTY)}</span></div>
+            <div className="jy-profit-card__sub"><span title={rowUpstream(row) || undefined}>{rowUpstream(row)}</span></div>
+            {reading ? <p className="jy-profit-card__reading">{reading}</p> : <dl className="jy-profit-card__metrics">
+              <div><dt>{COPY.table.col.income}</dt><dd>{fmtMoney(cells.income, ctx.currency)}</dd></div>
+              <div><dt>{COPY.table.col.actual}</dt><dd>{row.counted ? fmtMoney(money.actual, ctx.currency) : EMPTY}</dd></div>
+              <div><dt>{COPY.table.col.gross}</dt><dd className="jy-profit-card__gross">{row.counted ? neg(loss, fmtMoney(money.gross, ctx.currency)) : EMPTY}</dd></div>
+              <div><dt>{COPY.table.col.margin}</dt><dd>{row.counted ? neg(loss, marginText(money.gross, money.income)) : EMPTY}</dd></div>
+            </dl>}
             {hasKeyRows(row) ? <ul className="jy-profit-keys">{row.keys!.map((key) => {
               const cells = keyCells(key, row, ctx);
               return <li key={String(key.tokenId)} className="jy-profit-key">
@@ -171,6 +181,8 @@ function MobileCards(props: Props & { groups: RowGroup[]; popOpen: string | null
 export function ProfitTable(props: Props) {
   const { page, ctx, compact, switching, empty, sort } = props;
   const [popOpen, setPopOpen] = useState<string | null>(null);
+  const [view, setView] = useState("suppliers");
+  useEffect(() => { if (props.revealRuleId) setView("channels"); }, [props.revealRuleId]);
   const lastLayout = useRef<RowLayout | null>(null);
   if (!page.rows.length) {
     return <Panel title={COPY.table.title} className="jy-profit-panel">
@@ -180,11 +192,17 @@ export function ProfitTable(props: Props) {
   // 开着计算明细或感叹号气泡时先别动，关掉再排（和上游列表同一个 keepOrder）
   const { groups, layout } = arrangeRows(page.rows, { today: isTodayView(page), sort }, ctx, lastLayout.current, props.hold || popOpen != null);
   lastLayout.current = layout;
-  const column = COLUMNS.find((item) => item.key === (sort ?? DEFAULT_SORT).key)!.label;
-  return <Panel title={COPY.table.title} badge={<CountBadge count={page.counts.channels} muted />} extra={compact ? <span className="jy-caption">{COPY.table.mobileSort(column, (sort ?? DEFAULT_SORT).dir === "desc")}</span> : undefined}
+  return <Panel title={view === "suppliers" ? "供应商对账" : COPY.table.title} badge={view === "channels" ? <CountBadge count={page.counts.channels} muted /> : undefined} extra={<div className="jy-profit-table-controls">
+    <Seg label="对账展示方式" options={[{ value: "suppliers", label: "供应商合计" }, { value: "channels", label: "渠道明细" }]} value={view} onChange={setView} />
+    {compact ? <Select size="small" className="jy-profit-mobile-sort" aria-label="对账排序" value={`${(sort ?? DEFAULT_SORT).key}:${(sort ?? DEFAULT_SORT).dir}`}
+      options={COLUMNS.flatMap((item) => (["desc", "asc"] as const).map((dir) => ({ value: `${item.key}:${dir}`, label: `${item.key === "name" && view === "suppliers" ? "供应商" : item.label} ${dir === "desc" ? "↓" : "↑"}` })))}
+      onChange={(value) => { const [key, dir] = value.split(":") as [SortKey, "asc" | "desc"]; props.onSortChange({ key, dir }); }}
+    /> : null}
+  </div>}
     body={compact ? false : "flush"} className={`jy-profit-panel${switching ? " jy-profit-switching" : ""}`}>
     <div aria-busy={switching || undefined}>
-      {compact ? <MobileCards {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} /> : <DesktopTable {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} />}
+      {view === "suppliers" ? <ProfitSuppliers page={page} ctx={ctx} compact={compact} sort={sort} onSort={props.onSort} detailDay={props.detailDay} revealRuleId={props.revealRuleId} onOpenDetail={props.onOpenDetail} onShowChannels={() => setView("channels")} />
+        : compact ? <MobileCards {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} /> : <DesktopTable {...props} groups={groups} popOpen={popOpen} setPopOpen={setPopOpen} />}
     </div>
   </Panel>;
 }
