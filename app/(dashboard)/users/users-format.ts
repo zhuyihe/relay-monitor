@@ -45,8 +45,8 @@ export type UserDetail = {
   user: UsersRow | null; rate: number; ready: UsersPage["ready"]; backfill: UsersPage["backfill"]; models: DetailModels;
 };
 
-export const TABS: readonly UsersTab[] = ["overview", "users", "churn"];
-export const OPEN_TABS: readonly UsersTab[] = ["overview", "users", "churn"];
+export const TABS: readonly UsersTab[] = ["overview", "users", "groups", "churn"];
+export const OPEN_TABS: readonly UsersTab[] = ["overview", "users", "groups", "churn"];
 export const ONLY_VALUES = ["all", "soon", "down", "new", "churned"] as const;
 export const ONLY_LABEL: Record<Only, string> = { all: COPY.users.filterAll, soon: COPY.status.soon, down: COPY.status.down, new: COPY.status.new, churned: COPY.status.churned };
 
@@ -155,7 +155,7 @@ export function overviewKpis(page: UsersPage): Kpi[] {
 }
 
 // ---- 地址栏 ----
-export const parseTab = (raw: string | null): UsersTab => (raw === "users" || raw === "churn" ? raw : "overview");
+export const parseTab = (raw: string | null): UsersTab => (raw === "users" || raw === "groups" || raw === "churn" ? raw : "overview");
 export const parseOnly = (raw: string | null): Only => ((ONLY_VALUES as readonly string[]).includes(raw ?? "") ? (raw as Only) : "all");
 export const parseScope = (raw: string | null): Scope => (raw === "all" ? "all" : "active30");
 export const SORT_KEYS: readonly SortKey[] = ["user", "week", "today", "balance", "days", "last"];

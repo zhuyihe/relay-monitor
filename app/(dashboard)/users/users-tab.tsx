@@ -11,7 +11,6 @@ import { Seg } from "../../components/seg";
 import { DataTable } from "../my/shared";
 import type { Col } from "../my/shared";
 import { SparkLine } from "./charts";
-import { UserGroups } from "./groups-panel";
 import { COPY } from "./copy";
 import { ONLY_LABEL, ONLY_VALUES, bigLabel, bigTipText, deltaText, lastUsedText, money, runwayText, sparkValues } from "./users-format";
 import type { ListQuery, Only, Scope, SortKey, UsersPage, UsersRow } from "./users-format";
@@ -226,7 +225,6 @@ export function UsersTab({
       )}
       {pager}
     </Panel>
-    {!page.paused && <UserGroups />}
     </>
   );
 }
