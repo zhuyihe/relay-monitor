@@ -52,19 +52,20 @@ function runtime() {
     store: { list: () => [own], settings: { refreshIntervalSec: 60 }, rules: {} }, userOps: {},
     _userOpsPageCache: { payload: { ownStationId: "own", today: "2026-11-22", tz: "Asia/Shanghai", syncedMs: now, todaySyncedMs: now, balanceSyncedMs: now,
       fresh: true, ready: { balance: true }, users: [{ id: 1, username: "customer-a", today: 100, days: .5, runwayState: "soon" }],
-      summary: { todayCost: 999999 }, trend: [{ day: "2026-11-21", available: true, users: 2, top: [{ username: "customer-b", cost: 50 }] }, { day: "2026-11-22", available: true, users: 1, top: [] }] } },
+      summary: { todayCost: 100 }, trend: [{ day: "2026-11-21", available: true, cost: 60, users: 2, top: [{ username: "customer-b", cost: 50 }] }, { day: "2026-11-22", available: true, cost: 100, users: 1, top: [] }] } },
     _ownLogStore: { getCursor: async () => ({ coveredFromMs: startMs - 86400000, coveredToMs: now - 300000 }), listBuckets: async () => [{ channelId: 1, quota: 5000000, adminQuota: 500000, testQuota: 0 }, { channelId: 2, quota: 1000000, adminQuota: 0, testQuota: 0 }] },
     reconciliation: { cachedOwnStatus: () => ({ quotaPerUnit: 500000 }), profitPage: async (input, options) => { calls.push({ input, options }); return { coverage: { catalogueState: "verified", knownChannelCount: 2, accountedChannelCount: 1, channels: [{ ownStationId: "own", channelId: 1, name: "渠道1", status: "accounted", window: { startMs: startMs - 86400000, endMs: startMs } }, { ownStationId: "own", channelId: 2, name: "渠道2", status: "unlinked" }] }, accountingTotals: { gross: 3 } }; } },
   };
   return { rt, now, calls };
 }
 
-test("首页汇总只读现有日志和cacheOnly账单，覆盖金额按同一日志来源分拆，不借用户用量补金额", async t => {
+test("首页客户消费共用用户运营快照，财务收入和覆盖金额仍只读日志及cacheOnly账单", async t => {
   t.mock.method(globalThis, "fetch", async () => { throw Error("首页不得发上游请求"); });
   const f = runtime();
   const result = await overviewPage(f.rt, { now: f.now });
   assert.equal(result.financial.amount, 11);
-  assert.notEqual(result.financial.amount, 999999);
+  assert.deepEqual(result.users.consumption, { amount: 100, asOf: f.now });
+  assert.notEqual(result.financial.amount, result.users.consumption.amount);
   assert.equal(result.financial.asOf, f.now - 300000);
   assert.deepEqual([result.coverage.covered, result.coverage.missing], [9, 2]);
   assert.equal(result.coverage.ratio, 9 / 11);
@@ -79,13 +80,44 @@ test("昨天汇总只读完整历史日志，客户余额和提醒仍是当前�
   const result = await overviewPage(f.rt, { preset: "yesterday", now: f.now });
   assert.deepEqual(f.calls, [{ input: { preset: "yesterday" }, options: { cacheOnly: true, passive: true } }]);
   assert.equal(result.users.activity.count, 2);
+  assert.deepEqual(result.users.consumption, { amount: 60, asOf: f.now });
   assert.equal(result.users.balanceAt, f.now);
   assert.equal(result.users.customers[0].today, 100);
   f.rt.reconciliation.cachedOwnStatus = () => null;
   const unknown = await overviewPage(f.rt, { now: f.now });
   assert.equal(unknown.financial.amount, null);
+  assert.deepEqual(unknown.users.consumption, { amount: 100, asOf: f.now });
   assert.equal(unknown.coverage.missing, null);
   assert.equal(unknown.users.activity.count, 1);
+});
+
+test("用户刷新后首页金额和时间同步更新，未更新的财务账单与毛利保持原值", async () => {
+  const f = runtime();
+  const before = await overviewPage(f.rt, { now: f.now });
+  const payload = f.rt._userOpsPageCache.payload;
+  payload.syncedMs = payload.todaySyncedMs = payload.balanceSyncedMs = f.now + 60000;
+  payload.summary.todayCost = payload.users[0].today = 123.45;
+  const after = await overviewPage(f.rt, { now: f.now + 60000 });
+  assert.deepEqual(after.users.consumption, { amount: 123.45, asOf: payload.todaySyncedMs });
+  assert.equal(after.users.consumption.amount, after.users.customers.reduce((sum, user) => sum + user.today, 0));
+  assert.deepEqual(after.financial, before.financial);
+  assert.deepEqual(after.profit, before.profit);
+  assert.deepEqual(after.coverage, before.coverage);
+});
+
+test("客户消费保留真实零和同步时间；未同步不借财务金额，历史缺天不伪造零", async () => {
+  const f = runtime(), payload = f.rt._userOpsPageCache.payload;
+  payload.summary.todayCost = payload.users[0].today = 0;
+  const zero = await overviewPage(f.rt, { now: f.now + 60000 });
+  assert.deepEqual(zero.users.consumption, { amount: 0, asOf: f.now });
+  assert.equal(zero.financial.amount, 11);
+  payload.todaySyncedMs = payload.syncedMs = null;
+  payload.trend[0].available = false;
+  const unread = await overviewPage(f.rt, { now: f.now });
+  assert.deepEqual(unread.users.consumption, { amount: null, asOf: null });
+  assert.equal(unread.financial.amount, 11);
+  const yesterday = await overviewPage(f.rt, { preset: "yesterday", now: f.now });
+  assert.deepEqual(yesterday.users.consumption, { amount: null, asOf: null });
 });
 
 test("渠道目录未知时不宣称全站已对账，也不把所有有消费渠道误报成未绑定", async () => {

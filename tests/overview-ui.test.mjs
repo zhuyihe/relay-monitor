@@ -32,17 +32,17 @@ async function openPage(t, { viewport = { width: 1440, height: 1000 }, dark = fa
   return { page, calls };
 }
 
-test("真实首页：分开全站消费与部分毛利、各自时间，初次只读汇总", async t => {
+test("真实首页：客户消费复用用户快照，与财务毛利分别展示时间，初次只读汇总", async t => {
   const { page, calls } = await openPage(t);
-  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-value").textContent(), "$4,775.92");
+  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-value").textContent(), "¥4,722.12");
   assert.match(await page.locator(".jy-ov-metric").nth(3).textContent(), /\$548\.13/);
-  assert.match(await page.locator(".jy-ov-metric").nth(0).textContent(), /10:22/);
+  assert.match(await page.locator(".jy-ov-metric").nth(0).textContent(), /10:21/);
   assert.match(await page.locator(".jy-ov-metric").nth(3).textContent(), /10:16/);
   assert.match(await page.locator(".jy-ov-coverage").textContent(), /96\.8%/);
   assert.deepEqual(calls.filter(call => call.method !== "GET"), []);
   assert.equal(calls.some(call => /history/.test(call.path)), false);
   assert.match(await page.locator(".jy-ov-attention-strip").textContent(), /昨日对账尚未齐全/);
-  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-currency").textContent(), "$");
+  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-currency").textContent(), "¥");
 });
 
 test("昨天只切经营数据，当前客户余额不倒退；详情链接带选择日期", async t => {
@@ -54,7 +54,7 @@ test("昨天只切经营数据，当前客户余额不倒退；详情链接带�
   await picker.getByRole("button", { name: "昨天", exact: true }).click();
   await picker.getByRole("button", { name: "确认", exact: true }).click(); await response;
   await picker.waitFor({ state: "hidden" });
-  await page.waitForFunction(() => document.querySelector(".jy-ov-metric.is-lead .jy-ov-value")?.textContent === "$20,506.26");
+  await page.waitForFunction(() => document.querySelector(".jy-ov-metric.is-lead .jy-ov-value")?.textContent === "¥20,469.25");
   assert.equal(await page.locator(".jy-ov-customer-table").textContent(), balanceBefore);
   assert.match(await page.locator(".jy-ov-customers").textContent(), /当前余额/);
   await page.locator(".jy-ov-metric").nth(1).click();
@@ -70,12 +70,42 @@ test("昨天只切经营数据，当前客户余额不倒退；详情链接带�
   assert.match(details, /2026-11-15/); assert.doesNotMatch(details, /2026-11-22/);
 });
 
-test("未同步金融数据不显示0，普通客户用量可独立查看", async t => {
+test("未同步财务账单不影响客户消费和时间，毛利不借用客户金额", async t => {
   const { page } = await openPage(t, { transform: data => ({ ...data, financial: { amount: null, asOf: null, reason: "尚未同步完整的主站消费账单", channels: [] }, profit: null }) });
-  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-value").textContent(), "—");
+  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-value").textContent(), "¥4,722.12");
   assert.equal(await page.locator(".jy-ov-metric").nth(3).locator(".jy-ov-value").textContent(), "—");
-  assert.match(await page.locator(".jy-ov-notice").textContent(), /普通客户用量仍可独立查看/);
+  assert.match(await page.locator(".jy-ov-notice").textContent(), /客户消费与用户运营保持同一来源/);
   assert.equal(await page.locator(".jy-ov-chart svg").count(), 1);
+});
+
+test("账单落后一小时只提示财务采集延迟，客户金额、表头时间和换算仍与用户运营一致", async t => {
+  const { page } = await openPage(t, { transform: data => ({ ...data, own: { ...data.own, rate: 2 }, financial: { ...data.financial, asOf: data.now - 3600000 } }) });
+  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-value").textContent(), "¥9,444.25");
+  assert.match(await page.locator(".jy-ov-metric").nth(0).textContent(), /用户消费汇总 · 10:21/);
+  assert.match(await page.locator(".jy-ov-notice").textContent(), /财务账单截至 9:22，更新落后约 60 分钟/);
+  assert.match(await page.locator(".jy-ov-metric").nth(3).textContent(), /\$548\.13/);
+  assert.match(await page.locator(".jy-ov-data-footer").textContent(), /客户消费 10:21/);
+  assert.match(await page.locator(".jy-topbar").textContent(), /10:21/);
+});
+
+test("客户尚未同步时显示缺失值，不能用旧财务账单冒充客户消费", async t => {
+  const { page } = await openPage(t, { transform: data => ({ ...data, users: { ...data.users, consumption: { amount: null, asOf: null }, usageAt: null, ready: false } }) });
+  assert.equal(await page.locator(".jy-ov-metric.is-lead .jy-ov-value").textContent(), "—");
+  assert.match(await page.locator(".jy-ov-metric.is-lead").textContent(), /客户消费尚未同步/);
+});
+
+test("手动刷新后客户金额与时间更新，旧财务金额和利润继续独立保留", async t => {
+  let reads = 0;
+  const { page } = await openPage(t, { transform: data => {
+    if (++reads > 1) { data.users.consumption = { amount: 5000, asOf: data.users.usageAt + 60000 }; data.users.usageAt += 60000; data.users.balanceAt += 60000; }
+    return data;
+  } });
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".jy-ov-metric.is-lead .jy-ov-value")?.textContent === "¥5,000.00");
+  assert.match(await page.locator(".jy-ov-metric.is-lead").textContent(), /10:22/);
+  assert.match(await page.getByRole("button", { name: "选择时间范围", exact: true }).textContent(), /10:22:03/);
+  assert.match(await page.locator(".jy-ov-metric").nth(3).textContent(), /\$548\.13/);
+  assert.match(await page.locator(".jy-ov-data-footer").textContent(), /财务账单 10:22/);
 });
 
 test("目录或账单时间未确认时不宣称全部计入，也不显示假的金额进度", async t => {
@@ -141,7 +171,7 @@ for (const width of [1440, 768, 390]) for (const dark of [false, true]) test(`�
     await page.getByRole("button", { name: "今日消费榜", exact: true }).click();
     const firstSpend = page.locator(".jy-ov-customer-table tbody tr td:nth-child(2)").first();
     assert.equal(await firstSpend.isVisible(), true);
-    assert.equal(await firstSpend.textContent(), "$3,458.75");
+    assert.equal(await firstSpend.textContent(), "¥3,458.75");
     assert.match(await page.locator(".jy-ov-customer-name").first().getAttribute("href"), /user=101$/);
   }
 });

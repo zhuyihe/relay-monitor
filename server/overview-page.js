@@ -1,5 +1,5 @@
-// 首页只读本地结果：用户快照、已记录的整站消费日志、固定账本及后台对账缓存。
-// 不因进入首页补历史、不请求主站；没有完整覆盖的消费账单不拿用户用量替代。
+// 首页只读本地结果：客户消费与用户运营共用快照；财务收入、覆盖进度与利润仍来自账单。
+// 不因进入首页补历史、不请求主站；用户用量不替代财务账单。
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { rateSnapshotOf } from "../lib/profit.js";
 import { consumeLogOffOverlap } from "../lib/consume-log.js";
@@ -56,9 +56,12 @@ export async function overviewPage(rt, { preset = "today", now = Date.now() } = 
   const usageAt = users?.todaySyncedMs ?? users?.syncedMs ?? null;
   const usageReady = usageAt != null && !users?.starting;
   const readyBalance = users?.ready?.balance === true && !users?.basicOnly;
+  const dayUsage = users?.trend?.find((item) => item.day === day && item.available);
+  const consumption = { amount: preset === "today" ? (usageReady ? users.summary.todayCost : null) : (dayUsage?.cost ?? null),
+    asOf: (preset === "today" ? usageReady : !!dayUsage) ? usageAt : null };
   const activity = !usageReady ? null : preset === "today"
     ? { users: customers.filter((user) => user.today > 0).length, top: [...customers].filter((user) => user.today > 0).sort((a, b) => b.today - a.today).slice(0, 3).map((user) => ({ username: user.username, cost: user.today })) }
-    : users.trend?.find((item) => item.day === day && item.available);
+    : dayUsage;
   const reminders = readyBalance ? customers.filter((user) => user.runwayState === "soon" || user.runwayState === "empty") : [];
   const coverageChannels = historyProfit?.coverage?.channels || [];
   const accountedChannels = coverageChannels.filter((channel) => channel.status === "accounted" && channel.ownStationId === own.id);
@@ -78,7 +81,7 @@ export async function overviewPage(rt, { preset = "today", now = Date.now() } = 
     own: { id: own.id, name: own.name, rate: rateSnapshotOf(own).cnyPerUsd },
     financial: income || { amount: null, asOf: null, channels: [], reason: "主站消费账单暂时读不到" },
     profit,
-    users: { ready: usageReady, balanceReady: readyBalance, usageAt, balanceAt: users?.balanceSyncedMs ?? null,
+    users: { ready: usageReady, balanceReady: readyBalance, usageAt, balanceAt: users?.balanceSyncedMs ?? null, consumption,
       activity: activity ? { count: activity.users, top: activity.top } : null,
       customers: usageReady ? customers : customers.map((user) => ({ ...user, today: null })),
       trend: (users?.trend || []).map((item) => item.day === today ? { ...item, available: usageReady } : item),

@@ -8,6 +8,7 @@ export type OverviewPageData = {
   own: { id: string; name: string; rate: number };
   financial: OverviewIncome; profit: ProfitPageResponse | null;
   users: { ready: boolean; balanceReady: boolean; usageAt: number | null; balanceAt: number | null; paused: boolean; fresh: boolean;
+    consumption: { amount: number | null; asOf: number | null };
     activity: { count: number; top: { username: string; cost: number }[] } | null;
     customers: (Omit<UsersRow, "today"> & { today: number | null })[]; trend: TrendDay[]; reminderCount: number | null; syncErrors: string[] };
   coverage: { day: string; total: number | null; asOf: number | null; covered: number | null; missing: number | null; ratio: number | null;

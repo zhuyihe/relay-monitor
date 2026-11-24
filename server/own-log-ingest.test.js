@@ -45,7 +45,7 @@ async function fakeSite(t, logs, controls = {}) {
 }
 const row = (id, atMs, extra = {}) => ({ id, type: 2, created_at: Math.floor(atMs / 1000), channel: 1, model_name: "m", group: "g", username: "alice", token_name: "k", token_id: 7, quota: 10, prompt_tokens: 100, completion_tokens: 10, other: "{}", ...extra });
 
-test("第一次跑从昨天 0 点起，落后超过 1 小时每轮最多 15 页、追到 1 小时内每轮最多 6 页，一个小窗口一个小窗口往前读到现在−120 秒；桶和进度一起写；下一轮接着读；读完返回 caught-up", async (t) => {
+test("第一次跑从昨天 0 点起，消费日志落后超过 15 分钟每轮最多 15 页、追到 15 分钟内每轮最多 6 页；桶和进度一起写；下一轮接着读；读完返回 caught-up", async (t) => {
   resetOwnRequestBudget();
   // 昨天 0 点起每 2 分钟一条，到现在（约 35 小时 → 1050 条），root 的两条当管理员自用
   const logs = []; let id = 1;
@@ -66,16 +66,16 @@ test("第一次跑从昨天 0 点起，落后超过 1 小时每轮最多 15 页�
     const result = await ingest.ingestOnce(own);
     total += result.pages || 0; windows += result.windows || 0;
     if (result.skipped === "caught-up") break;
-    const cap = behindBefore > INGEST.BEHIND_MS ? INGEST.MAX_PAGES_BEHIND : INGEST.MAX_PAGES_PER_ROUND;
+    const cap = behindBefore > OWN_LOAD.BUCKET_TODAY_MAX_LAG_MS ? INGEST.MAX_PAGES_BEHIND : INGEST.MAX_PAGES_PER_ROUND;
     assert.ok((result.pages || 0) <= cap, `落后 ${Math.round(behindBefore / 60000)} 分钟这轮最多 ${cap} 页：${result.pages}`);
     resetOwnRequestBudget(); // 额度窗口里不累积到上限（时间不动）
   }
   const cursor = await store.getCursor("own");
   assert.equal(cursor.coveredToMs, now - INGEST.LAG_MS, "读到现在−120 秒");
-  // 追平以后只落后 30 分钟：每轮回到 6 页
-  now += 30 * 60000; resetOwnRequestBudget();
+  // 追平以后只落后 10 分钟：每轮回到 6 页
+  now += 10 * 60000; resetOwnRequestBudget();
   const steady = await ingest.ingestOnce(own);
-  assert.ok(steady.pages > 0 && steady.pages <= INGEST.MAX_PAGES_PER_ROUND, `落后 1 小时内每轮最多 6 页：${steady.pages}`);
+  assert.ok(steady.pages > 0 && steady.pages <= INGEST.MAX_PAGES_PER_ROUND, `落后 15 分钟内每轮最多 6 页：${steady.pages}`);
   const buckets = await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER);
   const horizonSec = Math.floor((now - INGEST.LAG_MS) / 1000) - 1;
   const expected = logs.filter((log) => log.created_at <= horizonSec);
@@ -84,6 +84,30 @@ test("第一次跑从昨天 0 点起，落后超过 1 小时每轮最多 15 页�
   assert.ok(buckets.every((b) => b.slotMs % OWN_LOG_SLOT_MS === 0));
   // 稀的站点每个窗口至少 1 页（窗口会长到 1 小时）；加上条数 ÷ 100 和每轮最多白读一页，不该有大量重翻
   assert.ok(total <= windows + Math.ceil(expected.length / 100) + rounds, `翻页数：${total} 页、${windows} 个窗口、${rounds} 轮`);
+});
+
+test("消费日志落后半小时即启用既有补采额度，逐条金额、管理员扣除与重跑去重不变", async t => {
+  resetOwnRequestBudget();
+  const from = NOW - INGEST.LAG_MS - 30 * 60000;
+  const logs = Array.from({ length: 1800 }, (_, index) => row(index + 1, from + index * 1000, index % 10 === 0 ? { username: "root", quota: 50 } : {}));
+  const { own, rt } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore();
+  await store.startCursor(own.id, from);
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+  const first = await ingest.ingestOnce(own);
+  assert.ok(first.pages > INGEST.MAX_PAGES_PER_ROUND && first.pages <= INGEST.MAX_PAGES_BEHIND);
+  for (let i = 0; i < 50; i += 1) {
+    resetOwnRequestBudget();
+    if ((await ingest.ingestOnce(own)).skipped === "caught-up") break;
+  }
+  assert.equal((await store.getCursor(own.id)).coveredToMs, NOW - INGEST.LAG_MS);
+  const buckets = await store.listBuckets(own.id, 0, Number.MAX_SAFE_INTEGER);
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.requests, 0), logs.length);
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.quota, 0), logs.reduce((sum, log) => sum + log.quota, 0));
+  assert.equal(buckets.reduce((sum, bucket) => sum + bucket.adminQuota, 0), logs.filter(log => log.username === "root").reduce((sum, log) => sum + log.quota, 0));
+  resetOwnRequestBudget();
+  await ingest.ingestOnce(own);
+  assert.deepEqual(await store.listBuckets(own.id, 0, Number.MAX_SAFE_INTEGER), buckets);
 });
 
 test("窗口太满（超过 3 页）就对半切，最小 5 秒；稀的窗口翻倍到 1 小时；一个窗口这轮翻不完不发布、下一轮续读", async (t) => {

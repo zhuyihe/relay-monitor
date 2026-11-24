@@ -1,11 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
 import { niceTicks } from "../../lib/chart-math";
-import { formatUsd } from "../../lib/format";
+import { money } from "./users/users-format";
 import { useElementWidth } from "../components/use-width";
 import type { TrendDay } from "./users/users-format";
 
-export function OverviewChart({ days, metric, today }: { days: TrendDay[]; metric: "cost" | "users"; today: string }) {
+export function OverviewChart({ days, metric, today, rate }: { days: TrendDay[]; metric: "cost" | "users"; today: string; rate: number }) {
   const [ref, measuredWidth] = useElementWidth();
   const [lastWidth, setLastWidth] = useState(280);
   useEffect(() => { if (measuredWidth > 0) setLastWidth(measuredWidth); }, [measuredWidth]);
@@ -17,13 +17,13 @@ export function OverviewChart({ days, metric, today }: { days: TrendDay[]; metri
   const span = Math.max(1, width - left - right), step = span / Math.max(1, days.length), bw = Math.max(2, step * .62);
   const y = (value: number) => top + (1 - value / ticks.hi) * (height - top - bottom);
   const point = selected == null ? null : days[selected];
-  const text = (value: number) => metric === "cost" ? formatUsd(value) : `${value} 位`;
+  const text = (value: number) => metric === "cost" ? money(value, rate) : `${value} 位`;
   return <div ref={ref} className="jy-ov-chart">
     <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`最近7天普通客户${metric === "cost" ? "消费用量" : "消费人数"}，今天仅到读取时刻`}>
       <title>普通客户用量汇总，未同步的日期留空，不作为全站消费账单。</title>
       {ticks.ticks.filter((value) => metric !== "users" || Number.isInteger(value)).map((value) => <g key={value}>
         <line x1={left} x2={Math.max(left, width - right)} y1={y(value)} y2={y(value)} className="jy-ov-chart-grid" />
-        <text x={left - 8} y={y(value) + 4} textAnchor="end" className="jy-ov-chart-axis">{metric === "cost" && value >= 10000 ? `${value / 10000}万` : value.toLocaleString("en-US")}</text>
+        <text x={left - 8} y={y(value) + 4} textAnchor="end" className="jy-ov-chart-axis">{metric === "cost" && value * rate >= 10000 ? `${value * rate / 10000}万` : (metric === "cost" ? value * rate : value).toLocaleString("en-US")}</text>
       </g>)}
       {days.map((day, index) => <g key={day.day} tabIndex={0} role="button"
         aria-label={`${day.day}，${day.available ? text(day[metric]) : "未同步"}${day.day === today ? "，今天进行中" : ""}`}

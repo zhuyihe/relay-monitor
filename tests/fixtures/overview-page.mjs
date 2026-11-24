@@ -282,7 +282,7 @@ export function overviewFixture(preset = "today") {
     own: { id: "own", name: "初光云序", rate: 1 },
     financial: { amount: selected.spend, asOf: Number.isFinite(selected.financialAt) ? selected.financialAt : Date.parse(selected.financialAt), channels: [], reason: null },
     profit: { asOf: selected.profitAt, accountingTotals: { income: selected.covered, actual: selected.cost, gross: selected.margin, fixedCost: 0, net: selected.margin }, displayCurrency: "USD" },
-    users: { ready: true, balanceReady: true, usageAt: snapshot.usageAt, balanceAt: snapshot.balanceAt, paused: false, fresh: true, syncErrors: [],
+    users: { consumption: { amount: preset === "today" ? snapshot.customers.reduce((total, user) => total + user.today, 0) : snapshot.trend.find(day => day.day === "2026-11-21").cost, asOf: snapshot.usageAt }, ready: true, balanceReady: true, usageAt: snapshot.usageAt, balanceAt: snapshot.balanceAt, paused: false, fresh: true, syncErrors: [],
       activity: { count: selected.active, top: preset === "yesterday" ? yesterday.topCustomers : snapshot.customers.slice(0, 3).map(user => ({ username: user.username, cost: user.today })) },
       customers: snapshot.customers, trend: snapshot.trend.map(day => ({ ...day, available: true, top: day.day === "2026-11-21" ? yesterday.topCustomers : [], newUsers: 0, newTop: [] })), reminderCount: 3 },
     coverage: { day: "2026-11-21", total: yesterday.spend, asOf: Date.parse(yesterday.financialAt), covered: yesterday.covered, missing: yesterday.missing, ratio: yesterday.covered / yesterday.spend, counted: 12, known: 40, timeWindowState: "matched",
