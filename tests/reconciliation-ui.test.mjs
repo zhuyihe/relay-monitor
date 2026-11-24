@@ -25,6 +25,7 @@ import { COPY as USERS_COPY } from "../app/(dashboard)/users/copy.ts";
 import { buildUserDetail, buildUsersView, dayGrid } from "../lib/user-ops-view.js";
 import { buildChurnView, queryChurn } from "../lib/user-ops-churn.js";
 import { usersResponse } from "../server/user-ops-page.js";
+import { buildUserGroupPage, resolveUserGroupsWindow } from "../server/user-groups.js";
 import { COPY as MODELS_COPY } from "../app/(dashboard)/models/copy.ts";
 // 每日利润页上的字（一张对账表，app/(dashboard)/reconciliation/copy.ts）
 import { COPY as PROFIT_COPY } from "../app/(dashboard)/reconciliation/copy.ts";
@@ -2347,7 +2348,7 @@ async function openTrendDaily(t, dailySpend, { viewport } = {}) {
 }
 const dayKeys30 = (today = "2026-11-02") => Array.from({ length: 30 }, (_, i) => { const d = new Date(`${today}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - (29 - i)); return d.toISOString().slice(0, 10); });
 
-test("统一时间组件：余额趋势确认后才切换小时范围，用户分组展开后才读取并沿用原档位", async (t) => {
+test("统一时间组件：余额趋势确认后才切换小时范围，用户分组页签打开才读取并确认切换日期", async (t) => {
   const { page, modal } = await openTrendDaily(t, { state: "ok", source: "upstream", days: dayKeys30().map((day) => ({ day, usd: 1 })) });
   const history = [];
   page.on("request", (request) => { if (/\/history\?hours=/.test(request.url())) history.push(request.url()); });
@@ -2362,22 +2363,21 @@ test("统一时间组件：余额趋势确认后才切换小时范围，用户�
 
   const users = await openUsersPage(t);
   const reads = [];
-  await users.page.route("**/api/own/analytics?*", (route) => { const range = new URL(route.request().url()).searchParams.get("range"); reads.push(range); return fulfill(route, myLayoutAnalytics(range)); });
+  users.page.on("request", request => { const url = new URL(request.url()); if (url.pathname === "/api/users/groups") reads.push(url.searchParams.get("preset")); });
   assert.equal(reads.length, 0);
-  const section = users.page.getByRole("region", { name: USERS_COPY.groups.title, exact: true });
-  await section.getByRole("button", { name: USERS_COPY.groups.title, exact: true }).click();
-  const trigger = section.getByRole("button", { name: USERS_COPY.groups.rangeLabel, exact: true });
+  await users.page.getByRole("tab", { name: USERS_COPY.tabs.groups, exact: true }).click();
+  const trigger = users.page.getByRole("button", { name: "选择时间范围", exact: true });
   await trigger.waitFor();
-  await users.page.waitForFunction(() => document.querySelector('.jy-users-groups-body')?.getAttribute('aria-busy') !== 'true');
+  await users.page.waitForFunction(() => document.querySelector('.jy-ug-results')?.getAttribute('aria-busy') === 'false');
   const before = reads.length;
   await trigger.click();
   const groupsPicker = users.page.locator(".jy-time-range-panel");
-  await groupsPicker.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
-  assert.ok(reads.every((range) => range === "7d"));
+  await groupsPicker.getByRole("button", { name: "昨天", exact: true }).click();
+  assert.ok(reads.length > 0 && reads.every((range) => range === "today"));
   assert.equal(reads.length, before);
-  const groupsQuery = users.page.waitForRequest((request) => request.url().includes("/api/own/analytics?range=30d"));
+  const groupsQuery = users.page.waitForRequest(request => { const url = new URL(request.url()); return url.pathname === "/api/users/groups" && url.searchParams.get("preset") === "yesterday"; });
   await groupsPicker.getByRole("button", { name: "确认", exact: true }).click(); await groupsQuery;
-  assert.deepEqual(reads.slice(before), ["30d"]);
+  assert.deepEqual(reads.slice(before), ["yesterday"]);
 });
 
 test("余额趋势「每天花了多少」：余额小标题和查看范围在一行、细线、近 30 天的柱子（今天浅色、加进来那天一条虚线）、悬停写花费；电脑 1440×900 弹窗不用滚", async (t) => {
@@ -3734,6 +3734,13 @@ async function openUsersPage(t, { viewport, search = "tab=users", initiallyEmpty
       return fulfill(route, usersResponse(data, url.searchParams));
     }
     if (url.pathname === "/api/users/churn") { requests.push(`churn${url.search}`); return fulfill(route, churnResponseOf(full, url.searchParams)); }
+    if (url.pathname === "/api/users/groups") {
+      const input = Object.fromEntries(url.searchParams), window = resolveUserGroupsWindow(input, USERS_NOW, USERS_TZ);
+      return fulfill(route, buildUserGroupPage({ ...window, directory: full.users.map(row => ({ id: row.id, username: row.username, role: 1, status: 1, quotaUsd: row.balanceUsd })),
+        current: full.users, ready: true, rate: full.rate, asOf: USERS_NOW, balanceAt: USERS_NOW, intervalMs: 60000,
+        usage: full.users.map(row => ({ key: row.username, quotaUnits: row.today * 500000, requests: 1 })),
+        flow: full.users.map(row => ({ user: row.username, group: "AWSB全模型-不带F-Coding", quotaUnits: row.today * 500000, requests: 1 })) }, input));
+    }
     if (/^\/api\/users\/\d+\/balance$/.test(url.pathname)) {
       assert.equal(route.request().method(), "POST");
       balanceReads.push(url.pathname);
