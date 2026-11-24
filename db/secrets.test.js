@@ -157,6 +157,22 @@ test("人工登录授权导入后整组加密，轮换保存并重启后沿用�
   assert.doesNotMatch(pool.dump(), /rotated-session-refresh/);
 });
 
+test("余额查询 Key 单独加密、重启保留，修改它不会清除账单会话", async () => {
+  const pool = memoryPool();
+  const store = await new Store(pool, { secretKey: keyA }).load();
+  const session = { accessToken: 'billing-jwt', refreshToken: 'billing-refresh', expiresAt: Date.now() + 3600000 };
+  const station = await store.add({ type: 'sub2api-password', baseUrl: 'https://balance.test', email: 'a@example.test', password: 'billing-password',
+    session, balanceApiKey: 'private-balance-key' });
+  assert.ok(isCiphertext(pool.doc(station.id).balanceApiKey));
+  assert.doesNotMatch(pool.dump(), /private-balance-key|billing-refresh|billing-password/);
+  const reloaded = await new Store(pool, { secretKey: keyA }).load();
+  assert.equal(reloaded.get(station.id).balanceApiKey, 'private-balance-key');
+  await reloaded.update(station.id, { balanceApiKey: 'replacement-balance-key' });
+  const latest = await new Store(pool, { secretKey: keyA }).load();
+  assert.equal(latest.get(station.id).balanceApiKey, 'replacement-balance-key');
+  assert.equal(latest.get(station.id).s2Tokens.refreshToken, session.refreshToken);
+});
+
 test("账单身份密钥：第一次加密时不换新（换了库里存的账单能力就对不上了），重启照旧；明文模式也有一个", async () => {
   const state = plainState();
   state.meta.billing_identity_key = "plain-billing-key";

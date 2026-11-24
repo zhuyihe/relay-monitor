@@ -6,7 +6,7 @@ import { queryStation, STATION_TYPES } from "../../../../lib/providers.js";
 import { readKeyAgent } from "../../../../server/key-agent.js";
 import { UPSTREAM_SECRET_FIELDS, UPSTREAM_TYPES } from "../../../../lib/channel-onboarding.js";
 
-const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"];
+const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password", "balanceApiKey"];
 const PRESERVED_SECRET_FIELDS = new Set(UPSTREAM_SECRET_FIELDS);
 
 function text(value) {
@@ -47,8 +47,15 @@ function testStation(body, saved) {
 
   // 只看这种类型要填的密钥：老数据里残留的、用不到的字段照样不发，但不因此卡住
   const needs = UPSTREAM_TYPES.find((item) => item.value === type)?.needs || [];
+  // 编辑登录凭证时仍核验登录授权；列表的测试读取则沿用当前余额来源。
+  if (!Object.hasOwn(body, "balanceApiKey") && sameType && needs.some((field) => {
+    if (!Object.hasOwn(body, field)) return false;
+    const value = connectionValue(field, body[field]);
+    return (!PRESERVED_SECRET_FIELDS.has(field) || value) && value !== connectionValue(field, saved[field]);
+  })) station.balanceApiKey = "";
+  const activeSecrets = station.balanceApiKey ? ["balanceApiKey"] : needs;
   const droppedSecret = sameType && !sameSite
-    && staleSecrets(UPSTREAM_SECRET_FIELDS.filter((field) => needs.includes(field)), saved, body).length > 0;
+    && staleSecrets(UPSTREAM_SECRET_FIELDS.filter((field) => activeSecrets.includes(field)), saved, body).length > 0;
   return { station, droppedSecret };
 }
 

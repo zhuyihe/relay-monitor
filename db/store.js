@@ -25,8 +25,8 @@ export function stationBusinessVersion(station) {
 
 function clearHiddenCredentials(station) {
   const applicable = { newapi: ["accessToken", "userId"], "newapi-key": ["apiKey"],
-    sub2api: ["accessToken"], "sub2api-password": ["email", "password"], fixed: [] }[station.type];
-  if (applicable) for (const field of ["accessToken", "userId", "apiKey", "email", "password"]) {
+    sub2api: ["accessToken", "balanceApiKey"], "sub2api-password": ["email", "password", "balanceApiKey"], fixed: [] }[station.type];
+  if (applicable) for (const field of ["accessToken", "userId", "apiKey", "email", "password", "balanceApiKey"]) {
     if (!applicable.includes(field)) station[field] = "";
   }
 }
@@ -644,6 +644,7 @@ export class Store {
       accessToken: session?.accessToken || (input.accessToken ? String(input.accessToken).trim() : ""),
       userId: input.userId ? String(input.userId).trim() : "",
       apiKey: input.apiKey ? String(input.apiKey).trim() : "",
+      balanceApiKey: String(input.balanceApiKey || "").trim(),
       email: input.email ? String(input.email).trim() : "",
       password: input.password ? String(input.password) : "",
       lowBalanceUsd: numOrNull(input.lowBalanceUsd),
@@ -710,7 +711,7 @@ export class Store {
       };
       const session = "session" in patch ? importedSub2Session({ type: patch.type || s.type,
         baseUrl: patch.baseUrl ?? s.baseUrl, session: patch.session }) : undefined;
-      const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email"];
+      const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email", "balanceApiKey"];
       for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
       if ("password" in patch) s.password = String(patch.password ?? "");
       if (session) s.accessToken = session.accessToken;
