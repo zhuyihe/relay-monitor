@@ -55,7 +55,8 @@ import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlem
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, RESETTLE_MAX_AGE_MS, RESETTLE_REASON_FLOOR, RESETTLE_REASON_SELECTED_HISTORY, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
+import { segmentKeyTokens, sumKeyStats, observedKeyName, needsKeyIdBilling } from "../lib/reconciliation-keys.js";
+import { createUpstreamKeyLogReader } from "./upstream-key-log.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   reconciliationDisplayCurrency, fixedOffProfitStations, countsInSummary } from "../lib/reconciliation-view.js";
@@ -563,6 +564,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   ownLogStore = null, ownLogIngest = true,
   // 自营站点错误日志的计数（模型供需第 1 步，和整站日志同一条流水线）：测试传内存实现；跟着 ownLogIngest 一起关
   ownErrorStore = null,
+  upstreamKeyLog = null,
   // 减压 PR（总指挥 10-26 定）：没人看「今天」页面的起算点，由调用方注入——生产启动那一处（lib/runtime.js）传 Date.now()，
   // 刚启动、还没有页面来过就从这一刻起算 10 分钟，不然每次重启（watchtower 拉新镜像）都会把「没人看」清零；不传就是 null：
   // 从没有页面来过不算没人看（测试走这条，和以前一样）。重启后要是有人开着页面，页面每 30 秒来一次，马上刷新，不用存库。
@@ -572,6 +574,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ownLog = createOwnLogIngest(rt, { store: ownLogStore || (rt._ownLogStore ||= new OwnLogStore(rt.pool)), log: (...args) => console.debug(...args) });
   const ownErrorLog = createOwnLogIngest(rt, { store: ownErrorStore || (rt._ownErrorStore ||= new OwnLogStore(rt.pool, ERROR_SPEC)), kind: ERROR_KIND, log: (...args) => console.debug(...args) });
   const upstreamPricing = (rt._upstreamPricing ||= createUpstreamPricing(rt));
+  const keyLog = upstreamKeyLog || (rt._upstreamKeyLog ||= createUpstreamKeyLogReader({ pool: rt.pool }));
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
@@ -1231,7 +1234,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const readDay = async (day) => {
       const startMs = dayStartInTz(day, rule.timezone), endMs = Math.min(dayStartInTz(shiftDayLabel(day, 1), rule.timezone), Date.now());
       if (endMs <= startMs) return false;
-      try { return used(await upstreamWindowFor(upstream, metadata, token, { startMs, endMs, timezone: rule.timezone }, { readOnly: true })); }
+      try {
+        const stat = await upstreamWindowFor(upstream, metadata, token, { startMs, endMs, timezone: rule.timezone }, { readOnly: true, rule });
+        if (stat.state === "pending") throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试");
+        return used(stat);
+      }
       catch { throw codedError("KEY_PROBE_UNAVAILABLE", "上游暂时读不到，请稍后再试"); }
     };
     // 一把 Key 一天只算在一个渠道上：往前查碰到「这把 Key 那天在同一个上游里别的绑定的每天 Key 里」就停，那一天和更早的都不算进来
@@ -1366,7 +1373,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const metadata = await metadataFor(upstream, {}); // 和小窗口刚读过的 Key 目录是同一份缓存（getUpstreamKeys，5 分钟），不另读
       const token = metadata?.tokens?.find((item) => item.id === Number(tokenId));
       if (!token) return unknown;
-      const stat = await upstreamWindowFor(upstream, metadata, token, { startMs: fromMs, endMs: now, timezone: tz }, { readOnly: true });
+      const rule = upstream.type === "newapi" ? await knownRuleForKey(upstream, metadata, token.id) : null;
+      const stat = await upstreamWindowFor(upstream, metadata, token, { startMs: fromMs, endMs: now, timezone: tz }, { readOnly: true, rule });
+      if (stat.state === "pending") return unknown;
       const used = [stat?.amountUsd, stat?.knownAmountUsd, stat?.quotaUnits].some((value) => Number(value) > 0);
       return { checked: true, idle: !used };
     })().catch(() => unknown);
@@ -2263,9 +2272,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // 只读查询不核验、不改写账单能力；观测（轮询、刷新）才会核验并保存。
-  async function upstreamWindowFor(upstream, metadata, token, window, { readOnly, statTimeoutMs }) {
+  async function upstreamWindowFor(upstream, metadata, token, window, { readOnly, statTimeoutMs, rule = null, freshAfterMs = 0 }) {
+    const idBilling = upstream.type === "newapi" && needsKeyIdBilling(rule, token, canonicalBillingKey(upstream, metadata, token?.id));
     return queryKeyReconciliationStat(upstream, {
       token, metadata, timezone: window.timezone, capabilityStore: billingCapabilityStore, readOnly, statTimeoutMs,
+      ...(idBilling ? { newApiStat: () => keyLog.read(upstream, { token, metadata, ...window, readOnly, statTimeoutMs, freshAfterMs }) } : {}),
       startMs: window.startMs,
       endMs: window.endMs,
       // 元数据已用同一 PAT 读到身份和 /api/status（与 Key 校验同一份观察），各分段直接复用，不再逐段探测。
@@ -2276,7 +2287,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 一段的上游成本（K1c）：这一段里每把 Key 各取一次再相加（lib/reconciliation-keys.js）。每段只有绑定自己那把（或分段没带 Key）时，
   // 就是原来的单次取数，结果逐字不变；多把 Key、已删 Key 给 K2b 开段以后用。Key 在别的上游里（K2b 的事）这一版读不了，当 Key 身份对不上
-  async function upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId, statTimeoutMs }) {
+  async function upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId, statTimeoutMs, rule = null, freshAfterMs = 0 }) {
     let wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
     // Sub2API 已删 Key 按「总量减别的 Key」算（querySub2DeletedKeyStat）：传进来的 metadata 可能是这一轮缓存的（5 分钟内），
     // 「别的 Key」目录里刚建的、已经有用量的新 Key 还没进来，减法会把新 Key 的钱算进已删 Key。观测/结账（非只读）时强制重读一次
@@ -2287,15 +2298,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       metadata = await metadataFor(upstream, { force: true, timezone: window.timezone });
       wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
     }
-    if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly, statTimeoutMs });
+    if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, wanted[0].token, window, { readOnly, statTimeoutMs, rule, freshAfterMs });
     if (wanted.some((item) => item.foreign)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，这一版读不了");
-    return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly, statTimeoutMs }))));
+    return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly, statTimeoutMs, rule, freshAfterMs }))));
   }
 
   // 上游成本（按 Key 整体取数的规则，生产的绑定都是）：每把 Key 只读它被记下的那些天（reconciliation_rule_day_keys，平时一把，换 Key 那天两把），
   // 连着的天合成一段、一段取一次，再相加。不切时刻、没有过渡段；Key 挪到别的渠道以后，旧 Key 不会在这个渠道没用它的日子里被算进来。
   // 没记过 Key 的天（还没装读取服务、读取服务第一次认出以前）用绑定现在的那把；窗口只有一把 Key 时一段、一次取数，和没有这张表时逐字相同
-  async function upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly, statTimeoutMs }) {
+  async function upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly, statTimeoutMs, freshAfterMs = 0 }) {
     const first = dayKeyInTz(window.startMs, window.timezone), last = dayKeyInTz(Math.max(window.startMs, window.endMs - 1), window.timezone);
     const recorded = (await repository.listDayKeys([rule.id], first, last))[rule.id] || {};
     // 一把 Key 一天只算在一个渠道上：同一天同一把 Key 还在别的（后绑的）绑定里，这天这把 Key 不算在这条上（lostKeyDays，结账和今天现读都走这里）
@@ -2328,7 +2339,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       Object.defineProperty(zero, "keysLost", { value: true, enumerable: false, configurable: true }); // 这个窗口里的 Key 全算在别的绑定上（不是 Key 没用量）
       return zero;
     }
-    const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId, statTimeoutMs })));
+    const results = await Promise.all(pieces.map((piece) => upstreamWindowForSegment(upstream, metadata, token, { keys: [piece.key] }, piece.window, { readOnly, upstreamStationId: rule.upstreamStationId, statTimeoutMs, rule, freshAfterMs })));
     const total = results.length === 1 ? { ...results[0] } : sumKeyStats(results);
     // 每把 Key 各取了多少（每把 Key 分开记账，reconciliation_ledger_keys）：一把 Key 在窗口里分成几段连着的天时各段相加。
     // costUsd 是读到的扣费（读不全是 null），standardUsd 是 Sub2API 的标准计费（老部署没有就是 null）
@@ -2348,15 +2359,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 老绑定（legacy-v3，不是 isScopedBillingPolicy）的上游成本：这个窗口里有每天记下的 Key（手动选 Key、读取服务认出换 Key 都会记）就按它们读，
   // 换 Key 那天旧、新两把都算；没有记录的（没换过 Key、没装过读取服务）照旧按分段上的 Key 读，和以前逐字相同
-  async function upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, window, { readOnly, statTimeoutMs }) {
+  async function upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, window, { readOnly, statTimeoutMs, freshAfterMs = 0 }) {
     const first = dayKeyInTz(window.startMs, window.timezone), last = dayKeyInTz(Math.max(window.startMs, window.endMs - 1), window.timezone);
     const recorded = await repository.listDayKeys([rule.id], first, last).then((all) => all[rule.id] || {}, () => ({}));
-    if (Object.keys(recorded).length) return upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly, statTimeoutMs });
-    return upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId: rule.upstreamStationId, statTimeoutMs });
+    if (Object.keys(recorded).length) return upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly, statTimeoutMs, freshAfterMs });
+    return upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId: rule.upstreamStationId, statTimeoutMs, rule, freshAfterMs });
   }
 
   function tokenNameIsUnique(metadata, token) {
     return metadata.platform === "sub2api" || metadata.tokens.filter((item) => item.name === token.name).length === 1;
+  }
+
+  async function knownRuleForKey(upstream, metadata, tokenId) {
+    const canonicalKey = canonicalBillingKey(upstream, metadata, tokenId);
+    if (!canonicalKey) return null;
+    return (await peerRules()).find((rule) => rule.canonicalKey === canonicalKey && rule.tokenId === Number(tokenId)) || null;
   }
 
   async function validateInput(input, { excludeRuleId = null, authorization = null, existingRule = null, readContext = null } = {}) {
@@ -2898,9 +2915,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const key = metadata.tokens.find((item) => item.id === rule.tokenId);
         // 目录里找不到绑定的 Key：下一轮把这个上游的目录和身份全部重读（P1b 的异常之一）
         if (!key) staleMetadata.add(rule.upstreamStationId);
+        const sameKey = !!key && !!rule.canonicalKey && !!upstreamResource.identity
+          && canonicalBillingKey(upstream, metadata, key.id) === rule.canonicalKey
+          && canonicalBillingKey(upstream, upstreamResource.identity, key.id) === rule.canonicalKey;
+        const renamed = sameKey && (key.name !== rule.tokenName || !!rule.keyNameHistory?.[rule.canonicalKey]);
         const detail = !key ? "上游里找不到这把 Key" : key.status !== 1 ? KEY_DISABLED_TEXT
-          : key.name !== rule.tokenName ? "上游里这把 Key 改名了，去确认"
-            : !tokenNameIsUnique(metadata, key) ? KEY_NAME_AMBIGUOUS_TEXT
+          : key.name !== rule.tokenName && !sameKey ? "上游里这把 Key 改名了，去确认"
+            : !tokenNameIsUnique(metadata, key) && !renamed ? KEY_NAME_AMBIGUOUS_TEXT
               : key.group === "auto" || key.crossGroupRetry ? KEY_GROUP_TEXT : null;
         // 找不到这把 Key：另写一句、按钮去换 Key（variant: missing）；别的（停用、改名、重名、分组）原因就是 detail 这句，放进详细原因里
         const keyHealth = () => health("KEY_INVALID_OR_DENIED", detail, !key ? { variant: "missing" } : { diagnostic: detail });
@@ -2961,12 +2982,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const evidenceMetadata = upstreamProblem ? null : metadata, evidenceToken = upstreamProblem ? null : token;
       if (identityIssue) {
         const upstreamEvidence = !probe && evidenceToken && (!rule.canonicalKey || rule.canonicalKey === actualKey)
-          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe || settle, statTimeoutMs }).catch(() => null) : null;
+          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe || settle, statTimeoutMs, rule }).catch(() => null) : null;
         return unavailable(identityIssue, { metadata: evidenceMetadata, token: evidenceToken, upstream: upstreamEvidence }, false);
       }
       const canonicalKey = upstreamProblem ? rule.canonicalKey : canonicalBillingKey(upstream, metadata, token.id);
       if (!upstreamProblem && (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey)) {
         return unavailable(health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
+      }
+      const renamedHistory = !upstreamProblem && observedKeyName(rule, token, canonicalKey);
+      if (renamedHistory && observe && !settle) {
+        const wrote = await withObservationSourceLock(rule, sourceCredential, () => repository.observeKeyName(rule.id, {
+          canonicalKey, tokenId: token.id, previousName: rule.tokenName, tokenName: token.name, keyNameHistory: renamedHistory,
+        }), billingSource);
+        if (wrote && wrote !== STALE_SCOPE) clearRuleResults(rule.id);
+        // 重新载入规则后按新范围取数，旧查询不能把改名前的结果写回缓存或快照。
+        return STALE_SCOPE;
       }
       // K2b：这条绑定分组了或合组了（keyAgentRoundFor，k-plan §3.3），交给 K2c 重新分组；换成不在已加上游里的 Key（CHANNEL_KEY_UNMATCHED）、读不了完整 Key（KEY_REVEAL_DENIED）也走这里；从第一次认出冲突的那一刻
       // （b）起不结账、不开新段——宁可先不算，也不把钱算给错的那一条。只挡 b 及以后的窗口：b 以前已经结过、或者还没
@@ -3131,6 +3161,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // （downstreamResult.staleFromIdleSkip 在 foldSplitSegments/下面的对象展开里会丢，这里单独记一份）
       const staleFromIdleSkip = [];
       const keyParts = []; // 每段上游取到的每把 Key 的扣费（每把 Key 分开记账用，下面 upstreamKeys）
+      // 结账须使用当天结束满等待期后的读取；重结须使用登记请求之后的读取。
+      // 这个下限跨轮不变，预算用完后可以接着读，不会每一轮把已完成的窗口作废。
+      const keyLogFreshAfterMs = Math.max(resettleRequestedAt || 0, settle ? window.endMs + RECONCILIATION_SETTLE_DELAY_MS : 0);
       const segmentResults = foldSplitSegments(await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow, upstreamWindow: upstreamOwnWindow }) => {
         // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
         const upstreamWindow = upstreamOwnWindow || segmentWindow;
@@ -3139,8 +3172,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
-              ? upstreamWindowForDayKeys(rule, upstream, metadata, token, upstreamWindow, { readOnly: !observe, statTimeoutMs })
-              : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, statTimeoutMs })).catch((error) => ({ error })),
+              ? upstreamWindowForDayKeys(rule, upstream, metadata, token, upstreamWindow, { readOnly: !observe, statTimeoutMs, freshAfterMs: keyLogFreshAfterMs })
+              : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, statTimeoutMs, freshAfterMs: keyLogFreshAfterMs })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle, viaBuckets: !force && !liveRevenue })
@@ -3173,7 +3206,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
-        if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) {
+        if (upstreamResult.emptySecondWindow || upstreamResult.state === "pending" || downstreamResult.emptySecondWindow) {
           const issue = { code: "PENDING", scope: "segment", detail: issueText("PENDING"), observedAt: Date.now() };
           segmentIssues.push(downstreamResult.emptySecondWindow ? issue : upstreamSide(issue));
         }
@@ -3188,7 +3221,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const upstreamUnavailable = upstreamResult.error || upstreamResult.emptySecondWindow || upstreamResult.state !== "complete";
         const downstreamUnavailable = downstreamResult.error || downstreamResult.emptySecondWindow || downstreamResult.state !== "complete";
         const upstreamUsd = upstreamUnavailable ? null : upstreamResult.amountUsd;
-        if (!upstreamResult.error && upstreamResult.state !== "complete" && !upstreamResult.emptySecondWindow) {
+        if (!upstreamResult.error && upstreamResult.state !== "complete" && upstreamResult.state !== "pending" && !upstreamResult.emptySecondWindow) {
           segmentIssues.push(upstreamSide({ code: "UPSTREAM_CAPABILITY_UNVERIFIED", scope: "upstream", detail: issueText("UPSTREAM_CAPABILITY_UNVERIFIED"), observedAt: Date.now() }));
         }
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;

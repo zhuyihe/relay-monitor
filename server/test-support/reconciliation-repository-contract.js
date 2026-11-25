@@ -498,6 +498,26 @@ contract("backfillMissingSegmentRatios fills only ratio-less segments of known g
   assert.deepEqual(await repository.listSegments(`rr_missing${fixture.tag}`), []);
 });
 
+contract("observeKeyName only updates the verified Key name and remembers ID billing without changing accounting segments", async ({ repository, fixture }) => {
+  const canonicalKey = `rename-${fixture.tag}`;
+  const rule = await fixture.createRule({ canonicalKey });
+  const segments = await repository.listSegments(rule.id);
+  const observation = { canonicalKey, tokenId: rule.tokenId, previousName: rule.tokenName, tokenName: "renamed",
+    keyNameHistory: { [canonicalKey]: { names: [rule.tokenName, "renamed"], currentName: "renamed", observedAt: 123 } } };
+  assert.equal(await repository.observeKeyName(rule.id, { ...observation, canonicalKey: "other-account" }), false);
+  assert.equal(await repository.observeKeyName(rule.id, { ...observation, tokenId: rule.tokenId + 1 }), false);
+  assert.equal(await repository.observeKeyName(rule.id, { ...observation, previousName: "stale" }), false);
+  assert.deepEqual(await repository.getRule(rule.id), rule);
+  assert.equal(await repository.observeKeyName(rule.id, observation), true);
+  const renamed = await repository.getRule(rule.id);
+  assert.deepEqual([renamed.tokenId, renamed.tokenName, renamed.keyNameHistory], [rule.tokenId, "renamed", observation.keyNameHistory]);
+  for (const field of ["canonicalKey", "billingPolicy", "scopeVersion", "billingEffectiveFrom", "boundAtMs", "accountingFloorMs", "fixedGroup"]) assert.deepEqual(renamed[field], rule[field]);
+  assert.deepEqual(await repository.listSegments(rule.id), segments);
+  assert.equal(await repository.observeKeyName(rule.id, observation), false, "旧的并发观察不能覆盖新名字");
+  await repository.archiveRule(rule.id);
+  assert.equal(await repository.observeKeyName(rule.id, { ...observation, previousName: "renamed" }), false);
+});
+
 contract("observeSource backfills, splits on group or ratio change and records the observed token", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const t1 = EFFECTIVE_FROM + HOUR, t2 = EFFECTIVE_FROM + 2 * HOUR, t3 = EFFECTIVE_FROM + 3 * HOUR, t4 = EFFECTIVE_FROM + 4 * HOUR, t5 = EFFECTIVE_FROM + 5 * HOUR;

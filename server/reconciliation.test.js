@@ -20,6 +20,7 @@ import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
 import { maskKey } from "../lib/key-fingerprint.js";
 import { resetOwnSelfShare } from "../lib/providers.js";
+import { createUpstreamKeyLogReader } from "./upstream-key-log.js";
 
 beforeEach(() => resetOwnSelfShare()); // 自营站点的 /api/user/self 在 4 分钟内共用（lib/providers.js），测试之间不能互相带
 
@@ -2002,7 +2003,7 @@ function ownTestLogApi(url, logs = []) {
 // 换 Key 的端到端两种规则都跑：immediate（生产的绑定，按 Key 整体取数）和 legacy-v3（旧版，按段取）
 const POLICIES = ["immediate", "legacy"];
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy", usageOf = null, sub2api = null }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, tokenNameOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy", usageOf = null, sub2api = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2096,7 +2097,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
         // 这时 extraTokens 里同一把已经在 distinct 里了，不能列两遍（目录里同一把出现两次，读取会报分页重复）
         const extra = extraTokens.filter((item) => !distinct.some((existing) => Number(existing.token_id) === Number(item.tokenId)))
           .map((item) => ({ token_id: item.tokenId, token_name: item.name }));
-        return reply(200, { success: true, data: { total: distinct.length + extra.length, items: [...distinct, ...extra].map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
+        return reply(200, { success: true, data: { total: distinct.length + extra.length, items: [...distinct, ...extra].map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: tokenNameOf ? tokenNameOf(item.token_id, item.token_name) : item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
           ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
       // usageOf(token_name, 起秒, 止秒（含）) 给了就按 Key 名字、按时间段回用量（量钱对不对：每把 Key 的用量只能被算一次）；没给就一律 state.upstreamQuota
@@ -4683,6 +4684,71 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
   f.rt.onboardingSource = { getSourceCatalogue: () => structuredClone(catalogue), inspectSource: () => ({ version: catalogue.sourceVersion, status: "confirmed", issues: [] }) };
   return { ...f, rows, catalogue, channels };
 }
+
+test("Key 改名自动恢复：新旧名称按 ID 合并、旧名被别的 Key 使用不串账、改回原名和历史固定账单保持正确", async (t) => {
+  for (const policy of ["scoped", "legacy"]) await t.test(policy, async (t) => {
+    let name = "stable";
+    const saved = new Map(); let revision = 0;
+    const store = {
+      async get(source, a, b) { return structuredClone(saved.get(`${source}:${a}:${b}`) || null); },
+      async put(source, a, b, value, expectedRevision) {
+        const key = `${source}:${a}:${b}`;
+        if ((saved.get(key)?.revision ?? null) !== expectedRevision) return null;
+        const entry = { revision: String(++revision), value: structuredClone(value) }; saved.set(key, entry); return entry;
+      },
+    };
+    const f = await completedDayFixture(t, { tokenNameOf: (id, fallback) => id === 9 ? name : id === 10 && name !== "stable" ? "stable" : fallback,
+      moduleOptions: { upstreamKeyLog: createUpstreamKeyLogReader({ store, maxRequests: 500 }) } });
+    if (policy === "legacy") for (const row of f.rows) row.billing_policy = "legacy-v3";
+    const input = { ruleIds: [f.rule.id], preset: "today" };
+    await f.module.queryRules({ ...input, preset: "yesterday" }, { force: true, mode: "observe" });
+    assert.equal(f.state.ledger.length, 1);
+    const ledger = JSON.stringify(f.state.ledger), segments = JSON.stringify(await f.repository.listSegments(f.rule.id));
+    const original = await f.repository.getRule(f.rule.id);
+    const originalFetch = globalThis.fetch, calls = [];
+    const start = resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, Date.now()).startMs / 1000;
+    const logs = [[9, 20, "stable"], [9, 30, "intermediate"], [9, 50, "after"], [10, 900, "stable"]]
+      .map(([token_id, quota, token_name], index) => ({ id: index, token_id, quota, token_name, type: 2, user_id: 7, created_at: start + index + 1 }));
+    t.mock.method(globalThis, "fetch", async (url, init) => {
+      const u = new URL(url);
+      if (u.host === "upstream.test" && (u.pathname === "/api/log/self" || u.pathname === "/api/log/self/stat")) {
+        calls.push(u);
+        assert.equal(u.searchParams.has("token_name"), false, "改名后不能回退到按名字读费用");
+        assert.equal(u.searchParams.has("token_id"), false, "标准 stat 不支持 token_id，不能假装能过滤");
+        const rows = logs.filter((row) => row.created_at >= Number(u.searchParams.get("start_timestamp")) && row.created_at <= Number(u.searchParams.get("end_timestamp")));
+        return Response.json({ success: true, data: u.pathname.endsWith("/stat") ? { quota: rows.reduce((sum, row) => sum + row.quota, 0) } : { items: rows, total: rows.length } });
+      }
+      return originalFetch(url, init);
+    });
+    name = "after";
+    const response = await f.module.queryRules(input, { force: true, mode: "observe" });
+    const result = response.results[0];
+    assert.equal(result.health.issues.some((issue) => issue.code === "KEY_INVALID_OR_DENIED"), false);
+    assert.deepEqual([result.rule.tokenId, result.rule.tokenName, result.upstream.amountUsd, result.calculation.profitUsd], [9, "after", 1, 1.5]);
+    const updated = await f.repository.getRule(f.rule.id);
+    for (const key of ["canonicalKey", "scopeVersion", "billingEffectiveFrom", "boundAtMs", "accountingFloorMs"]) assert.deepEqual(updated[key], original[key]);
+    assert.deepEqual(updated.keyNameHistory[updated.canonicalKey].names, ["stable", "after"]);
+    assert.equal(JSON.stringify(await f.repository.listSegments(f.rule.id)), segments);
+    assert.equal(JSON.stringify(f.state.ledger), ledger);
+    assert.ok(calls.some((url) => url.pathname === "/api/log/self"));
+    name = "stable";
+    const back = (await f.module.queryRules(input, { force: true, mode: "observe" })).results[0];
+    assert.deepEqual([back.rule.tokenName, back.upstream.amountUsd, back.calculation.profitUsd], ["stable", 1, 1.5]);
+    assert.equal(JSON.stringify(f.state.ledger), ledger);
+    const fixed = (await f.module.queryRules({ ...input, preset: "yesterday" }, { cacheOnly: true, noLivePast: true })).results[0];
+    assert.equal(fixed.calculation.profitUsd, 1.5);
+  });
+});
+
+test("改名后的日志尚未读完整时继续等待，不误报 Key 失效、能力不支持或零成本利润", async (t) => {
+  const f = await completedDayFixture(t, { tokenNameOf: (id, name) => id === 9 ? "after" : name,
+    moduleOptions: { upstreamKeyLog: { read: async () => ({ complete: false, quotaUnits: null, quotaPerUnit: 100 }) } } });
+  const result = (await f.module.queryRules({ ruleIds: [f.rule.id], preset: "today" }, { force: true, mode: "observe" })).results[0];
+  assert.deepEqual([result.upstream.state, result.upstream.amountUsd, result.calculation.profitUsd], ["pending", null, null]);
+  assert.ok(result.health.issues.some((issue) => issue.code === "PENDING"));
+  assert.ok(!result.health.issues.some((issue) => ["KEY_INVALID_OR_DENIED", "UPSTREAM_CAPABILITY_UNVERIFIED"].includes(issue.code)));
+  assert.equal(f.state.ledger.length, 0);
+});
 
 test("按所选日期补新渠道历史：昨天补三条、固定后不再取数、更早自选日可补且不改创建时间", async (t) => {
   const f = await completedDayFixture(t, { moduleOptions: { lookbackBudget: 10 } });

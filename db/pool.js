@@ -3,6 +3,7 @@ import mysql from "mysql2/promise";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues, migratedLedgerEntries } from "../lib/reconciliation-ledger.js";
 import { SEGMENT_KEYS_TABLE_SQL, refreshSegmentKeysSql } from "./segment-keys.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME, wrapLegacyBillingIdentity } from "../lib/billing-capability-storage.js";
+import { UPSTREAM_KEY_LOG_TABLE_SQL } from "./upstream-key-log-store.js";
 
 let _pool = null;
 
@@ -230,6 +231,8 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "provider", "VARCHAR(24) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "canonical_key", "VARCHAR(255) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_name_history", "JSON NULL");
+  await pool.query(UPSTREAM_KEY_LOG_TABLE_SQL);
   // K2b：这条绑定的 Key 现在有没处理的事——渠道换成了不在已加上游里的 Key
   // （CHANNEL_KEY_UNMATCHED）、打码撞了又没有读完整 Key 的权限（KEY_REVEAL_DENIED）——第一次认出来的时刻（毫秒），
   // 跨轮记下来，重启不丢。早退只挡从这一刻起的窗口，这一刻以前已经结过（或者还没结到）的日子不受影响；

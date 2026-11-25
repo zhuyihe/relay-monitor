@@ -68,6 +68,7 @@ export function ruleFromRow(row, channels = []) {
     ownStationId: row.own_station_id,
     tokenId: Number(row.token_id),
     tokenName: row.token_name,
+    ...(asJson(row.key_name_history) ? { keyNameHistory: asJson(row.key_name_history) } : {}),
     fixedGroup: row.fixed_group,
     timezone: row.timezone,
     enabled: !!row.enabled,
@@ -555,6 +556,24 @@ export class ReconciliationRepository {
       throw err;
     } finally { conn.release(); }
     return updated;
+  }
+
+  // 只同步已核验为同一把 Key 的名称，不开倍率段、不改核算起点，不触碰账本和历史 Key 行。
+  async observeKeyName(ruleId, { canonicalKey, tokenId, previousName, tokenName, keyNameHistory }) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [[row]] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+      if (!row || !canonicalKey || row.canonical_key !== canonicalKey || Number(row.token_id) !== Number(tokenId)
+        || row.token_name !== previousName) { await conn.rollback(); return false; }
+      await conn.query("UPDATE reconciliation_rules SET token_name = ?, key_name_history = ? WHERE id = ?",
+        [tokenName, JSON.stringify(keyNameHistory), ruleId]);
+      await conn.commit();
+      return true;
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
   }
 
   // Metadata observation is one historical fact: ratio backfills, a possible

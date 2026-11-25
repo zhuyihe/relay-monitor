@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Store } from "./store.js";
 import { isCiphertext, secretKeyOf } from "./secrets.js";
+import { UpstreamKeyLogStore } from "./upstream-key-log-store.js";
 
 // Opt-in only: this fixture replaces tables in this one disposable local schema.
 // Never load .env or fall back to the application's connection defaults.
@@ -53,7 +54,7 @@ const legacyLedgerRows = [
 ];
 
 async function seedLegacySchema(pool) {
-  const tables = ["channel_monitor_links", "reconciliation_fixed_cost_days", "reconciliation_settlement_state", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
+  const tables = ["upstream_key_log_windows", "channel_monitor_links", "reconciliation_fixed_cost_days", "reconciliation_settlement_state", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
     "own_log_pending",
     "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules",
     "station_daily_usage", "history_points", "meta", "stations"];
@@ -153,6 +154,24 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.equal(snapshot.downstream_usd, 10);
     assert.equal(snapshot.difference_usd, 4);
     assert.equal(snapshot.segment_id, segments[0].id);
+  });
+
+  await t.test("Key log aggregation persists progress, isolates accounts and rejects stale worker revisions", async () => {
+    const store = new UpstreamKeyLogStore(pool), source = "a".repeat(64), other = "b".repeat(64);
+    assert.equal(await store.get(source, 1000, 2000), null);
+    const progress = { nextPage: 2, buckets: [[1, 9, 100]] };
+    const saved = await store.put(source, 1000, 2000, progress, null);
+    assert.deepEqual((await store.get(source, 1000, 2000)).value, progress);
+    assert.equal(await store.get(other, 1000, 2000), null);
+    assert.equal(await store.put(source, 1000, 2000, { complete: true }, null), null);
+    assert.equal(await store.put(source, 1000, 2000, { complete: true }, "stale"), null);
+    const complete = { complete: true, buckets: [[1, 9, 100]], at: Date.now() };
+    const updated = await store.put(source, 1000, 2000, complete, saved.revision);
+    assert.ok(updated);
+    assert.equal(await store.put(source, 1000, 2000, progress, saved.revision), null);
+    assert.deepEqual((await store.get(source, 1000, 2000)).value, complete);
+    await store.prune(Date.now() + 41 * 86400000);
+    assert.equal(await store.get(source, 1000, 2000), null);
   });
 
   await t.test("ledger backfill moves single-day settlements once and is skipped after its marker is written", async () => {

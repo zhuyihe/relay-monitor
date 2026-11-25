@@ -22,7 +22,7 @@ import {
 } from "../reconciliation-repository.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME } from "../../lib/billing-capability-storage.js";
 
-const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail", "last_detail"]);
+const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail", "last_detail", "key_name_history"]);
 
 const TABLE_NAMES = {
   rules: "reconciliation_rules",
@@ -389,6 +389,18 @@ export class MemoryReconciliationRepository {
         updated += this.#backfillRatio(tx, ruleId, row.id, ratio, observedAt);
       }
       return updated;
+    });
+  }
+
+  async observeKeyName(ruleId, { canonicalKey, tokenId, previousName, tokenName, keyNameHistory }) {
+    return this.#transaction("observeKeyName", async (tx) => {
+      await this.#lock(tx, `rule:${ruleId}`);
+      const entry = this.#ruleEntry(tx, ruleId);
+      const row = entry?.row;
+      if (!row || row.archived_at || !canonicalKey || row.canonical_key !== canonicalKey || Number(row.token_id) !== Number(tokenId)
+        || row.token_name !== previousName) return false;
+      this.#update(tx, "rules", [entry], { token_name: tokenName, key_name_history: keyNameHistory });
+      return true;
     });
   }
 
